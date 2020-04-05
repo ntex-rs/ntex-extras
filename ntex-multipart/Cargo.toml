@@ -1,0 +1,25 @@
+[package]
+name = "ntex-multipart"
+version = "0.1.0"
+authors = ["krircc <krircc@qq.com>"]
+description = "Multipart support for ntex framework."
+readme = "README.md"
+keywords = ["http", "web", "framework", "async", "futures"]
+homepage = "https://ntex.rs"
+repository = "https://github.com/ntex/ntex-extras.git"
+documentation = "https://docs.rs/ntex-multipart/"
+license = "MIT"
+edition = "2018"
+
+[dependencies]
+ntex = "0.1.1"
+bytes = "0.5.3"
+derive_more = "0.99.2"
+httparse = "1.3"
+futures = "0.3.1"
+log = "0.4"
+mime = "0.3"
+twoway = "0.2"
+
+[dev-dependencies]
+ntex = "0.1.1"
