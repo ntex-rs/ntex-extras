@@ -13,8 +13,8 @@
 //! extractor allows us to get or set session data.
 //!
 //! ```rust,no_run
-//! use actix_web::{web, App, HttpServer, HttpResponse, Error};
-//! use actix_session::{Session, CookieSession};
+//! use ntex::web::{self, App, HttpResponse, Error};
+//! use ntex_session::{Session, CookieSession};
 //!
 //! fn index(session: Session) -> Result<&'static str, Error> {
 //!     // access session data
@@ -28,14 +28,14 @@
 //!     Ok("Welcome!")
 //! }
 //!
-//! #[actix_rt::main]
+//! #[ntex::main]
 //! async fn main() -> std::io::Result<()> {
-//!     HttpServer::new(
+//!     web::server(
 //!         || App::new().wrap(
 //!               CookieSession::signed(&[0; 32]) // <- create cookie based session middleware
 //!                     .secure(false)
 //!              )
-//!             .service(web::resource("/").to(|| HttpResponse::Ok())))
+//!             .service(web::resource("/").to(|| async { HttpResponse::Ok() })))
 //!         .bind("127.0.0.1:59880")?
 //!         .run()
 //!         .await
@@ -43,13 +43,13 @@
 //! ```
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::rc::Rc;
 
-use actix_web::dev::{
-    Extensions, Payload, RequestHead, ServiceRequest, ServiceResponse,
-};
-use actix_web::{Error, FromRequest, HttpMessage, HttpRequest};
 use futures::future::{ok, Ready};
+use ntex::http::{Extensions, Payload, RequestHead};
+use ntex::web::dev::{WebRequest, WebResponse};
+use ntex::web::{Error, FromRequest, HttpRequest};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json;
@@ -66,10 +66,10 @@ pub use crate::cookie::CookieSession;
 /// method. `RequestSession` trait is implemented for `HttpRequest`.
 ///
 /// ```rust
-/// use actix_session::Session;
-/// use actix_web::*;
+/// use ntex_session::Session;
+/// use ntex::web::*;
 ///
-/// fn index(session: Session) -> Result<&'static str> {
+/// fn index(session: Session) -> Result<&'static str, Error> {
 ///     // access session data
 ///     if let Some(count) = session.get::<i32>("counter")? {
 ///         session.set("counter", count + 1)?;
@@ -94,7 +94,7 @@ impl UserSession for HttpRequest {
     }
 }
 
-impl UserSession for ServiceRequest {
+impl<Err> UserSession for WebRequest<Err> {
     fn get_session(&self) -> Session {
         Session::get_session(&mut *self.extensions_mut())
     }
@@ -180,9 +180,9 @@ impl Session {
         }
     }
 
-    pub fn set_session(
+    pub fn set_session<Err>(
         data: impl Iterator<Item = (String, String)>,
-        req: &mut ServiceRequest,
+        req: &WebRequest<Err>,
     ) {
         let session = Session::get_session(&mut *req.extensions_mut());
         let mut inner = session.0.borrow_mut();
@@ -190,7 +190,7 @@ impl Session {
     }
 
     pub fn get_changes<B>(
-        res: &mut ServiceResponse<B>,
+        res: &mut WebResponse<B>,
     ) -> (
         SessionStatus,
         Option<impl Iterator<Item = (String, String)>>,
@@ -221,10 +221,9 @@ impl Session {
 /// Extractor implementation for Session type.
 ///
 /// ```rust
-/// # use actix_web::*;
-/// use actix_session::Session;
+/// use ntex_session::Session;
 ///
-/// fn index(session: Session) -> Result<&'static str> {
+/// fn index(session: Session) -> Result<&'static str, ntex::web::Error> {
 ///     // access session data
 ///     if let Some(count) = session.get::<i32>("counter")? {
 ///         session.set("counter", count + 1)?;
@@ -236,10 +235,9 @@ impl Session {
 /// }
 /// # fn main() {}
 /// ```
-impl FromRequest for Session {
-    type Error = Error;
-    type Future = Ready<Result<Session, Error>>;
-    type Config = ();
+impl<Err> FromRequest<Err> for Session {
+    type Error = Infallible;
+    type Future = Ready<Result<Session, Infallible>>;
 
     #[inline]
     fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
@@ -249,7 +247,7 @@ impl FromRequest for Session {
 
 #[cfg(test)]
 mod tests {
-    use actix_web::{test, HttpResponse};
+    use ntex::web::{test, HttpResponse};
 
     use super::*;
 

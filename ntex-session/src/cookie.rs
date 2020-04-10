@@ -16,16 +16,19 @@
 //! for cookie session - when this value is changed, all session data is lost.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::marker::PhantomData;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
-use actix_service::{Service, Transform};
-use actix_web::cookie::{Cookie, CookieJar, Key, SameSite};
-use actix_web::dev::{ServiceRequest, ServiceResponse};
-use actix_web::http::{header::SET_COOKIE, HeaderValue};
-use actix_web::{Error, HttpMessage, ResponseError};
+use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
 use futures::future::{ok, FutureExt, LocalBoxFuture, Ready};
+use ntex::http::header::{HeaderValue, SET_COOKIE};
+use ntex::http::HttpMessage;
+use ntex::service::{Service, Transform};
+use ntex::web::dev::{WebRequest, WebResponse};
+use ntex::web::{DefaultError, ErrorRenderer, WebResponseError};
 use serde_json::error::Error as JsonError;
 use time::{Duration, OffsetDateTime};
 
@@ -42,14 +45,14 @@ pub enum CookieSessionError {
     Serialize(JsonError),
 }
 
-impl ResponseError for CookieSessionError {}
+impl WebResponseError<DefaultError> for CookieSessionError {}
 
 enum CookieSecurity {
     Signed,
     Private,
 }
 
-struct CookieSessionInner {
+struct CookieSessionInner<Err> {
     key: Key,
     security: CookieSecurity,
     name: String,
@@ -60,10 +63,11 @@ struct CookieSessionInner {
     max_age: Option<Duration>,
     expires_in: Option<Duration>,
     same_site: Option<SameSite>,
+    _t: PhantomData<Err>,
 }
 
-impl CookieSessionInner {
-    fn new(key: &[u8], security: CookieSecurity) -> CookieSessionInner {
+impl<Err> CookieSessionInner<Err> {
+    fn new(key: &[u8], security: CookieSecurity) -> Self {
         CookieSessionInner {
             security,
             key: Key::from_master(key),
@@ -75,14 +79,15 @@ impl CookieSessionInner {
             max_age: None,
             expires_in: None,
             same_site: None,
+            _t: PhantomData,
         }
     }
 
     fn set_cookie<B>(
         &self,
-        res: &mut ServiceResponse<B>,
+        res: &mut WebResponse<B>,
         state: impl Iterator<Item = (String, String)>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), CookieSessionError> {
         let state: HashMap<String, String> = state.collect();
         let value =
             serde_json::to_string(&state).map_err(CookieSessionError::Serialize)?;
@@ -119,7 +124,7 @@ impl CookieSessionInner {
         }
 
         for cookie in jar.delta() {
-            let val = HeaderValue::from_str(&cookie.encoded().to_string())?;
+            let val = HeaderValue::from_str(&cookie.encoded().to_string()).unwrap();
             res.headers_mut().append(SET_COOKIE, val);
         }
 
@@ -127,19 +132,19 @@ impl CookieSessionInner {
     }
 
     /// invalidates session cookie
-    fn remove_cookie<B>(&self, res: &mut ServiceResponse<B>) -> Result<(), Error> {
+    fn remove_cookie<B>(&self, res: &mut WebResponse<B>) -> Result<(), Infallible> {
         let mut cookie = Cookie::named(self.name.clone());
         cookie.set_value("");
         cookie.set_max_age(Duration::zero());
         cookie.set_expires(OffsetDateTime::now() - Duration::days(365));
 
-        let val = HeaderValue::from_str(&cookie.to_string())?;
+        let val = HeaderValue::from_str(&cookie.to_string()).unwrap();
         res.headers_mut().append(SET_COOKIE, val);
 
         Ok(())
     }
 
-    fn load(&self, req: &ServiceRequest) -> (bool, HashMap<String, String>) {
+    fn load(&self, req: &WebRequest<Err>) -> (bool, HashMap<String, String>) {
         if let Ok(cookies) = req.cookies() {
             for cookie in cookies.iter() {
                 if cookie.name() == self.name {
@@ -193,26 +198,26 @@ impl CookieSessionInner {
 /// # Example
 ///
 /// ```rust
-/// use actix_session::CookieSession;
-/// use actix_web::{web, App, HttpResponse, HttpServer};
+/// use ntex_session::CookieSession;
+/// use ntex::web::{self, App, HttpResponse, HttpServer};
 ///
 /// fn main() {
 ///     let app = App::new().wrap(
 ///         CookieSession::signed(&[0; 32])
 ///             .domain("www.rust-lang.org")
-///             .name("actix_session")
+///             .name("ntex-session")
 ///             .path("/")
 ///             .secure(true))
-///         .service(web::resource("/").to(|| HttpResponse::Ok()));
+///         .service(web::resource("/").to(|| async { HttpResponse::Ok() }));
 /// }
 /// ```
-pub struct CookieSession(Rc<CookieSessionInner>);
+pub struct CookieSession<Err>(Rc<CookieSessionInner<Err>>);
 
-impl CookieSession {
+impl<Err> CookieSession<Err> {
     /// Construct new *signed* `CookieSessionBackend` instance.
     ///
     /// Panics if key length is less than 32 bytes.
-    pub fn signed(key: &[u8]) -> CookieSession {
+    pub fn signed(key: &[u8]) -> Self {
         CookieSession(Rc::new(CookieSessionInner::new(
             key,
             CookieSecurity::Signed,
@@ -222,7 +227,7 @@ impl CookieSession {
     /// Construct new *private* `CookieSessionBackend` instance.
     ///
     /// Panics if key length is less than 32 bytes.
-    pub fn private(key: &[u8]) -> CookieSession {
+    pub fn private(key: &[u8]) -> Self {
         CookieSession(Rc::new(CookieSessionInner::new(
             key,
             CookieSecurity::Private,
@@ -230,19 +235,19 @@ impl CookieSession {
     }
 
     /// Sets the `path` field in the session cookie being built.
-    pub fn path<S: Into<String>>(mut self, value: S) -> CookieSession {
+    pub fn path<S: Into<String>>(mut self, value: S) -> Self {
         Rc::get_mut(&mut self.0).unwrap().path = value.into();
         self
     }
 
     /// Sets the `name` field in the session cookie being built.
-    pub fn name<S: Into<String>>(mut self, value: S) -> CookieSession {
+    pub fn name<S: Into<String>>(mut self, value: S) -> Self {
         Rc::get_mut(&mut self.0).unwrap().name = value.into();
         self
     }
 
     /// Sets the `domain` field in the session cookie being built.
-    pub fn domain<S: Into<String>>(mut self, value: S) -> CookieSession {
+    pub fn domain<S: Into<String>>(mut self, value: S) -> Self {
         Rc::get_mut(&mut self.0).unwrap().domain = Some(value.into());
         self
     }
@@ -251,57 +256,60 @@ impl CookieSession {
     ///
     /// If the `secure` field is set, a cookie will only be transmitted when the
     /// connection is secure - i.e. `https`
-    pub fn secure(mut self, value: bool) -> CookieSession {
+    pub fn secure(mut self, value: bool) -> Self {
         Rc::get_mut(&mut self.0).unwrap().secure = value;
         self
     }
 
     /// Sets the `http_only` field in the session cookie being built.
-    pub fn http_only(mut self, value: bool) -> CookieSession {
+    pub fn http_only(mut self, value: bool) -> Self {
         Rc::get_mut(&mut self.0).unwrap().http_only = value;
         self
     }
 
     /// Sets the `same_site` field in the session cookie being built.
-    pub fn same_site(mut self, value: SameSite) -> CookieSession {
+    pub fn same_site(mut self, value: SameSite) -> Self {
         Rc::get_mut(&mut self.0).unwrap().same_site = Some(value);
         self
     }
 
     /// Sets the `max-age` field in the session cookie being built.
-    pub fn max_age(self, seconds: i64) -> CookieSession {
+    pub fn max_age(self, seconds: i64) -> Self {
         self.max_age_time(Duration::seconds(seconds))
     }
 
     /// Sets the `max-age` field in the session cookie being built.
-    pub fn max_age_time(mut self, value: time::Duration) -> CookieSession {
+    pub fn max_age_time(mut self, value: time::Duration) -> Self {
         Rc::get_mut(&mut self.0).unwrap().max_age = Some(value);
         self
     }
 
     /// Sets the `expires` field in the session cookie being built.
-    pub fn expires_in(self, seconds: i64) -> CookieSession {
+    pub fn expires_in(self, seconds: i64) -> Self {
         self.expires_in_time(Duration::seconds(seconds))
     }
 
     /// Sets the `expires` field in the session cookie being built.
-    pub fn expires_in_time(mut self, value: Duration) -> CookieSession {
+    pub fn expires_in_time(mut self, value: Duration) -> Self {
         Rc::get_mut(&mut self.0).unwrap().expires_in = Some(value);
         self
     }
 }
 
-impl<S, B: 'static> Transform<S> for CookieSession
+impl<S, B, Err> Transform<S> for CookieSession<Err>
 where
-    S: Service<Request = ServiceRequest, Response = ServiceResponse<B>>,
+    S: Service<Request = WebRequest<Err>, Response = WebResponse<B>>,
     S::Future: 'static,
     S::Error: 'static,
+    B: 'static,
+    Err: ErrorRenderer,
+    Err::Container: From<CookieSessionError>,
 {
-    type Request = ServiceRequest;
-    type Response = ServiceResponse<B>;
+    type Request = WebRequest<Err>;
+    type Response = WebResponse<B>;
     type Error = S::Error;
     type InitError = ();
-    type Transform = CookieSessionMiddleware<S>;
+    type Transform = CookieSessionMiddleware<S, Err>;
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
@@ -313,24 +321,31 @@ where
 }
 
 /// Cookie session middleware
-pub struct CookieSessionMiddleware<S> {
+pub struct CookieSessionMiddleware<S, Err> {
     service: S,
-    inner: Rc<CookieSessionInner>,
+    inner: Rc<CookieSessionInner<Err>>,
 }
 
-impl<S, B: 'static> Service for CookieSessionMiddleware<S>
+impl<S, B, Err> Service for CookieSessionMiddleware<S, Err>
 where
-    S: Service<Request = ServiceRequest, Response = ServiceResponse<B>>,
+    S: Service<Request = WebRequest<Err>, Response = WebResponse<B>>,
     S::Future: 'static,
     S::Error: 'static,
+    B: 'static,
+    Err: ErrorRenderer,
+    Err::Container: From<CookieSessionError>,
 {
-    type Request = ServiceRequest;
-    type Response = ServiceResponse<B>;
+    type Request = WebRequest<Err>;
+    type Response = WebResponse<B>;
     type Error = S::Error;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
-    fn poll_ready(&mut self, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&self, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         self.service.poll_ready(cx)
+    }
+
+    fn poll_shutdown(&self, cx: &mut Context, is_error: bool) -> Poll<()> {
+        self.service.poll_shutdown(cx, is_error)
     }
 
     /// On first request, a new session cookie is returned in response, regardless
@@ -338,7 +353,7 @@ where
     /// session state changes, then set-cookie is returned in response.  As
     /// a user logs out, call session.purge() to set SessionStatus accordingly
     /// and this will trigger removal of the session cookie in the response.
-    fn call(&mut self, mut req: ServiceRequest) -> Self::Future {
+    fn call(&self, mut req: WebRequest<Err>) -> Self::Future {
         let inner = self.inner.clone();
         let (is_new, state) = self.inner.load(&req);
         let prolong_expiration = self.inner.expires_in.is_some();
@@ -351,17 +366,17 @@ where
                 match Session::get_changes(&mut res) {
                     (SessionStatus::Changed, Some(state))
                     | (SessionStatus::Renewed, Some(state)) => {
-                        res.checked_expr(|res| inner.set_cookie(res, state))
+                        res.checked_expr::<_, _, Err>(|res| inner.set_cookie(res, state))
                     }
                     (SessionStatus::Unchanged, Some(state)) if prolong_expiration => {
-                        res.checked_expr(|res| inner.set_cookie(res, state))
+                        res.checked_expr::<_, _, Err>(|res| inner.set_cookie(res, state))
                     }
                     (SessionStatus::Unchanged, _) =>
                     // set a new session cookie upon first request (new client)
                     {
                         if is_new {
                             let state: HashMap<String, String> = HashMap::new();
-                            res.checked_expr(|res| {
+                            res.checked_expr::<_, _, Err>(|res| {
                                 inner.set_cookie(res, state.into_iter())
                             })
                         } else {
@@ -383,12 +398,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test, web, App};
     use bytes::Bytes;
+    use ntex::web::{self, test, App};
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn cookie_session() {
-        let mut app = test::init_service(
+        let app = test::init_service(
             App::new()
                 .wrap(CookieSession::signed(&[0; 32]).secure(false))
                 .service(web::resource("/").to(|ses: Session| async move {
@@ -407,9 +422,9 @@ mod tests {
             .is_some());
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn private_cookie() {
-        let mut app = test::init_service(
+        let app = test::init_service(
             App::new()
                 .wrap(CookieSession::private(&[0; 32]).secure(false))
                 .service(web::resource("/").to(|ses: Session| async move {
@@ -428,9 +443,9 @@ mod tests {
             .is_some());
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn cookie_session_extractor() {
-        let mut app = test::init_service(
+        let app = test::init_service(
             App::new()
                 .wrap(CookieSession::signed(&[0; 32]).secure(false))
                 .service(web::resource("/").to(|ses: Session| async move {
@@ -449,9 +464,9 @@ mod tests {
             .is_some());
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn basics() {
-        let mut app = test::init_service(
+        let app = test::init_service(
             App::new()
                 .wrap(
                     CookieSession::signed(&[0; 32])
@@ -486,13 +501,13 @@ mod tests {
         let request = test::TestRequest::with_uri("/test/")
             .cookie(cookie)
             .to_request();
-        let body = test::read_response(&mut app, request).await;
+        let body = test::read_response(&app, request).await;
         assert_eq!(body, Bytes::from_static(b"counter: 100"));
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn prolong_expiration() {
-        let mut app = test::init_service(
+        let app = test::init_service(
             App::new()
                 .wrap(CookieSession::signed(&[0; 32]).secure(false).expires_in(60))
                 .service(web::resource("/").to(|ses: Session| async move {
@@ -516,7 +531,7 @@ mod tests {
             .expires()
             .expect("Expiration is set");
 
-        actix_rt::time::delay_for(std::time::Duration::from_secs(1)).await;
+        ntex::rt::time::delay_for(std::time::Duration::from_secs(1)).await;
 
         let request = test::TestRequest::with_uri("/test/").to_request();
         let response = app.call(request).await.unwrap();

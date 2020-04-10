@@ -19,11 +19,12 @@ path = "src/lib.rs"
 default = ["cookie-session"]
 
 # sessions feature, session require "ring" crate and c compiler
-cookie-session = [] # "actix-web/secure-cookies"]
+cookie-session = ["cookie/secure", "ntex/cookie"]
 
 [dependencies]
 ntex = "0.1.7"
 bytes = "0.5.4"
+cookie = "0.13.3"
 derive_more = "0.99.5"
 futures = "0.3.4"
 serde = "1.0"
