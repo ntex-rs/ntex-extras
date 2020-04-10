@@ -1,0 +1,22 @@
+[package]
+name = "actix-web-codegen"
+version = "0.2.1"
+description = "Actix web proc macros"
+readme = "README.md"
+authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
+license = "MIT/Apache-2.0"
+edition = "2018"
+workspace = ".."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "^1"
+syn = { version = "^1", features = ["full", "parsing"] }
+proc-macro2 = "^1"
+
+[dev-dependencies]
+actix-rt = "1.0.0"
+actix-web = "3.0.0-alpha.1"
+futures = "0.3.1"
