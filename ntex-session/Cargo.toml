@@ -1,0 +1,31 @@
+[package]
+name = "ntex-session"
+version = "0.1.0"
+authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
+description = "Session for ntex web framework."
+readme = "README.md"
+keywords = ["http", "web", "framework", "async", "futures"]
+homepage = "https://ntex.rs"
+repository = "https://github.com/ntex-rs/ntex-extras.git"
+documentation = "https://docs.rs/ntex-session/"
+license = "MIT"
+edition = "2018"
+
+[lib]
+name = "ntex_session"
+path = "src/lib.rs"
+
+[features]
+default = ["cookie-session"]
+
+# sessions feature, session require "ring" crate and c compiler
+cookie-session = [] # "actix-web/secure-cookies"]
+
+[dependencies]
+ntex = "0.1.7"
+bytes = "0.5.4"
+derive_more = "0.99.5"
+futures = "0.3.4"
+serde = "1.0"
+serde_json = "1.0"
+time = { version = "0.2.5", default-features = false, features = ["std"] }

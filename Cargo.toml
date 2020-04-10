@@ -1,4 +1,8 @@
 [workspace]
 members = [
+  "ntex-cors",
+  "ntex-files",
+  "ntex-identity",
   "ntex-multipart",
+  "ntex-session",
 ]
