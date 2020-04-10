@@ -12,11 +12,9 @@ use futures::stream::{LocalBoxStream, Stream, StreamExt};
 use httparse;
 use mime;
 
-use actix_utils::task::LocalWaker;
-use actix_web::error::{ParseError, PayloadError};
-use actix_web::http::header::{
-    self, ContentDisposition, HeaderMap, HeaderName, HeaderValue,
-};
+use ntex::http::error::{ParseError, PayloadError};
+use ntex::http::header::{self, HeaderMap, HeaderName, HeaderValue};
+use ntex::task::LocalWaker;
 
 use crate::error::MultipartError;
 
@@ -400,18 +398,6 @@ impl Field {
     /// Get the content type of the field
     pub fn content_type(&self) -> &mime::Mime {
         &self.ct
-    }
-
-    /// Get the content disposition of the field, if it exists
-    pub fn content_disposition(&self) -> Option<ContentDisposition> {
-        // RFC 7578: 'Each part MUST contain a Content-Disposition header field
-        // where the disposition type is "form-data".'
-        if let Some(content_disposition) = self.headers.get(&header::CONTENT_DISPOSITION)
-        {
-            ContentDisposition::from_raw(content_disposition).ok()
-        } else {
-            None
-        }
     }
 }
 
@@ -810,13 +796,12 @@ impl PayloadBuffer {
 mod tests {
     use super::*;
 
-    use actix_http::h1::Payload;
-    use actix_utils::mpsc;
-    use actix_web::http::header::{DispositionParam, DispositionType};
     use bytes::Bytes;
     use futures::future::lazy;
+    use ntex::channel::mpsc;
+    use ntex::http::h1::Payload;
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn test_boundary() {
         let headers = HeaderMap::new();
         match Multipart::boundary(&headers) {
@@ -929,7 +914,7 @@ mod tests {
         (bytes, headers)
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn test_multipart_no_end_crlf() {
         let (sender, payload) = create_stream();
         let (mut bytes, headers) = create_simple_request_with_header();
@@ -956,7 +941,7 @@ mod tests {
         }
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn test_multipart() {
         let (sender, payload) = create_stream();
         let (bytes, headers) = create_simple_request_with_header();
@@ -966,10 +951,6 @@ mod tests {
         let mut multipart = Multipart::new(&headers, payload);
         match multipart.next().await {
             Some(Ok(mut field)) => {
-                let cd = field.content_disposition().unwrap();
-                assert_eq!(cd.disposition, DispositionType::FormData);
-                assert_eq!(cd.parameters[0], DispositionParam::Name("file".into()));
-
                 assert_eq!(field.content_type().type_(), mime::TEXT);
                 assert_eq!(field.content_type().subtype(), mime::PLAIN);
 
@@ -1020,7 +1001,7 @@ mod tests {
         }
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn test_stream() {
         let (bytes, headers) = create_simple_request_with_header();
         let payload = SlowStream::new(bytes);
@@ -1028,10 +1009,6 @@ mod tests {
         let mut multipart = Multipart::new(&headers, payload);
         match multipart.next().await.unwrap() {
             Ok(mut field) => {
-                let cd = field.content_disposition().unwrap();
-                assert_eq!(cd.disposition, DispositionType::FormData);
-                assert_eq!(cd.parameters[0], DispositionParam::Name("file".into()));
-
                 assert_eq!(field.content_type().type_(), mime::TEXT);
                 assert_eq!(field.content_type().subtype(), mime::PLAIN);
 
@@ -1056,7 +1033,7 @@ mod tests {
         }
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn test_basic() {
         let (_, payload) = Payload::create(false);
         let mut payload = PayloadBuffer::new(payload);
@@ -1066,7 +1043,7 @@ mod tests {
         assert_eq!(None, payload.read_max(1).unwrap());
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn test_eof() {
         let (mut sender, payload) = Payload::create(false);
         let mut payload = PayloadBuffer::new(payload);
@@ -1082,7 +1059,7 @@ mod tests {
         assert!(payload.eof);
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn test_err() {
         let (mut sender, payload) = Payload::create(false);
         let mut payload = PayloadBuffer::new(payload);
@@ -1091,7 +1068,7 @@ mod tests {
         lazy(|cx| payload.poll_stream(cx)).await.err().unwrap();
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn test_readmax() {
         let (mut sender, payload) = Payload::create(false);
         let mut payload = PayloadBuffer::new(payload);
@@ -1108,7 +1085,7 @@ mod tests {
         assert_eq!(payload.buf.len(), 0);
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn test_readexactly() {
         let (mut sender, payload) = Payload::create(false);
         let mut payload = PayloadBuffer::new(payload);
@@ -1126,7 +1103,7 @@ mod tests {
         assert_eq!(payload.buf.len(), 4);
     }
 
-    #[actix_rt::test]
+    #[ntex::test]
     async fn test_readuntil() {
         let (mut sender, payload) = Payload::create(false);
         let mut payload = PayloadBuffer::new(payload);

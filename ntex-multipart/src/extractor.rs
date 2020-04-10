@@ -1,6 +1,9 @@
 //! Multipart payload support
-use actix_web::{dev::Payload, Error, FromRequest, HttpRequest};
+use std::convert::Infallible;
+
 use futures::future::{ok, Ready};
+use ntex::http::Payload;
+use ntex::web::{FromRequest, HttpRequest};
 
 use crate::server::Multipart;
 
@@ -12,8 +15,8 @@ use crate::server::Multipart;
 ///
 /// ```rust
 /// use futures::{Stream, StreamExt};
-/// use actix_web::{web, HttpResponse, Error};
-/// use actix_multipart as mp;
+/// use ntex::web::{self, HttpResponse, Error};
+/// use ntex_multipart as mp;
 ///
 /// async fn index(mut payload: mp::Multipart) -> Result<HttpResponse, Error> {
 ///     // iterate over multipart stream
@@ -29,10 +32,9 @@ use crate::server::Multipart;
 /// }
 /// # fn main() {}
 /// ```
-impl FromRequest for Multipart {
-    type Error = Error;
-    type Future = Ready<Result<Multipart, Error>>;
-    type Config = ();
+impl<Err> FromRequest<Err> for Multipart {
+    type Error = Infallible;
+    type Future = Ready<Result<Multipart, Infallible>>;
 
     #[inline]
     fn from_request(req: &HttpRequest, payload: &mut Payload) -> Self::Future {

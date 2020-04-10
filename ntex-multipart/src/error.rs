@@ -1,8 +1,8 @@
 //! Error and Result module
-use actix_web::error::{ParseError, PayloadError};
-use actix_web::http::StatusCode;
-use actix_web::ResponseError;
 use derive_more::{Display, From};
+use ntex::http::error::{ParseError, PayloadError};
+use ntex::http::StatusCode;
+use ntex::web::error::{DefaultError, WebResponseError};
 
 /// A set of errors that can occur during parsing multipart streams
 #[derive(Debug, Display, From)]
@@ -36,7 +36,7 @@ pub enum MultipartError {
 impl std::error::Error for MultipartError {}
 
 /// Return `BadRequest` for `MultipartError`
-impl ResponseError for MultipartError {
+impl WebResponseError<DefaultError> for MultipartError {
     fn status_code(&self) -> StatusCode {
         StatusCode::BAD_REQUEST
     }
@@ -45,7 +45,7 @@ impl ResponseError for MultipartError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::HttpResponse;
+    use ntex::web::HttpResponse;
 
     #[test]
     fn test_multipart_error() {
