@@ -190,11 +190,11 @@ pub trait IdentityPolicy<Err>: Sized + 'static {
     fn from_request(&self, request: &mut WebRequest<Err>) -> Self::Future;
 
     /// Write changes to response
-    fn to_response<B>(
+    fn to_response(
         &self,
         identity: Option<String>,
         changed: bool,
-        response: &mut WebResponse<B>,
+        response: &mut WebResponse,
     ) -> Self::ResponseFuture;
 }
 
@@ -226,18 +226,17 @@ impl<T, Err> IdentityService<T, Err> {
     }
 }
 
-impl<S, T, B, Err> Transform<S> for IdentityService<T, Err>
+impl<S, T, Err> Transform<S> for IdentityService<T, Err>
 where
-    S: Service<Request = WebRequest<Err>, Response = WebResponse<B>> + 'static,
+    S: Service<Request = WebRequest<Err>, Response = WebResponse> + 'static,
     S::Future: 'static,
     T: IdentityPolicy<Err>,
-    B: 'static,
     Err: ErrorRenderer,
     Err::Container: From<S::Error>,
     Err::Container: From<T::Error>,
 {
     type Request = WebRequest<Err>;
-    type Response = WebResponse<B>;
+    type Response = WebResponse;
     type Error = S::Error;
     type InitError = ();
     type Transform = IdentityServiceMiddleware<S, T, Err>;
@@ -269,10 +268,9 @@ impl<S, T, Err> Clone for IdentityServiceMiddleware<S, T, Err> {
     }
 }
 
-impl<S, T, B, Err> Service for IdentityServiceMiddleware<S, T, Err>
+impl<S, T, Err> Service for IdentityServiceMiddleware<S, T, Err>
 where
-    B: 'static,
-    S: Service<Request = WebRequest<Err>, Response = WebResponse<B>> + 'static,
+    S: Service<Request = WebRequest<Err>, Response = WebResponse> + 'static,
     S::Future: 'static,
     T: IdentityPolicy<Err>,
     Err: ErrorRenderer,
@@ -280,7 +278,7 @@ where
     Err::Container: From<T::Error>,
 {
     type Request = WebRequest<Err>;
-    type Response = WebResponse<B>;
+    type Response = WebResponse;
     type Error = S::Error;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
@@ -370,9 +368,9 @@ impl<Err: ErrorRenderer> CookieIdentityInner<Err> {
         }
     }
 
-    fn set_cookie<B>(
+    fn set_cookie(
         &self,
-        resp: &mut WebResponse<B>,
+        resp: &mut WebResponse,
         value: Option<CookieValue>,
     ) -> Result<(), CookieIdentityPolicyError> {
         let add_cookie = value.is_some();
@@ -592,11 +590,11 @@ impl<Err: ErrorRenderer> IdentityPolicy<Err> for CookieIdentityPolicy<Err> {
         ))
     }
 
-    fn to_response<B>(
+    fn to_response(
         &self,
         id: Option<String>,
         changed: bool,
-        res: &mut WebResponse<B>,
+        res: &mut WebResponse,
     ) -> Self::ResponseFuture {
         let _ = if changed {
             let login_timestamp = SystemTime::now();

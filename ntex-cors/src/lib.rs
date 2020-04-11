@@ -48,7 +48,6 @@
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::iter::FromIterator;
-use std::marker::PhantomData;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
@@ -172,19 +171,14 @@ impl<T> AllOrSome<T> {
 ///     .max_age(3600);
 /// ```
 #[derive(Default)]
-pub struct Cors<Err: ErrorRenderer> {
+pub struct Cors {
     cors: Option<Inner>,
     methods: bool,
     expose_hdrs: HashSet<HeaderName>,
     error: Option<HttpError>,
-    _t: PhantomData<Err>,
 }
 
-impl<Err: ErrorRenderer> Cors<Err>
-where
-    Err: ErrorRenderer,
-    CorsError: WebResponseError<Err>,
-{
+impl Cors {
     /// Build a new CORS middleware instance
     pub fn new() -> Self {
         Cors {
@@ -203,12 +197,11 @@ where
             methods: false,
             error: None,
             expose_hdrs: HashSet::new(),
-            _t: PhantomData,
         }
     }
 
     /// Build a new CORS default middleware
-    pub fn default() -> CorsFactory<Err> {
+    pub fn default() -> CorsFactory {
         let inner = Inner {
             origins: AllOrSome::default(),
             origins_str: None,
@@ -234,7 +227,6 @@ where
         };
         CorsFactory {
             inner: Rc::new(inner),
-            _t: PhantomData,
         }
     }
 
@@ -477,7 +469,7 @@ where
     }
 
     /// Construct cors middleware
-    pub fn finish(self) -> CorsFactory<Err> {
+    pub fn finish(self) -> CorsFactory {
         let mut slf = if !self.methods {
             self.allowed_methods(vec![
                 Method::GET,
@@ -520,7 +512,6 @@ where
 
         CorsFactory {
             inner: Rc::new(cors),
-            _t: PhantomData,
         }
     }
 }
@@ -539,32 +530,29 @@ fn cors<'a>(
 ///
 /// The Cors struct contains the settings for CORS requests to be validated and
 /// for responses to be generated.
-pub struct CorsFactory<Err> {
+pub struct CorsFactory {
     inner: Rc<Inner>,
-    _t: PhantomData<Err>,
 }
 
-impl<S, B, Err> Transform<S> for CorsFactory<Err>
+impl<S, Err> Transform<S> for CorsFactory
 where
-    S: Service<Request = WebRequest<Err>, Response = WebResponse<B>>,
+    S: Service<Request = WebRequest<Err>, Response = WebResponse>,
     S::Future: 'static,
-    B: 'static,
     Err: ErrorRenderer,
     Err::Container: From<S::Error>,
     CorsError: WebResponseError<Err>,
 {
     type Request = WebRequest<Err>;
-    type Response = WebResponse<B>;
+    type Response = WebResponse;
     type Error = S::Error;
     type InitError = ();
-    type Transform = CorsMiddleware<S, Err>;
+    type Transform = CorsMiddleware<S>;
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
         ok(CorsMiddleware {
             service,
             inner: self.inner.clone(),
-            _t: PhantomData,
         })
     }
 }
@@ -574,10 +562,9 @@ where
 /// The Cors struct contains the settings for CORS requests to be validated and
 /// for responses to be generated.
 #[derive(Clone)]
-pub struct CorsMiddleware<S, Err> {
+pub struct CorsMiddleware<S> {
     service: S,
     inner: Rc<Inner>,
-    _t: PhantomData<Err>,
 }
 
 struct Inner {
@@ -692,17 +679,16 @@ impl Inner {
     }
 }
 
-impl<S, B, Err> Service for CorsMiddleware<S, Err>
+impl<S, Err> Service for CorsMiddleware<S>
 where
-    S: Service<Request = WebRequest<Err>, Response = WebResponse<B>>,
+    S: Service<Request = WebRequest<Err>, Response = WebResponse>,
     S::Future: 'static,
-    B: 'static,
     Err: ErrorRenderer,
     Err::Container: From<S::Error>,
     CorsError: WebResponseError<Err>,
 {
     type Request = WebRequest<Err>;
-    type Response = WebResponse<B>;
+    type Response = WebResponse;
     type Error = S::Error;
     type Future = Either<
         Ready<Result<Self::Response, S::Error>>,

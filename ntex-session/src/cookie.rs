@@ -83,9 +83,9 @@ impl<Err> CookieSessionInner<Err> {
         }
     }
 
-    fn set_cookie<B>(
+    fn set_cookie(
         &self,
-        res: &mut WebResponse<B>,
+        res: &mut WebResponse,
         state: impl Iterator<Item = (String, String)>,
     ) -> Result<(), CookieSessionError> {
         let state: HashMap<String, String> = state.collect();
@@ -132,7 +132,7 @@ impl<Err> CookieSessionInner<Err> {
     }
 
     /// invalidates session cookie
-    fn remove_cookie<B>(&self, res: &mut WebResponse<B>) -> Result<(), Infallible> {
+    fn remove_cookie(&self, res: &mut WebResponse) -> Result<(), Infallible> {
         let mut cookie = Cookie::named(self.name.clone());
         cookie.set_value("");
         cookie.set_max_age(Duration::zero());
@@ -294,17 +294,16 @@ impl<Err> CookieSession<Err> {
     }
 }
 
-impl<S, B, Err> Transform<S> for CookieSession<Err>
+impl<S, Err> Transform<S> for CookieSession<Err>
 where
-    S: Service<Request = WebRequest<Err>, Response = WebResponse<B>>,
+    S: Service<Request = WebRequest<Err>, Response = WebResponse>,
     S::Future: 'static,
     S::Error: 'static,
-    B: 'static,
     Err: ErrorRenderer,
     Err::Container: From<CookieSessionError>,
 {
     type Request = WebRequest<Err>;
-    type Response = WebResponse<B>;
+    type Response = WebResponse;
     type Error = S::Error;
     type InitError = ();
     type Transform = CookieSessionMiddleware<S, Err>;
@@ -324,17 +323,16 @@ pub struct CookieSessionMiddleware<S, Err> {
     inner: Rc<CookieSessionInner<Err>>,
 }
 
-impl<S, B, Err> Service for CookieSessionMiddleware<S, Err>
+impl<S, Err> Service for CookieSessionMiddleware<S, Err>
 where
-    S: Service<Request = WebRequest<Err>, Response = WebResponse<B>>,
+    S: Service<Request = WebRequest<Err>, Response = WebResponse>,
     S::Future: 'static,
     S::Error: 'static,
-    B: 'static,
     Err: ErrorRenderer,
     Err::Container: From<CookieSessionError>,
 {
     type Request = WebRequest<Err>;
-    type Response = WebResponse<B>;
+    type Response = WebResponse;
     type Error = S::Error;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 

@@ -18,7 +18,7 @@ name = "ntex_files"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "0.1.7"
+ntex = "0.1.8"
 bitflags = "1"
 bytes = "0.5.4"
 futures = "0.3.4"

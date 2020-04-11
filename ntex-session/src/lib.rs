@@ -188,8 +188,8 @@ impl Session {
         inner.state.extend(data);
     }
 
-    pub fn get_changes<B>(
-        res: &mut WebResponse<B>,
+    pub fn get_changes(
+        res: &mut WebResponse,
     ) -> (
         SessionStatus,
         Option<impl Iterator<Item = (String, String)>>,
