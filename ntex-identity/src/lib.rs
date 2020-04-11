@@ -774,7 +774,7 @@ mod tests {
         f: F,
     ) -> impl ntex::service::Service<
         Request = ntex::http::Request,
-        Response = WebResponse<ntex::http::body::Body>,
+        Response = WebResponse,
         Error = Error,
     > {
         test::init_service(
@@ -1119,11 +1119,11 @@ mod tests {
                 ok(Some("test".to_string()))
             }
 
-            fn to_response<B>(
+            fn to_response(
                 &self,
                 _: Option<String>,
                 _: bool,
-                _: &mut WebResponse<B>,
+                _: &mut WebResponse,
             ) -> Self::ResponseFuture {
                 ok(())
             }
