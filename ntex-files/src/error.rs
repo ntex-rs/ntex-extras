@@ -1,23 +1,35 @@
-use actix_web::{http::StatusCode, HttpResponse, ResponseError};
-use derive_more::Display;
+use derive_more::{Display, From};
+use ntex::http::StatusCode;
+use ntex::web::error::{DefaultError, WebResponseError};
 
 /// Errors which can occur when serving static files.
-#[derive(Display, Debug, PartialEq)]
+#[derive(Display, Debug, From)]
 pub enum FilesError {
     /// Path is not a directory
     #[allow(dead_code)]
-    #[display(fmt = "Path is not a directory. Unable to serve static files")]
+    #[display(fmt = "Path is not a directory. Unable to serve static files.")]
     IsNotDirectory,
 
     /// Cannot render directory
-    #[display(fmt = "Unable to render directory without index file")]
+    #[display(fmt = "Unable to render directory without index file.")]
     IsDirectory,
+
+    /// Only GET and HEAD methods are allowed
+    #[display(fmt = "Request did not meet this resource's requirements.")]
+    MethodNotAllowed,
+
+    /// IO Error
+    #[display(fmt = "Error reading: {}", _0)]
+    Io(std::io::Error),
 }
 
 /// Return `NotFound` for `FilesError`
-impl ResponseError for FilesError {
-    fn error_response(&self) -> HttpResponse {
-        HttpResponse::new(StatusCode::NOT_FOUND)
+impl WebResponseError<DefaultError> for FilesError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            FilesError::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            _ => StatusCode::NOT_FOUND,
+        }
     }
 }
 
@@ -35,7 +47,7 @@ pub enum UriSegmentError {
 }
 
 /// Return `BadRequest` for `UriSegmentError`
-impl ResponseError for UriSegmentError {
+impl WebResponseError<DefaultError> for UriSegmentError {
     fn status_code(&self) -> StatusCode {
         StatusCode::BAD_REQUEST
     }
