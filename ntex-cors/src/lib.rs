@@ -711,10 +711,7 @@ where
                 .and_then(|_| self.inner.validate_allowed_method(req.head()))
                 .and_then(|_| self.inner.validate_allowed_headers(req.head()))
             {
-                return Either::Left(ok(req.into_response(
-                    WebResponseError::error_response(&e)
-                        .map_body(|_, body| body.into_body()),
-                )));
+                return Either::Left(ok(req.render_error(e)));
             }
 
             // allowed headers
@@ -772,10 +769,7 @@ where
             if req.headers().contains_key(&header::ORIGIN) {
                 // Only check requests with a origin header.
                 if let Err(e) = self.inner.validate_origin(req.head()) {
-                    return Either::Left(ok(req.into_response(
-                        WebResponseError::error_response(&e)
-                            .map_body(|_, body| body.into_body()),
-                    )));
+                    return Either::Left(ok(req.render_error(e)));
                 }
             }
 

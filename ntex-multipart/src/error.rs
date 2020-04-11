@@ -45,11 +45,13 @@ impl WebResponseError<DefaultError> for MultipartError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ntex::web::test::TestRequest;
     use ntex::web::HttpResponse;
 
     #[test]
     fn test_multipart_error() {
-        let resp: HttpResponse = MultipartError::Boundary.error_response();
+        let req = TestRequest::default().to_http_request();
+        let resp: HttpResponse = MultipartError::Boundary.error_response(&req);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
