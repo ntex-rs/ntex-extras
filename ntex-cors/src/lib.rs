@@ -1,4 +1,8 @@
-#![allow(clippy::borrow_interior_mutable_const, clippy::type_complexity)]
+#![allow(
+    clippy::borrow_interior_mutable_const,
+    clippy::type_complexity,
+    clippy::mutable_key_type
+)]
 //! Cross-origin resource sharing (CORS) for ntex applications
 //!
 //! CORS middleware could be used with application and with resource.
@@ -160,14 +164,12 @@ impl<T> AllOrSome<T> {
 /// use ntex_cors::Cors;
 /// use ntex::http::header;
 ///
-/// # fn main() {
 /// let cors = Cors::new()
 ///     .allowed_origin("https://www.rust-lang.org/")
 ///     .allowed_methods(vec!["GET", "POST"])
 ///     .allowed_headers(vec![header::AUTHORIZATION, header::ACCEPT])
 ///     .allowed_header(header::CONTENT_TYPE)
 ///     .max_age(3600);
-/// # }
 /// ```
 #[derive(Default)]
 pub struct Cors<Err: ErrorRenderer> {
@@ -599,7 +601,7 @@ impl Inner {
                     AllOrSome::All => Ok(()),
                     AllOrSome::Some(ref allowed_origins) => allowed_origins
                         .get(origin)
-                        .and_then(|_| Some(()))
+                        .map(|_| ())
                         .ok_or_else(|| CorsError::OriginNotAllowed),
                 };
             }
@@ -647,7 +649,7 @@ impl Inner {
                     return self
                         .methods
                         .get(&method)
-                        .and_then(|_| Some(()))
+                        .map(|_| ())
                         .ok_or_else(|| CorsError::MethodNotAllowed);
                 }
             }
@@ -804,10 +806,8 @@ where
                         if let Some(origin) =
                             inner.access_control_allow_origin(res.request().head())
                         {
-                            res.headers_mut().insert(
-                                header::ACCESS_CONTROL_ALLOW_ORIGIN,
-                                origin.clone(),
-                            );
+                            res.headers_mut()
+                                .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
                         };
 
                         if let Some(ref expose) = inner.expose_hdrs {

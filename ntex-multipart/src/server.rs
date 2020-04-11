@@ -9,8 +9,6 @@ use std::{cmp, fmt};
 
 use bytes::{Bytes, BytesMut};
 use futures::stream::{LocalBoxStream, Stream, StreamExt};
-use httparse;
-use mime;
 
 use ntex::http::error::{ParseError, PayloadError};
 use ntex::http::header::{self, HeaderMap, HeaderName, HeaderValue};
@@ -862,7 +860,7 @@ mod tests {
     impl SlowStream {
         fn new(bytes: Bytes) -> SlowStream {
             return SlowStream {
-                bytes: bytes,
+                bytes,
                 pos: 0,
                 ready: false,
             };

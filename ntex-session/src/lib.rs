@@ -52,7 +52,6 @@ use ntex::web::dev::{WebRequest, WebResponse};
 use ntex::web::{Error, FromRequest, HttpRequest};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_json;
 
 #[cfg(feature = "cookie-session")]
 mod cookie;

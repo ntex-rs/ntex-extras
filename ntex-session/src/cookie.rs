@@ -92,7 +92,7 @@ impl<Err> CookieSessionInner<Err> {
         let value =
             serde_json::to_string(&state).map_err(CookieSessionError::Serialize)?;
         if value.len() > 4064 {
-            return Err(CookieSessionError::Overflow.into());
+            return Err(CookieSessionError::Overflow);
         }
 
         let mut cookie = Cookie::new(self.name.clone(), value);
@@ -201,15 +201,13 @@ impl<Err> CookieSessionInner<Err> {
 /// use ntex_session::CookieSession;
 /// use ntex::web::{self, App, HttpResponse, HttpServer};
 ///
-/// fn main() {
-///     let app = App::new().wrap(
-///         CookieSession::signed(&[0; 32])
-///             .domain("www.rust-lang.org")
-///             .name("ntex-session")
-///             .path("/")
-///             .secure(true))
-///         .service(web::resource("/").to(|| async { HttpResponse::Ok() }));
-/// }
+/// let app = App::new().wrap(
+///     CookieSession::signed(&[0; 32])
+///         .domain("www.rust-lang.org")
+///         .name("ntex-session")
+///         .path("/")
+///         .secure(true))
+///     .service(web::resource("/").to(|| async { HttpResponse::Ok() }));
 /// ```
 pub struct CookieSession<Err>(Rc<CookieSessionInner<Err>>);
 
@@ -353,11 +351,11 @@ where
     /// session state changes, then set-cookie is returned in response.  As
     /// a user logs out, call session.purge() to set SessionStatus accordingly
     /// and this will trigger removal of the session cookie in the response.
-    fn call(&self, mut req: WebRequest<Err>) -> Self::Future {
+    fn call(&self, req: WebRequest<Err>) -> Self::Future {
         let inner = self.inner.clone();
         let (is_new, state) = self.inner.load(&req);
         let prolong_expiration = self.inner.expires_in.is_some();
-        Session::set_session(state.into_iter(), &mut req);
+        Session::set_session(state.into_iter(), &req);
 
         let fut = self.service.call(req);
 

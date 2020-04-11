@@ -19,7 +19,6 @@ use bytes::Bytes;
 use futures::future::{ok, ready, Either, FutureExt, LocalBoxFuture, Ready};
 use futures::Stream;
 use hyperx::header::DispositionType;
-use mime;
 use mime_guess::from_ext;
 use ntex::http::error::BlockingError;
 use ntex::http::{header, Method, Payload, Uri};

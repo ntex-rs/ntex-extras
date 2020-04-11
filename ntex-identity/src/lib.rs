@@ -35,16 +35,14 @@
 //!     web::HttpResponse::Ok().finish()
 //! }
 //!
-//! fn main() {
-//!     let app = web::App::new().wrap(IdentityService::new(
-//!         // <- create identity middleware
-//!         CookieIdentityPolicy::new(&[0; 32])    // <- create cookie identity policy
-//!               .name("auth-cookie")
-//!               .secure(false)))
-//!         .service(web::resource("/index.html").to(index))
-//!         .service(web::resource("/login.html").to(login))
-//!         .service(web::resource("/logout.html").to(logout));
-//! }
+//! let app = web::App::new().wrap(IdentityService::new(
+//!     // <- create identity middleware
+//!     CookieIdentityPolicy::new(&[0; 32])    // <- create cookie identity policy
+//!           .name("auth-cookie")
+//!           .secure(false)))
+//!     .service(web::resource("/index.html").to(index))
+//!     .service(web::resource("/login.html").to(login))
+//!     .service(web::resource("/logout.html").to(logout));
 //! ```
 use std::convert::Infallible;
 use std::future::Future;
@@ -206,14 +204,12 @@ pub trait IdentityPolicy<Err>: Sized + 'static {
 /// use ntex::web::App;
 /// use ntex_identity::{CookieIdentityPolicy, IdentityService};
 ///
-/// fn main() {
-///     let app = App::new().wrap(IdentityService::new(
-///         // <- create identity middleware
-///         CookieIdentityPolicy::new(&[0; 32])    // <- create cookie session backend
-///               .name("auth-cookie")
-///               .secure(false),
-///     ));
-/// }
+/// let app = App::new().wrap(IdentityService::new(
+///     // <- create identity middleware
+///     CookieIdentityPolicy::new(&[0; 32])    // <- create cookie session backend
+///           .name("auth-cookie")
+///           .secure(false),
+/// ));
 /// ```
 pub struct IdentityService<T, Err> {
     backend: Rc<T>,
@@ -487,16 +483,14 @@ impl<Err: ErrorRenderer> CookieIdentityInner<Err> {
 /// use ntex::web::App;
 /// use ntex_identity::{CookieIdentityPolicy, IdentityService};
 ///
-/// fn main() {
-///     let app = App::new().wrap(IdentityService::new(
-///         // <- create identity middleware
-///         CookieIdentityPolicy::new(&[0; 32])  // <- construct cookie policy
-///                .domain("www.rust-lang.org")
-///                .name("ntex-auth")
-///                .path("/")
-///                .secure(true),
-///     ));
-/// }
+/// let app = App::new().wrap(IdentityService::new(
+///     // <- create identity middleware
+///     CookieIdentityPolicy::new(&[0; 32])  // <- construct cookie policy
+///            .domain("www.rust-lang.org")
+///            .name("ntex-auth")
+///            .path("/")
+///            .secure(true),
+/// ));
 /// ```
 pub struct CookieIdentityPolicy<Err>(Rc<CookieIdentityInner<Err>>);
 
