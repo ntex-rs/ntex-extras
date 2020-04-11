@@ -8,4 +8,4 @@ members = [
 ]
 
 [patch.crates-io]
-ntex = { path = "../ntex/ntex/" }
+ntex = { git = "https://github.com/ntex-rs/ntex.git" }

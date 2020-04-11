@@ -18,6 +18,10 @@ pub enum FilesError {
     #[display(fmt = "Request did not meet this resource's requirements.")]
     MethodNotAllowed,
 
+    /// Uri segments parsing error
+    #[display(fmt = "{}", _0)]
+    Uri(UriSegmentError),
+
     /// IO Error
     #[display(fmt = "Error reading: {}", _0)]
     Io(std::io::Error),
@@ -28,6 +32,7 @@ impl WebResponseError<DefaultError> for FilesError {
     fn status_code(&self) -> StatusCode {
         match self {
             FilesError::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            FilesError::Uri(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::NOT_FOUND,
         }
     }

@@ -410,7 +410,6 @@ impl<Err> WebServiceFactory<Err> for Files<Err>
 where
     Err: ErrorRenderer,
     Err::Container: From<FilesError>,
-    Err::Container: From<UriSegmentError>,
 {
     fn register(mut self, config: &mut WebServiceConfig<Err>) {
         if self.default.is_none() {
@@ -429,7 +428,6 @@ impl<Err> ServiceFactory for Files<Err>
 where
     Err: ErrorRenderer,
     Err::Container: From<FilesError>,
-    Err::Container: From<UriSegmentError>,
 {
     type Request = WebRequest<Err>;
     type Response = WebResponse;
@@ -506,7 +504,6 @@ impl<Err> Service for FilesService<Err>
 where
     Err: ErrorRenderer,
     Err::Container: From<FilesError>,
-    Err::Container: From<UriSegmentError>,
 {
     type Request = WebRequest<Err>;
     type Response = WebResponse;
@@ -536,30 +533,16 @@ where
             return Either::Left(ok(req.error_response(FilesError::MethodNotAllowed)));
         }
 
-        println!("R: {:?}", req.match_info().path());
-
         let real_path = match PathBufWrp::get_pathbuf(req.match_info().path()) {
             Ok(item) => item,
-            Err(e) => return Either::Left(ok(req.error_response(e))),
+            Err(e) => return Either::Left(ok(req.error_response(FilesError::from(e)))),
         };
-
-        println!(
-            "R: {:?} {:?} {:?}",
-            real_path,
-            std::env::current_dir(),
-            self.directory.join(&real_path.0)
-        );
 
         // full filepath
         let path = match self.directory.join(&real_path.0).canonicalize() {
             Ok(path) => path,
-            Err(e) => {
-                println!("TEST: {:?}", e);
-                return self.handle_io_error(e, req);
-            }
+            Err(e) => return self.handle_io_error(e, req),
         };
-
-        println!("R2: {:?}", path);
 
         if path.is_dir() {
             if let Some(ref redir_index) = self.index {
@@ -1053,8 +1036,6 @@ mod tests {
 
     #[ntex::test]
     async fn test_named_file_content_length_headers() {
-        // use actix_web::body::{MessageBody, ResponseBody};
-
         let mut srv = test::init_service(
             App::new().service(Files::new("test", ".").index_file("tests/test.binary")),
         )
@@ -1067,7 +1048,7 @@ mod tests {
             .to_request();
         let _response = test::call_service(&mut srv, request).await;
 
-        // let contentlength = response
+        // let contentlength = _response
         //     .headers()
         //     .get(header::CONTENT_LENGTH)
         //     .unwrap()
@@ -1154,7 +1135,6 @@ mod tests {
             .uri("/tests/test%20space.binary")
             .to_request();
         let response = test::call_service(&srv, request).await;
-        println!("TEST- {:?}", response);
         assert_eq!(response.status(), StatusCode::OK);
 
         let bytes = test::read_body(response).await;

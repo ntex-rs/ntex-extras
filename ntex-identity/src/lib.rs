@@ -362,7 +362,7 @@ impl<Err: ErrorRenderer> CookieIdentityInner<Err> {
         CookieIdentityInner {
             key: Key::from_master(key),
             key_v2: Key::from_master(&key_v2),
-            name: "actix-identity".to_owned(),
+            name: "ntex-identity".to_owned(),
             path: "/".to_owned(),
             domain: None,
             secure: true,
@@ -492,7 +492,7 @@ impl<Err: ErrorRenderer> CookieIdentityInner<Err> {
 ///         // <- create identity middleware
 ///         CookieIdentityPolicy::new(&[0; 32])  // <- construct cookie policy
 ///                .domain("www.rust-lang.org")
-///                .name("actix_auth")
+///                .name("ntex-auth")
 ///                .path("/")
 ///                .secure(true),
 ///     ));

@@ -71,7 +71,7 @@ impl<Err> CookieSessionInner<Err> {
         CookieSessionInner {
             security,
             key: Key::from_master(key),
-            name: "actix-session".to_owned(),
+            name: "ntex-session".to_owned(),
             path: "/".to_owned(),
             domain: None,
             secure: true,
@@ -418,7 +418,7 @@ mod tests {
         assert!(response
             .response()
             .cookies()
-            .find(|c| c.name() == "actix-session")
+            .find(|c| c.name() == "ntex-session")
             .is_some());
     }
 
@@ -439,7 +439,7 @@ mod tests {
         assert!(response
             .response()
             .cookies()
-            .find(|c| c.name() == "actix-session")
+            .find(|c| c.name() == "ntex-session")
             .is_some());
     }
 
@@ -460,7 +460,7 @@ mod tests {
         assert!(response
             .response()
             .cookies()
-            .find(|c| c.name() == "actix-session")
+            .find(|c| c.name() == "ntex-session")
             .is_some());
     }
 
@@ -471,7 +471,7 @@ mod tests {
                 .wrap(
                     CookieSession::signed(&[0; 32])
                         .path("/test/")
-                        .name("actix-test")
+                        .name("ntex-test")
                         .domain("localhost")
                         .http_only(true)
                         .same_site(SameSite::Lax)
@@ -493,7 +493,7 @@ mod tests {
         let cookie = response
             .response()
             .cookies()
-            .find(|c| c.name() == "actix-test")
+            .find(|c| c.name() == "ntex-test")
             .unwrap()
             .clone();
         assert_eq!(cookie.path().unwrap(), "/test/");
@@ -526,7 +526,7 @@ mod tests {
         let expires_1 = response
             .response()
             .cookies()
-            .find(|c| c.name() == "actix-session")
+            .find(|c| c.name() == "ntex-session")
             .expect("Cookie is set")
             .expires()
             .expect("Expiration is set");
@@ -538,7 +538,7 @@ mod tests {
         let expires_2 = response
             .response()
             .cookies()
-            .find(|c| c.name() == "actix-session")
+            .find(|c| c.name() == "ntex-session")
             .expect("Cookie is set")
             .expires()
             .expect("Expiration is set");
