@@ -1,4 +1,3 @@
-use std::convert::Infallible;
 use std::error::Error;
 use std::fs::{File, Metadata};
 use std::io;
@@ -20,8 +19,7 @@ use hyperx::header::{
 use ntex::http::body::SizedStream;
 use ntex::http::header::ContentEncoding;
 use ntex::http::{self, StatusCode};
-use ntex::web::BodyEncoding;
-use ntex::web::{HttpRequest, HttpResponse, Responder};
+use ntex::web::{BodyEncoding, ErrorRenderer, HttpRequest, HttpResponse, Responder};
 
 use crate::range::HttpRange;
 use crate::ChunkedReadFile;
@@ -255,7 +253,7 @@ impl NamedFile {
         self.modified.map(|mtime| mtime.into())
     }
 
-    pub fn into_response(self, req: &HttpRequest) -> Result<HttpResponse, Infallible> {
+    pub fn into_response(self, req: &HttpRequest) -> HttpResponse {
         if self.status_code != StatusCode::OK {
             let mut resp = HttpResponse::build(self.status_code);
             resp.header(http::header::CONTENT_TYPE, self.content_type.to_string())
@@ -275,7 +273,7 @@ impl NamedFile {
                 fut: None,
                 counter: 0,
             };
-            return Ok(resp.streaming(reader));
+            return resp.streaming(reader);
         }
 
         let etag = if self.flags.contains(Flags::ETAG) {
@@ -391,17 +389,17 @@ impl NamedFile {
                         http::header::CONTENT_RANGE,
                         format!("bytes */{}", length),
                     );
-                    return Ok(resp.status(StatusCode::RANGE_NOT_SATISFIABLE).finish());
+                    return resp.status(StatusCode::RANGE_NOT_SATISFIABLE).finish();
                 };
             } else {
-                return Ok(resp.status(StatusCode::BAD_REQUEST).finish());
+                return resp.status(StatusCode::BAD_REQUEST).finish();
             };
         };
 
         if precondition_failed {
-            return Ok(resp.status(StatusCode::PRECONDITION_FAILED).finish());
+            return resp.status(StatusCode::PRECONDITION_FAILED).finish();
         } else if not_modified {
-            return Ok(resp.status(StatusCode::NOT_MODIFIED).finish());
+            return resp.status(StatusCode::NOT_MODIFIED).finish();
         }
 
         let reader = ChunkedReadFile {
@@ -412,15 +410,15 @@ impl NamedFile {
             counter: 0,
         };
         if offset != 0 || length != self.md.len() {
-            Ok(resp.status(StatusCode::PARTIAL_CONTENT).streaming(reader))
+            resp.status(StatusCode::PARTIAL_CONTENT).streaming(reader)
         } else {
-            Ok(resp.body(SizedStream::new(
+            resp.body(SizedStream::new(
                 length,
                 reader.map_err(|e| {
                     let e: Box<dyn Error> = Box::new(e);
                     e
                 }),
-            )))
+            ))
         }
     }
 }
@@ -483,9 +481,9 @@ fn none_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
     true
 }
 
-impl<Err> Responder<Err> for NamedFile {
-    type Error = Infallible;
-    type Future = Ready<Result<HttpResponse, Infallible>>;
+impl<Err: ErrorRenderer> Responder<Err> for NamedFile {
+    type Error = Err::Container;
+    type Future = Ready<HttpResponse>;
 
     fn respond_to(self, req: &HttpRequest) -> Self::Future {
         ready(self.into_response(req))

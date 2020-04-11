@@ -223,10 +223,10 @@ fn directory_listing(
         index_of, index_of, body
     );
     Ok(WebResponse::new(
-        req.clone(),
         HttpResponse::Ok()
             .content_type("text/html; charset=utf-8")
             .body(html),
+        req.clone(),
     ))
 }
 
@@ -567,10 +567,10 @@ where
 
                         named_file.flags = self.file_flags;
                         let (req, _) = req.into_parts();
-                        Either::Left(ok(match named_file.into_response(&req) {
-                            Ok(item) => WebResponse::new(req, item),
-                            Err(_) => unreachable!(),
-                        }))
+                        Either::Left(ok(WebResponse::new(
+                            named_file.into_response(&req),
+                            req,
+                        )))
                     }
                     Err(e) => self.handle_io_error(e, req),
                 }
@@ -602,12 +602,10 @@ where
 
                     named_file.flags = self.file_flags;
                     let (req, _) = req.into_parts();
-                    match named_file.into_response(&req) {
-                        Ok(item) => {
-                            Either::Left(ok(WebResponse::new(req.clone(), item)))
-                        }
-                        Err(_) => unreachable!(),
-                    }
+                    Either::Left(ok(WebResponse::new(
+                        named_file.into_response(&req),
+                        req,
+                    )))
                 }
                 Err(e) => self.handle_io_error(e, req),
             }
@@ -691,7 +689,7 @@ mod tests {
         let req = TestRequest::default()
             .header(http::header::IF_MODIFIED_SINCE, since.to_string())
             .to_http_request();
-        let resp = test::respond_to(file, &req).await.unwrap();
+        let resp = test::respond_to(file, &req).await;
         assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
     }
 
@@ -706,7 +704,7 @@ mod tests {
             .header(http::header::IF_NONE_MATCH, "miss_etag")
             .header(http::header::IF_MODIFIED_SINCE, since.to_string())
             .to_http_request();
-        let resp = test::respond_to(file, &req).await.unwrap();
+        let resp = test::respond_to(file, &req).await;
         assert_ne!(resp.status(), StatusCode::NOT_MODIFIED);
     }
 
@@ -723,7 +721,7 @@ mod tests {
         }
 
         let req = TestRequest::default().to_http_request();
-        let resp = test::respond_to(file, &req).await.unwrap();
+        let resp = test::respond_to(file, &req).await;
         assert_eq!(
             resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
             "text/x-toml"
@@ -749,7 +747,7 @@ mod tests {
         }
 
         let req = TestRequest::default().to_http_request();
-        let resp = test::respond_to(file, &req).await.unwrap();
+        let resp = test::respond_to(file, &req).await;
         assert_eq!(
             resp.headers()
                 .get(http::header::CONTENT_DISPOSITION)
@@ -761,7 +759,7 @@ mod tests {
             .unwrap()
             .disable_content_disposition();
         let req = TestRequest::default().to_http_request();
-        let resp = test::respond_to(file, &req).await.unwrap();
+        let resp = test::respond_to(file, &req).await;
         assert!(resp
             .headers()
             .get(http::header::CONTENT_DISPOSITION)
@@ -782,7 +780,7 @@ mod tests {
     //     }
 
     //     let req = TestRequest::default().to_http_request();
-    //     let resp = test::respond_to(file, &req).await.unwrap();
+    //     let resp = test::respond_to(file, &req).await;
     //     assert_eq!(
     //         resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
     //         "text/x-toml"
@@ -809,7 +807,7 @@ mod tests {
         }
 
         let req = TestRequest::default().to_http_request();
-        let resp = test::respond_to(file, &req).await.unwrap();
+        let resp = test::respond_to(file, &req).await;
         assert_eq!(
             resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
             "text/xml"
@@ -834,7 +832,7 @@ mod tests {
         }
 
         let req = TestRequest::default().to_http_request();
-        let resp = test::respond_to(file, &req).await.unwrap();
+        let resp = test::respond_to(file, &req).await;
         assert_eq!(
             resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
             "image/png"
@@ -873,7 +871,7 @@ mod tests {
         }
 
         let req = TestRequest::default().to_http_request();
-        let resp = test::respond_to(file, &req).await.unwrap();
+        let resp = test::respond_to(file, &req).await;
         assert_eq!(
             resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
             "image/png"
@@ -898,7 +896,7 @@ mod tests {
         }
 
         let req = TestRequest::default().to_http_request();
-        let resp = test::respond_to(file, &req).await.unwrap();
+        let resp = test::respond_to(file, &req).await;
         assert_eq!(
             resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
             "application/octet-stream"
@@ -925,7 +923,7 @@ mod tests {
         }
 
         let req = TestRequest::default().to_http_request();
-        let resp = test::respond_to(file, &req).await.unwrap();
+        let resp = test::respond_to(file, &req).await;
         assert_eq!(
             resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
             "text/x-toml"
@@ -1229,7 +1227,7 @@ mod tests {
     async fn test_named_file_allowed_method() {
         let req = TestRequest::default().method(Method::GET).to_http_request();
         let file = NamedFile::open("Cargo.toml").unwrap();
-        let resp = test::respond_to(file, &req).await.unwrap();
+        let resp = test::respond_to(file, &req).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
