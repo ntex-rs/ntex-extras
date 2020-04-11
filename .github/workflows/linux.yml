@@ -48,32 +48,44 @@ jobs:
           path: target
           key: ${{ matrix.version }}-x86_64-unknown-linux-gnu-cargo-build-trimmed-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: check build
-        uses: actions-rs/cargo@v1
+      - name: Cache cargo tarpaulin
+        if: matrix.version == '1.42.0' && (github.ref == 'refs/heads/master' || github.event_name == 'pull_request')
+        uses: actions/cache@v1
         with:
-          command: check
-          args: --all --all-features --bins --examples --tests
+          path: ~/.cargo/bin
+          key: ${{ matrix.version }}-x86_64-unknown-linux-gnu-tarpaulin
 
-      - name: tests
+      - name: Run tests
         uses: actions-rs/cargo@v1
         timeout-minutes: 40
         with:
           command: test
           args: --all --all-features --no-fail-fast -- --nocapture
 
-      - name: Generate coverage file
-        if: matrix.version == 'stable' && (github.ref == 'refs/heads/master' || github.event_name == 'pull_request')
+      - name: Install tarpaulin
+        if: matrix.version == '1.42.0' && (github.ref == 'refs/heads/master' || github.event_name == 'pull_request')
+        continue-on-error: true
         run: |
           cargo install cargo-tarpaulin
+
+      - name: Generate coverage report
+        if: matrix.version == '1.42.0' && (github.ref == 'refs/heads/master' || github.event_name == 'pull_request')
+        continue-on-error: true
+        run: |
           cargo tarpaulin --out Xml --all --all-features
 
       - name: Upload to Codecov
-        if: matrix.version == 'stable' && (github.ref == 'refs/heads/master' || github.event_name == 'pull_request')
+        if: matrix.version == '1.42.0' && (github.ref == 'refs/heads/master' || github.event_name == 'pull_request')
+        continue-on-error: true
         uses: codecov/codecov-action@v1
         with:
           file: cobertura.xml
 
-      - name: Clear the cargo caches
+      - name: Install cargo-cache
+        continue-on-error: true
         run: |
           cargo install cargo-cache --no-default-features --features ci-autoclean
+
+      - name: Clear the cargo caches
+        run: |
           cargo-cache
