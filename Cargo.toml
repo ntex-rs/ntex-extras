@@ -6,6 +6,3 @@ members = [
   "ntex-multipart",
   "ntex-session",
 ]
-
-[patch.crates-io]
-ntex = { git = "https://github.com/ntex-rs/ntex.git" }
