@@ -362,17 +362,17 @@ where
                 match Session::get_changes(&mut res) {
                     (SessionStatus::Changed, Some(state))
                     | (SessionStatus::Renewed, Some(state)) => {
-                        res.checked_expr::<_, _, Err>(|res| inner.set_cookie(res, state))
+                        res.checked_expr::<Err, _, _>(|res| inner.set_cookie(res, state))
                     }
                     (SessionStatus::Unchanged, Some(state)) if prolong_expiration => {
-                        res.checked_expr::<_, _, Err>(|res| inner.set_cookie(res, state))
+                        res.checked_expr::<Err, _, _>(|res| inner.set_cookie(res, state))
                     }
                     (SessionStatus::Unchanged, _) =>
                     // set a new session cookie upon first request (new client)
                     {
                         if is_new {
                             let state: HashMap<String, String> = HashMap::new();
-                            res.checked_expr::<_, _, Err>(|res| {
+                            res.checked_expr::<Err, _, _>(|res| {
                                 inner.set_cookie(res, state.into_iter())
                             })
                         } else {
