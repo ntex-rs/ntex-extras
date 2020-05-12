@@ -105,7 +105,7 @@ impl<Err> CookieSessionInner<Err> {
         }
 
         if let Some(expires_in) = self.expires_in {
-            cookie.set_expires(OffsetDateTime::now() + expires_in);
+            cookie.set_expires(OffsetDateTime::now_utc() + expires_in);
         }
 
         if let Some(max_age) = self.max_age {
@@ -136,7 +136,7 @@ impl<Err> CookieSessionInner<Err> {
         let mut cookie = Cookie::named(self.name.clone());
         cookie.set_value("");
         cookie.set_max_age(Duration::zero());
-        cookie.set_expires(OffsetDateTime::now() - Duration::days(365));
+        cookie.set_expires(OffsetDateTime::now_utc() - Duration::days(365));
 
         let val = HeaderValue::from_str(&cookie.to_string()).unwrap();
         res.headers_mut().append(SET_COOKIE, val);

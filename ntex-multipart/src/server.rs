@@ -1037,7 +1037,7 @@ mod tests {
         let mut payload = PayloadBuffer::new(payload);
 
         assert_eq!(payload.buf.len(), 0);
-        lazy(|cx| payload.poll_stream(cx)).await.unwrap();
+        assert!(lazy(|cx| payload.poll_stream(cx)).await.is_err());
         assert_eq!(None, payload.read_max(1).unwrap());
     }
 
