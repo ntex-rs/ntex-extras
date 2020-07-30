@@ -1,7 +1,7 @@
 [package]
 name = "ntex-session"
 version = "0.1.0"
-authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
+authors = ["ntex contributors <team@ntex.rs>"]
 description = "Session for ntex web framework."
 readme = "README.md"
 keywords = ["http", "web", "framework", "async", "futures"]

@@ -1,7 +1,7 @@
 [package]
 name = "ntex-files"
 version = "0.1.0"
-authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
+authors = ["ntex contributors <team@ntex.rs>"]
 description = "Static files support for ntex web."
 readme = "README.md"
 keywords = ["ntex", "http", "async", "futures"]
