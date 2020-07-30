@@ -4,19 +4,18 @@ version = "0.1.0"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "Cross-origin resource sharing (CORS) for Actix applications."
 readme = "README.md"
-keywords = ["web", "framework"]
+keywords = ["ntex", "web"]
 homepage = "https://ntex.rs"
 repository = "https://github.com/ntex-rs/ntex-extras.git"
 documentation = "https://docs.rs/ntex-cors/"
 license = "MIT"
 edition = "2018"
-workspace = ".."
 
 [lib]
 name = "ntex_cors"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "0.1.8"
+ntex = "0.1.21"
 derive_more = "0.99.5"
 futures = "0.3.4"

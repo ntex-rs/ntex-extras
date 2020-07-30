@@ -70,7 +70,7 @@ impl<Err> CookieSessionInner<Err> {
     fn new(key: &[u8], security: CookieSecurity) -> Self {
         CookieSessionInner {
             security,
-            key: Key::from_master(key),
+            key: Key::derive_from(key),
             name: "ntex-session".to_owned(),
             path: "/".to_owned(),
             domain: None,

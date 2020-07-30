@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Nikolay Kim <fafhrd91@gmail.com>"]
 description = "Multipart support for ntex web framework."
 readme = "README.md"
-keywords = ["http", "web", "framework", "async", "futures"]
+keywords = ["http", "web", "framework", "async", "ntex"]
 homepage = "https://ntex.rs"
 repository = "https://github.com/ntex-rs/ntex-extras.git"
 documentation = "https://docs.rs/ntex-multipart/"
@@ -16,7 +16,7 @@ name = "ntex_multipart"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "0.1.8"
+ntex = "0.1.21"
 bytes = "0.5.4"
 derive_more = "0.99.5"
 httparse = "1.3"

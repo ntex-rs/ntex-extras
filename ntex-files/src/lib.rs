@@ -255,7 +255,7 @@ pub struct Files<Err: ErrorRenderer> {
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
-    guards: Option<Rc<Box<dyn Guard>>>,
+    guards: Option<Rc<dyn Guard>>,
 }
 
 impl<Err: ErrorRenderer> Clone for Files<Err> {
@@ -372,7 +372,7 @@ impl<Err: ErrorRenderer> Files<Err> {
     /// Default behaviour allows GET and HEAD.
     #[inline]
     pub fn use_guards<G: Guard + 'static>(mut self, guards: G) -> Self {
-        self.guards = Some(Rc::new(Box::new(guards)));
+        self.guards = Some(Rc::new(guards));
         self
     }
 
@@ -475,7 +475,7 @@ pub struct FilesService<Err: ErrorRenderer> {
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
-    guards: Option<Rc<Box<dyn Guard>>>,
+    guards: Option<Rc<dyn Guard>>,
 }
 
 impl<Err: ErrorRenderer> FilesService<Err>
