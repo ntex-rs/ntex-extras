@@ -1,2 +1,4 @@
-max_width = 89
+max_width = 96
 reorder_imports = true
+use_small_heuristics = "max"
+use_field_init_shorthand = true

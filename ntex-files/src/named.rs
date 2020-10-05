@@ -100,10 +100,7 @@ impl NamedFile {
                 None,
                 filename.into_owned().into_bytes(),
             )];
-            let cd = ContentDisposition {
-                disposition,
-                parameters,
-            };
+            let cd = ContentDisposition { disposition, parameters };
             (ct, cd)
         };
 
@@ -256,13 +253,15 @@ impl NamedFile {
     pub fn into_response(self, req: &HttpRequest) -> HttpResponse {
         if self.status_code != StatusCode::OK {
             let mut resp = HttpResponse::build(self.status_code);
-            resp.header(http::header::CONTENT_TYPE, self.content_type.to_string())
-                .if_true(self.flags.contains(Flags::CONTENT_DISPOSITION), |res| {
+            resp.header(http::header::CONTENT_TYPE, self.content_type.to_string()).if_true(
+                self.flags.contains(Flags::CONTENT_DISPOSITION),
+                |res| {
                     res.header(
                         http::header::CONTENT_DISPOSITION,
                         self.content_disposition.to_string(),
                     );
-                });
+                },
+            );
             if let Some(current_encoding) = self.encoding {
                 resp.encoding(current_encoding);
             }
@@ -276,16 +275,9 @@ impl NamedFile {
             return resp.streaming(reader);
         }
 
-        let etag = if self.flags.contains(Flags::ETAG) {
-            self.etag()
-        } else {
-            None
-        };
-        let last_modified = if self.flags.contains(Flags::LAST_MD) {
-            self.last_modified()
-        } else {
-            None
-        };
+        let etag = if self.flags.contains(Flags::ETAG) { self.etag() } else { None };
+        let last_modified =
+            if self.flags.contains(Flags::LAST_MD) { self.last_modified() } else { None };
 
         // check preconditions
         let precondition_failed = if !any_match(etag.as_ref(), req) {
@@ -293,9 +285,9 @@ impl NamedFile {
         } else if let (Some(ref m), Some(header::IfUnmodifiedSince(ref since))) = {
             let mut header = None;
             for hdr in req.headers().get_all(http::header::IF_UNMODIFIED_SINCE) {
-                if let Ok(v) = header::IfUnmodifiedSince::parse_header(
-                    &header::Raw::from(hdr.as_bytes()),
-                ) {
+                if let Ok(v) =
+                    header::IfUnmodifiedSince::parse_header(&header::Raw::from(hdr.as_bytes()))
+                {
                     header = Some(v);
                     break;
                 }
@@ -321,9 +313,9 @@ impl NamedFile {
         } else if let (Some(ref m), Some(header::IfModifiedSince(ref since))) = {
             let mut header = None;
             for hdr in req.headers().get_all(http::header::IF_MODIFIED_SINCE) {
-                if let Ok(v) = header::IfModifiedSince::parse_header(&header::Raw::from(
-                    hdr.as_bytes(),
-                )) {
+                if let Ok(v) =
+                    header::IfModifiedSince::parse_header(&header::Raw::from(hdr.as_bytes()))
+                {
                     header = Some(v);
                     break;
                 }
@@ -341,23 +333,22 @@ impl NamedFile {
         };
 
         let mut resp = HttpResponse::build(self.status_code);
-        resp.header(http::header::CONTENT_TYPE, self.content_type.to_string())
-            .if_true(self.flags.contains(Flags::CONTENT_DISPOSITION), |res| {
+        resp.header(http::header::CONTENT_TYPE, self.content_type.to_string()).if_true(
+            self.flags.contains(Flags::CONTENT_DISPOSITION),
+            |res| {
                 res.header(
                     http::header::CONTENT_DISPOSITION,
                     self.content_disposition.to_string(),
                 );
-            });
+            },
+        );
         // default compressing
         if let Some(current_encoding) = self.encoding {
             resp.encoding(current_encoding);
         }
 
         resp.if_some(last_modified, |lm, resp| {
-            resp.header(
-                http::header::LAST_MODIFIED,
-                header::LastModified(lm).to_string(),
-            );
+            resp.header(http::header::LAST_MODIFIED, header::LastModified(lm).to_string());
         })
         .if_some(etag, |etag, resp| {
             resp.header(http::header::ETAG, header::ETag(etag).to_string());
@@ -377,18 +368,10 @@ impl NamedFile {
                     resp.encoding(ContentEncoding::Identity);
                     resp.header(
                         http::header::CONTENT_RANGE,
-                        format!(
-                            "bytes {}-{}/{}",
-                            offset,
-                            offset + length - 1,
-                            self.md.len()
-                        ),
+                        format!("bytes {}-{}/{}", offset, offset + length - 1, self.md.len()),
                     );
                 } else {
-                    resp.header(
-                        http::header::CONTENT_RANGE,
-                        format!("bytes */{}", length),
-                    );
+                    resp.header(http::header::CONTENT_RANGE, format!("bytes */{}", length));
                     return resp.status(StatusCode::RANGE_NOT_SATISFIABLE).finish();
                 };
             } else {

@@ -139,9 +139,7 @@ impl Session {
         let mut inner = self.0.borrow_mut();
         if inner.status != SessionStatus::Purged {
             inner.status = SessionStatus::Changed;
-            inner
-                .state
-                .insert(key.to_owned(), serde_json::to_string(&value)?);
+            inner.state.insert(key.to_owned(), serde_json::to_string(&value)?);
         }
         Ok(())
     }
@@ -190,17 +188,9 @@ impl Session {
 
     pub fn get_changes(
         res: &mut WebResponse,
-    ) -> (
-        SessionStatus,
-        Option<impl Iterator<Item = (String, String)>>,
-    ) {
-        if let Some(s_impl) = res
-            .request()
-            .extensions()
-            .get::<Rc<RefCell<SessionInner>>>()
-        {
-            let state =
-                std::mem::replace(&mut s_impl.borrow_mut().state, HashMap::new());
+    ) -> (SessionStatus, Option<impl Iterator<Item = (String, String)>>) {
+        if let Some(s_impl) = res.request().extensions().get::<Rc<RefCell<SessionInner>>>() {
+            let state = std::mem::replace(&mut s_impl.borrow_mut().state, HashMap::new());
             (s_impl.borrow().status.clone(), Some(state.into_iter()))
         } else {
             (SessionStatus::Unchanged, None)

@@ -89,8 +89,7 @@ impl<Err> CookieSessionInner<Err> {
         state: impl Iterator<Item = (String, String)>,
     ) -> Result<(), CookieSessionError> {
         let state: HashMap<String, String> = state.collect();
-        let value =
-            serde_json::to_string(&state).map_err(CookieSessionError::Serialize)?;
+        let value = serde_json::to_string(&state).map_err(CookieSessionError::Serialize)?;
         if value.len() > 4064 {
             return Err(CookieSessionError::Overflow);
         }
@@ -153,9 +152,7 @@ impl<Err> CookieSessionInner<Err> {
 
                     let cookie_opt = match self.security {
                         CookieSecurity::Signed => jar.signed(&self.key).get(&self.name),
-                        CookieSecurity::Private => {
-                            jar.private(&self.key).get(&self.name)
-                        }
+                        CookieSecurity::Private => jar.private(&self.key).get(&self.name),
                     };
                     if let Some(cookie) = cookie_opt {
                         if let Ok(val) = serde_json::from_str(cookie.value()) {
@@ -216,20 +213,14 @@ impl<Err> CookieSession<Err> {
     ///
     /// Panics if key length is less than 32 bytes.
     pub fn signed(key: &[u8]) -> Self {
-        CookieSession(Rc::new(CookieSessionInner::new(
-            key,
-            CookieSecurity::Signed,
-        )))
+        CookieSession(Rc::new(CookieSessionInner::new(key, CookieSecurity::Signed)))
     }
 
     /// Construct new *private* `CookieSessionBackend` instance.
     ///
     /// Panics if key length is less than 32 bytes.
     pub fn private(key: &[u8]) -> Self {
-        CookieSession(Rc::new(CookieSessionInner::new(
-            key,
-            CookieSecurity::Private,
-        )))
+        CookieSession(Rc::new(CookieSessionInner::new(key, CookieSecurity::Private)))
     }
 
     /// Sets the `path` field in the session cookie being built.
@@ -310,10 +301,7 @@ where
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
-        ok(CookieSessionMiddleware {
-            service,
-            inner: self.0.clone(),
-        })
+        ok(CookieSessionMiddleware { service, inner: self.0.clone() })
     }
 }
 
@@ -400,64 +388,52 @@ mod tests {
     #[ntex::test]
     async fn cookie_session() {
         let app = test::init_service(
-            App::new()
-                .wrap(CookieSession::signed(&[0; 32]).secure(false))
-                .service(web::resource("/").to(|ses: Session| async move {
+            App::new().wrap(CookieSession::signed(&[0; 32]).secure(false)).service(
+                web::resource("/").to(|ses: Session| async move {
                     let _ = ses.set("counter", 100);
                     "test"
-                })),
+                }),
+            ),
         )
         .await;
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(response
-            .response()
-            .cookies()
-            .find(|c| c.name() == "ntex-session")
-            .is_some());
+        assert!(response.response().cookies().find(|c| c.name() == "ntex-session").is_some());
     }
 
     #[ntex::test]
     async fn private_cookie() {
         let app = test::init_service(
-            App::new()
-                .wrap(CookieSession::private(&[0; 32]).secure(false))
-                .service(web::resource("/").to(|ses: Session| async move {
+            App::new().wrap(CookieSession::private(&[0; 32]).secure(false)).service(
+                web::resource("/").to(|ses: Session| async move {
                     let _ = ses.set("counter", 100);
                     "test"
-                })),
+                }),
+            ),
         )
         .await;
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(response
-            .response()
-            .cookies()
-            .find(|c| c.name() == "ntex-session")
-            .is_some());
+        assert!(response.response().cookies().find(|c| c.name() == "ntex-session").is_some());
     }
 
     #[ntex::test]
     async fn cookie_session_extractor() {
         let app = test::init_service(
-            App::new()
-                .wrap(CookieSession::signed(&[0; 32]).secure(false))
-                .service(web::resource("/").to(|ses: Session| async move {
+            App::new().wrap(CookieSession::signed(&[0; 32]).secure(false)).service(
+                web::resource("/").to(|ses: Session| async move {
                     let _ = ses.set("counter", 100);
                     "test"
-                })),
+                }),
+            ),
         )
         .await;
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(response
-            .response()
-            .cookies()
-            .find(|c| c.name() == "ntex-session")
-            .is_some());
+        assert!(response.response().cookies().find(|c| c.name() == "ntex-session").is_some());
     }
 
     #[ntex::test]
@@ -486,17 +462,11 @@ mod tests {
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        let cookie = response
-            .response()
-            .cookies()
-            .find(|c| c.name() == "ntex-test")
-            .unwrap()
-            .clone();
+        let cookie =
+            response.response().cookies().find(|c| c.name() == "ntex-test").unwrap().clone();
         assert_eq!(cookie.path().unwrap(), "/test/");
 
-        let request = test::TestRequest::with_uri("/test/")
-            .cookie(cookie)
-            .to_request();
+        let request = test::TestRequest::with_uri("/test/").cookie(cookie).to_request();
         let body = test::read_response(&app, request).await;
         assert_eq!(body, Bytes::from_static(b"counter: 100"));
     }
@@ -510,10 +480,7 @@ mod tests {
                     let _ = ses.set("counter", 100);
                     "test"
                 }))
-                .service(
-                    web::resource("/test/")
-                        .to(|| async move { "no-changes-in-session" }),
-                ),
+                .service(web::resource("/test/").to(|| async move { "no-changes-in-session" })),
         )
         .await;
 
