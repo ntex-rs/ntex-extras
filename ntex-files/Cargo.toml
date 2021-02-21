@@ -18,10 +18,10 @@ name = "ntex_files"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "0.1.21"
+ntex = "0.2.0-b.14"
 bitflags = "1"
-bytes = "0.5.4"
-futures = "0.3.4"
+bytes = "0.5.6"
+futures = "0.3.12"
 derive_more = "0.99.5"
 hyperx = "1.0.0"
 log = "0.4"
@@ -31,4 +31,4 @@ percent-encoding = "2.1"
 v_htmlescape = "0.4"
 
 [dev-dependencies]
-ntex = { version = "0.1.7", features=["openssl", "compress"] }
+ntex = { version = "0.2.0-b.14", features=["openssl", "compress"] }

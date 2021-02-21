@@ -47,7 +47,8 @@ use std::convert::Infallible;
 use std::rc::Rc;
 
 use futures::future::{ok, Ready};
-use ntex::http::{Extensions, Payload, RequestHead};
+use ntex::http::{Payload, RequestHead};
+use ntex::util::Extensions;
 use ntex::web::dev::{WebRequest, WebResponse};
 use ntex::web::{Error, FromRequest, HttpRequest};
 use serde::de::DeserializeOwned;

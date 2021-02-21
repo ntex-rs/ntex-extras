@@ -59,8 +59,9 @@ use time::Duration;
 
 use ntex::http::error::HttpError;
 use ntex::http::header::{self, HeaderValue};
-use ntex::http::{Extensions, HttpMessage, Payload};
+use ntex::http::{HttpMessage, Payload};
 use ntex::service::{Service, Transform};
+use ntex::util::Extensions;
 use ntex::web::dev::{WebRequest, WebResponse};
 use ntex::web::{DefaultError, ErrorRenderer, FromRequest, HttpRequest, WebResponseError};
 

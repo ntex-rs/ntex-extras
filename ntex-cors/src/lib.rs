@@ -494,10 +494,12 @@ impl Cors {
 
         if !slf.expose_hdrs.is_empty() {
             cors.expose_hdrs = Some(
-                slf.expose_hdrs
-                    .iter()
-                    .fold(String::new(), |s, v| format!("{}, {}", s, v.as_str()))[2..]
-                    .to_owned(),
+                HeaderValue::try_from(
+                    &slf.expose_hdrs
+                        .iter()
+                        .fold(String::new(), |s, v| format!("{}, {}", s, v.as_str()))[2..],
+                )
+                .unwrap(),
             );
         }
 
@@ -517,7 +519,7 @@ struct Inner {
     origins: AllOrSome<HashSet<String>>,
     origins_str: Option<HeaderValue>,
     headers: AllOrSome<HashSet<HeaderName>>,
-    expose_hdrs: Option<String>,
+    expose_hdrs: Option<HeaderValue>,
     max_age: Option<usize>,
     preflight: bool,
     send_wildcard: bool,
@@ -688,10 +690,7 @@ impl Inner {
         };
 
         if let Some(ref expose) = self.expose_hdrs {
-            headers.insert(
-                header::ACCESS_CONTROL_EXPOSE_HEADERS,
-                HeaderValue::try_from(expose.as_str()).unwrap(),
-            );
+            headers.insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, expose.clone());
         }
         if self.supports_credentials {
             headers.insert(

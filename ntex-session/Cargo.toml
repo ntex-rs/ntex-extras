@@ -22,11 +22,11 @@ default = ["cookie-session"]
 cookie-session = ["cookie/secure", "ntex/cookie"]
 
 [dependencies]
-ntex = "0.1.21"
-bytes = "0.5.4"
+ntex = "0.2.0-b.14"
+bytes = "0.5.6"
 cookie = "0.14.2"
 derive_more = "0.99.5"
-futures = "0.3.4"
+futures = "0.3.12"
 serde = "1.0"
 serde_json = "1.0"
 time = { version = "0.2.5", default-features = false, features = ["std"] }
