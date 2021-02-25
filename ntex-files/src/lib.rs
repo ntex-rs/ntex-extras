@@ -1,19 +1,13 @@
 #![allow(type_alias_bounds, clippy::borrow_interior_mutable_const, clippy::type_complexity)]
 
 //! Static files support
-use std::fmt::Write;
 use std::fs::{DirEntry, File};
-use std::future::Future;
-use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::rc::Rc;
-use std::task::{Context, Poll};
-use std::{cmp, io};
+use std::{fmt::Write, pin::Pin, rc::Rc, cmp, io, io::Read, io::Seek, task::Context, task::Poll};
 
-use bytes::Bytes;
+use ntex::util::Bytes;
 use futures::future::{ok, ready, Either, FutureExt, LocalBoxFuture, Ready};
-use futures::Stream;
+use futures::{Stream, Future};
 use hyperx::header::DispositionType;
 use mime_guess::from_ext;
 use ntex::http::error::BlockingError;

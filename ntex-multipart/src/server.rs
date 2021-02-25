@@ -1,15 +1,10 @@
 //! Multipart payload support
 use std::cell::{Cell, RefCell, RefMut};
-use std::convert::TryFrom;
-use std::marker::PhantomData;
-use std::pin::Pin;
-use std::rc::Rc;
+use std::{cmp, fmt, convert::TryFrom, marker::PhantomData, pin::Pin, rc::Rc};
 use std::task::{Context, Poll};
-use std::{cmp, fmt};
 
-use bytes::{Bytes, BytesMut};
+use ntex::util::{Bytes, BytesMut};
 use futures::stream::{LocalBoxStream, Stream, StreamExt};
-
 use ntex::http::error::{ParseError, PayloadError};
 use ntex::http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use ntex::task::LocalWaker;
