@@ -3,11 +3,12 @@
 //! Static files support
 use std::fs::{DirEntry, File};
 use std::path::{Path, PathBuf};
-use std::{fmt::Write, pin::Pin, rc::Rc, cmp, io, io::Read, io::Seek, task::Context, task::Poll};
+use std::{
+    cmp, fmt::Write, io, io::Read, io::Seek, pin::Pin, rc::Rc, task::Context, task::Poll,
+};
 
-use ntex::util::Bytes;
 use futures::future::{ok, ready, Either, FutureExt, LocalBoxFuture, Ready};
-use futures::{Stream, Future};
+use futures::{Future, Stream};
 use hyperx::header::DispositionType;
 use mime_guess::from_ext;
 use ntex::http::error::BlockingError;
@@ -15,6 +16,7 @@ use ntex::http::{header, Method, Payload, Uri};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex::service::{IntoServiceFactory, Service, ServiceFactory};
+use ntex::util::Bytes;
 use ntex::web::dev::{WebRequest, WebResponse, WebServiceConfig, WebServiceFactory};
 use ntex::web::error::ErrorRenderer;
 use ntex::web::guard::Guard;

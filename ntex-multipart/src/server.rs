@@ -1,13 +1,13 @@
 //! Multipart payload support
 use std::cell::{Cell, RefCell, RefMut};
-use std::{cmp, fmt, convert::TryFrom, marker::PhantomData, pin::Pin, rc::Rc};
 use std::task::{Context, Poll};
+use std::{cmp, convert::TryFrom, fmt, marker::PhantomData, pin::Pin, rc::Rc};
 
-use ntex::util::{Bytes, BytesMut};
 use futures::stream::{LocalBoxStream, Stream, StreamExt};
 use ntex::http::error::{ParseError, PayloadError};
 use ntex::http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use ntex::task::LocalWaker;
+use ntex::util::{Bytes, BytesMut};
 
 use crate::error::MultipartError;
 
@@ -753,10 +753,10 @@ impl PayloadBuffer {
 mod tests {
     use super::*;
 
-    use bytes::Bytes;
     use futures::future::lazy;
     use ntex::channel::mpsc;
     use ntex::http::h1::Payload;
+    use ntex::util::Bytes;
 
     #[ntex::test]
     async fn test_boundary() {

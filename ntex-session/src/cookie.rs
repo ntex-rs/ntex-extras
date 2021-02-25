@@ -382,7 +382,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
+    use ntex::util::Bytes;
     use ntex::web::{self, test, App};
 
     #[ntex::test]
