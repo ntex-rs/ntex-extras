@@ -393,10 +393,10 @@ impl<Err: ErrorRenderer> CookieIdentityInner<Err> {
         let mut jar = CookieJar::new();
         let key = if self.legacy_supported() { &self.key } else { &self.key_v2 };
         if add_cookie {
-            jar.private(&key).add(cookie);
+            jar.private_mut(&key).add(cookie);
         } else {
             jar.add_original(cookie.clone());
-            jar.private(&key).remove(cookie);
+            jar.private_mut(&key).remove(cookie);
         }
         for cookie in jar.delta() {
             let val = HeaderValue::from_str(&cookie.to_string()).map_err(HttpError::from)?;
@@ -761,7 +761,7 @@ mod tests {
 
     fn legacy_login_cookie(identity: &'static str) -> Cookie<'static> {
         let mut jar = CookieJar::new();
-        jar.private(&Key::derive_from(&COOKIE_KEY_MASTER))
+        jar.private_mut(&Key::derive_from(&COOKIE_KEY_MASTER))
             .add(Cookie::new(COOKIE_NAME, identity));
         jar.get(COOKIE_NAME).unwrap().clone()
     }
@@ -774,7 +774,7 @@ mod tests {
         let mut jar = CookieJar::new();
         let key: Vec<u8> =
             COOKIE_KEY_MASTER.iter().chain([1, 0, 0, 0].iter()).map(|e| *e).collect();
-        jar.private(&Key::derive_from(&key)).add(Cookie::new(
+        jar.private_mut(&Key::derive_from(&key)).add(Cookie::new(
             COOKIE_NAME,
             serde_json::to_string(&CookieValue {
                 identity: identity.to_string(),
