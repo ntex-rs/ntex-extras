@@ -16,7 +16,7 @@ name = "ntex_multipart"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "0.3.5"
+ntex = "0.3.18"
 derive_more = "0.99.11"
 httparse = "1.3"
 futures = "0.3.13"
