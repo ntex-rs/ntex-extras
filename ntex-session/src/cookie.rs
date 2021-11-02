@@ -23,11 +23,11 @@ use std::task::{Context, Poll};
 
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
-use futures::future::{ok, FutureExt, LocalBoxFuture, Ready};
+use futures::future::{FutureExt, LocalBoxFuture};
 use ntex::http::header::{HeaderValue, SET_COOKIE};
 use ntex::http::HttpMessage;
 use ntex::service::{Service, Transform};
-use ntex::web::dev::{WebRequest, WebResponse};
+use ntex::web::{WebRequest, WebResponse};
 use ntex::web::{DefaultError, ErrorRenderer, WebResponseError};
 use serde_json::error::Error as JsonError;
 use time::{Duration, OffsetDateTime};
@@ -293,15 +293,10 @@ where
     Err: ErrorRenderer,
     Err::Container: From<CookieSessionError>,
 {
-    type Request = WebRequest<Err>;
-    type Response = WebResponse;
-    type Error = S::Error;
-    type InitError = ();
-    type Transform = CookieSessionMiddleware<S, Err>;
-    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+    type Service = CookieSessionMiddleware<S, Err>;
 
-    fn new_transform(&self, service: S) -> Self::Future {
-        ok(CookieSessionMiddleware { service, inner: self.0.clone() })
+    fn new_transform(&self, service: S) -> Self::Service {
+        CookieSessionMiddleware { service, inner: self.0.clone() }
     }
 }
 
@@ -494,7 +489,7 @@ mod tests {
             .expires()
             .expect("Expiration is set");
 
-        ntex::rt::time::delay_for(std::time::Duration::from_secs(1)).await;
+        ntex::time::sleep(std::time::Duration::from_secs(1)).await;
 
         let request = test::TestRequest::with_uri("/test/").to_request();
         let response = app.call(request).await.unwrap();

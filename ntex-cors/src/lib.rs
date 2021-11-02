@@ -56,7 +56,7 @@ use futures::future::{ok, Either, FutureExt, LocalBoxFuture, Ready};
 use ntex::http::header::{self, HeaderName, HeaderValue};
 use ntex::http::{error::HttpError, HeaderMap, Method, RequestHead, StatusCode, Uri};
 use ntex::service::{Service, Transform};
-use ntex::web::dev::{WebRequest, WebResponse};
+use ntex::web::{WebRequest, WebResponse};
 use ntex::web::{DefaultError, ErrorRenderer, HttpResponse, WebResponseError};
 
 /// A set of errors that can occur during processing CORS
@@ -728,15 +728,10 @@ where
     Err::Container: From<S::Error>,
     CorsError: WebResponseError<Err>,
 {
-    type Request = WebRequest<Err>;
-    type Response = WebResponse;
-    type Error = S::Error;
-    type InitError = ();
-    type Transform = CorsMiddleware<S>;
-    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+    type Service = CorsMiddleware<S>;
 
-    fn new_transform(&self, service: S) -> Self::Future {
-        ok(CorsMiddleware { service, inner: self.inner.clone() })
+    fn new_transform(&self, service: S) -> Self::Service {
+        CorsMiddleware { service, inner: self.inner.clone() }
     }
 }
 
@@ -815,7 +810,7 @@ mod tests {
 
     #[ntex::test]
     async fn validate_origin_allows_all_origins() {
-        let cors = Cors::new().finish().new_transform(test::ok_service()).await.unwrap();
+        let cors = Cors::new().finish().new_transform(test::ok_service());
         let req =
             TestRequest::with_header("Origin", "https://www.example.com").to_srv_request();
 
@@ -825,7 +820,7 @@ mod tests {
 
     #[ntex::test]
     async fn default() {
-        let cors = Cors::default().new_transform(test::ok_service()).await.unwrap();
+        let cors = Cors::default().new_transform(test::ok_service());
         let req =
             TestRequest::with_header("Origin", "https://www.example.com").to_srv_request();
 
@@ -842,9 +837,7 @@ mod tests {
             .allowed_headers(vec![header::AUTHORIZATION, header::ACCEPT])
             .allowed_header(header::CONTENT_TYPE)
             .finish()
-            .new_transform(test::ok_service())
-            .await
-            .unwrap();
+            .new_transform(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::OPTIONS)
@@ -923,9 +916,7 @@ mod tests {
         let cors = Cors::new()
             .allowed_origin("https://www.example.com")
             .finish()
-            .new_transform(test::ok_service())
-            .await
-            .unwrap();
+            .new_transform(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://www.unknown.com")
             .method(Method::GET)
@@ -940,9 +931,7 @@ mod tests {
         let cors = Cors::new()
             .allowed_origin("https://www.example.com")
             .finish()
-            .new_transform(test::ok_service())
-            .await
-            .unwrap();
+            .new_transform(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::GET)
@@ -957,9 +946,7 @@ mod tests {
         let cors = Cors::new()
             .disable_preflight()
             .finish()
-            .new_transform(test::ok_service())
-            .await
-            .unwrap();
+            .new_transform(test::ok_service());
 
         let req = TestRequest::default().method(Method::GET).to_srv_request();
         let resp = test::call_service(&cors, req).await;
@@ -987,9 +974,7 @@ mod tests {
             .expose_headers(exposed_headers.clone())
             .allowed_header(header::CONTENT_TYPE)
             .finish()
-            .new_transform(test::ok_service())
-            .await
-            .unwrap();
+            .new_transform(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::OPTIONS)
@@ -1033,9 +1018,7 @@ mod tests {
                     ok::<_, std::convert::Infallible>(req.into_response(
                         HttpResponse::Ok().header(header::VARY, "Accept").finish(),
                     ))
-                }))
-                .await
-                .unwrap();
+                }));
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::OPTIONS)
             .to_srv_request();
@@ -1050,9 +1033,7 @@ mod tests {
             .allowed_origin("https://www.example.com")
             .allowed_origin("https://www.google.com")
             .finish()
-            .new_transform(test::ok_service())
-            .await
-            .unwrap();
+            .new_transform(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::OPTIONS)
@@ -1073,9 +1054,7 @@ mod tests {
             .allowed_origin("https://example.org")
             .allowed_methods(vec![Method::GET])
             .finish()
-            .new_transform(test::ok_service())
-            .await
-            .unwrap();
+            .new_transform(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://example.com")
             .method(Method::GET)
@@ -1105,9 +1084,7 @@ mod tests {
             .allowed_origin("https://example.org")
             .allowed_methods(vec![Method::GET])
             .finish()
-            .new_transform(test::ok_service())
-            .await
-            .unwrap();
+            .new_transform(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://example.com")
             .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")

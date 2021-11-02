@@ -62,7 +62,7 @@ use ntex::http::header::{self, HeaderValue};
 use ntex::http::{HttpMessage, Payload};
 use ntex::service::{Service, Transform};
 use ntex::util::Extensions;
-use ntex::web::dev::{WebRequest, WebResponse};
+use ntex::web::{WebRequest, WebResponse};
 use ntex::web::{DefaultError, ErrorRenderer, FromRequest, HttpRequest, WebResponseError};
 
 /// The extractor type to obtain your identity from a request.
@@ -231,19 +231,14 @@ where
     Err::Container: From<S::Error>,
     Err::Container: From<T::Error>,
 {
-    type Request = WebRequest<Err>;
-    type Response = WebResponse;
-    type Error = S::Error;
-    type InitError = ();
-    type Transform = IdentityServiceMiddleware<S, T, Err>;
-    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+    type Service = IdentityServiceMiddleware<S, T, Err>;
 
-    fn new_transform(&self, service: S) -> Self::Future {
-        ok(IdentityServiceMiddleware {
+    fn new_transform(&self, service: S) -> Self::Service {
+        IdentityServiceMiddleware {
             backend: self.backend.clone(),
             service: Rc::new(service),
             _t: PhantomData,
-        })
+        }
     }
 }
 
@@ -1051,7 +1046,7 @@ mod tests {
         let srv = IdentityServiceMiddleware {
             backend: Rc::new(Ident),
             service: Rc::new(into_service(|_: WebRequest<DefaultError>| async move {
-                ntex::rt::time::delay_for(std::time::Duration::from_secs(100)).await;
+                ntex::time::sleep(std::time::Duration::from_secs(100)).await;
                 Err::<WebResponse, _>(error::ErrorBadRequest("error"))
             })),
             _t: PhantomData,
@@ -1062,7 +1057,7 @@ mod tests {
         ntex::rt::spawn(async move {
             let _ = srv2.call(req).await;
         });
-        ntex::rt::time::delay_for(std::time::Duration::from_millis(50)).await;
+        ntex::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let _ = lazy(|cx| srv.poll_ready(cx)).await;
     }

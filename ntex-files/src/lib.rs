@@ -17,7 +17,7 @@ use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex::service::{IntoServiceFactory, Service, ServiceFactory};
 use ntex::util::Bytes;
-use ntex::web::dev::{WebRequest, WebResponse, WebServiceConfig, WebServiceFactory};
+use ntex::web::{WebRequest, WebResponse, dev::WebServiceConfig, WebServiceFactory};
 use ntex::web::error::ErrorRenderer;
 use ntex::web::guard::Guard;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse};
