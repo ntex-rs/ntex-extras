@@ -17,18 +17,16 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::marker::PhantomData;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
-use futures::future::{ok, FutureExt, LocalBoxFuture, Ready};
+use futures::future::{FutureExt, LocalBoxFuture};
 use ntex::http::header::{HeaderValue, SET_COOKIE};
 use ntex::http::HttpMessage;
 use ntex::service::{Service, Transform};
-use ntex::web::dev::{WebRequest, WebResponse};
-use ntex::web::{DefaultError, ErrorRenderer, WebResponseError};
+use ntex::web::{DefaultError, ErrorRenderer, WebRequest, WebResponse, WebResponseError};
 use serde_json::error::Error as JsonError;
 use time::{Duration, OffsetDateTime};
 
@@ -52,7 +50,7 @@ enum CookieSecurity {
     Private,
 }
 
-struct CookieSessionInner<Err> {
+struct CookieSessionInner {
     key: Key,
     security: CookieSecurity,
     name: String,
@@ -63,10 +61,9 @@ struct CookieSessionInner<Err> {
     max_age: Option<Duration>,
     expires_in: Option<Duration>,
     same_site: Option<SameSite>,
-    _t: PhantomData<Err>,
 }
 
-impl<Err> CookieSessionInner<Err> {
+impl CookieSessionInner {
     fn new(key: &[u8], security: CookieSecurity) -> Self {
         CookieSessionInner {
             security,
@@ -79,7 +76,6 @@ impl<Err> CookieSessionInner<Err> {
             max_age: None,
             expires_in: None,
             same_site: None,
-            _t: PhantomData,
         }
     }
 
@@ -134,7 +130,7 @@ impl<Err> CookieSessionInner<Err> {
     fn remove_cookie(&self, res: &mut WebResponse) -> Result<(), Infallible> {
         let mut cookie = Cookie::named(self.name.clone());
         cookie.set_value("");
-        cookie.set_max_age(Duration::zero());
+        cookie.set_max_age(Duration::ZERO);
         cookie.set_expires(OffsetDateTime::now_utc() - Duration::days(365));
 
         let val = HeaderValue::from_str(&cookie.to_string()).unwrap();
@@ -143,7 +139,7 @@ impl<Err> CookieSessionInner<Err> {
         Ok(())
     }
 
-    fn load(&self, req: &WebRequest<Err>) -> (bool, HashMap<String, String>) {
+    fn load<Err>(&self, req: &WebRequest<Err>) -> (bool, HashMap<String, String>) {
         if let Ok(cookies) = req.cookies() {
             for cookie in cookies.iter() {
                 if cookie.name() == self.name {
@@ -206,9 +202,9 @@ impl<Err> CookieSessionInner<Err> {
 ///         .secure(true))
 ///     .service(web::resource("/").to(|| async { HttpResponse::Ok() }));
 /// ```
-pub struct CookieSession<Err>(Rc<CookieSessionInner<Err>>);
+pub struct CookieSession(Rc<CookieSessionInner>);
 
-impl<Err> CookieSession<Err> {
+impl CookieSession {
     /// Construct new *signed* `CookieSessionBackend` instance.
     ///
     /// Panics if key length is less than 32 bytes.
@@ -285,41 +281,28 @@ impl<Err> CookieSession<Err> {
     }
 }
 
-impl<S, Err> Transform<S> for CookieSession<Err>
-where
-    S: Service<Request = WebRequest<Err>, Response = WebResponse>,
-    S::Future: 'static,
-    S::Error: 'static,
-    Err: ErrorRenderer,
-    Err::Container: From<CookieSessionError>,
-{
-    type Request = WebRequest<Err>;
-    type Response = WebResponse;
-    type Error = S::Error;
-    type InitError = ();
-    type Transform = CookieSessionMiddleware<S, Err>;
-    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+impl<S> Transform<S> for CookieSession {
+    type Service = CookieSessionMiddleware<S>;
 
-    fn new_transform(&self, service: S) -> Self::Future {
-        ok(CookieSessionMiddleware { service, inner: self.0.clone() })
+    fn new_transform(&self, service: S) -> Self::Service {
+        CookieSessionMiddleware { service, inner: self.0.clone() }
     }
 }
 
 /// Cookie session middleware
-pub struct CookieSessionMiddleware<S, Err> {
+pub struct CookieSessionMiddleware<S> {
     service: S,
-    inner: Rc<CookieSessionInner<Err>>,
+    inner: Rc<CookieSessionInner>,
 }
 
-impl<S, Err> Service for CookieSessionMiddleware<S, Err>
+impl<S, Err> Service<WebRequest<Err>> for CookieSessionMiddleware<S>
 where
-    S: Service<Request = WebRequest<Err>, Response = WebResponse>,
+    S: Service<WebRequest<Err>, Response = WebResponse>,
     S::Future: 'static,
     S::Error: 'static,
     Err: ErrorRenderer,
     Err::Container: From<CookieSessionError>,
 {
-    type Request = WebRequest<Err>;
     type Response = WebResponse;
     type Error = S::Error;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
@@ -382,8 +365,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ntex::util::Bytes;
     use ntex::web::{self, test, App};
+    use ntex::{time, util::Bytes};
 
     #[ntex::test]
     async fn cookie_session() {
@@ -494,7 +477,7 @@ mod tests {
             .expires()
             .expect("Expiration is set");
 
-        ntex::rt::time::delay_for(std::time::Duration::from_secs(1)).await;
+        time::sleep(time::Seconds::ONE).await;
 
         let request = test::TestRequest::with_uri("/test/").to_request();
         let response = app.call(request).await.unwrap();

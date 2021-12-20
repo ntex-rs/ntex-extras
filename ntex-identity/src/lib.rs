@@ -44,12 +44,9 @@
 //!     .service(web::resource("/login.html").to(login))
 //!     .service(web::resource("/logout.html").to(logout));
 //! ```
-use std::convert::Infallible;
-use std::future::Future;
-use std::marker::PhantomData;
-use std::rc::Rc;
 use std::task::{Context, Poll};
 use std::time::SystemTime;
+use std::{convert::Infallible, future::Future, rc::Rc};
 
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
@@ -62,8 +59,10 @@ use ntex::http::header::{self, HeaderValue};
 use ntex::http::{HttpMessage, Payload};
 use ntex::service::{Service, Transform};
 use ntex::util::Extensions;
-use ntex::web::dev::{WebRequest, WebResponse};
-use ntex::web::{DefaultError, ErrorRenderer, FromRequest, HttpRequest, WebResponseError};
+use ntex::web::{
+    DefaultError, ErrorRenderer, FromRequest, HttpRequest, WebRequest, WebResponse,
+    WebResponseError,
+};
 
 /// The extractor type to obtain your identity from a request.
 ///
@@ -210,66 +209,46 @@ pub trait IdentityPolicy<Err>: Sized + 'static {
 ///           .secure(false),
 /// ));
 /// ```
-pub struct IdentityService<T, Err> {
+pub struct IdentityService<T> {
     backend: Rc<T>,
-    _t: PhantomData<Err>,
 }
 
-impl<T, Err> IdentityService<T, Err> {
+impl<T> IdentityService<T> {
     /// Create new identity service with specified backend.
     pub fn new(backend: T) -> Self {
-        IdentityService { backend: Rc::new(backend), _t: PhantomData }
+        IdentityService { backend: Rc::new(backend) }
     }
 }
 
-impl<S, T, Err> Transform<S> for IdentityService<T, Err>
-where
-    S: Service<Request = WebRequest<Err>, Response = WebResponse> + 'static,
-    S::Future: 'static,
-    T: IdentityPolicy<Err>,
-    Err: ErrorRenderer,
-    Err::Container: From<S::Error>,
-    Err::Container: From<T::Error>,
-{
-    type Request = WebRequest<Err>;
-    type Response = WebResponse;
-    type Error = S::Error;
-    type InitError = ();
-    type Transform = IdentityServiceMiddleware<S, T, Err>;
-    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+impl<S, T> Transform<S> for IdentityService<T> {
+    type Service = IdentityServiceMiddleware<S, T>;
 
-    fn new_transform(&self, service: S) -> Self::Future {
-        ok(IdentityServiceMiddleware {
-            backend: self.backend.clone(),
-            service: Rc::new(service),
-            _t: PhantomData,
-        })
+    fn new_transform(&self, service: S) -> Self::Service {
+        IdentityServiceMiddleware { backend: self.backend.clone(), service: Rc::new(service) }
     }
 }
 
 #[doc(hidden)]
-pub struct IdentityServiceMiddleware<S, T, Err> {
+pub struct IdentityServiceMiddleware<S, T> {
     backend: Rc<T>,
     service: Rc<S>,
-    _t: PhantomData<Err>,
 }
 
-impl<S, T, Err> Clone for IdentityServiceMiddleware<S, T, Err> {
+impl<S, T> Clone for IdentityServiceMiddleware<S, T> {
     fn clone(&self) -> Self {
-        Self { backend: self.backend.clone(), service: self.service.clone(), _t: PhantomData }
+        Self { backend: self.backend.clone(), service: self.service.clone() }
     }
 }
 
-impl<S, T, Err> Service for IdentityServiceMiddleware<S, T, Err>
+impl<S, T, Err> Service<WebRequest<Err>> for IdentityServiceMiddleware<S, T>
 where
-    S: Service<Request = WebRequest<Err>, Response = WebResponse> + 'static,
+    S: Service<WebRequest<Err>, Response = WebResponse> + 'static,
     S::Future: 'static,
     T: IdentityPolicy<Err>,
     Err: ErrorRenderer,
     Err::Container: From<S::Error>,
     Err::Container: From<T::Error>,
 {
-    type Request = WebRequest<Err>;
     type Response = WebResponse;
     type Error = S::Error;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
@@ -313,7 +292,7 @@ where
     }
 }
 
-struct CookieIdentityInner<Err> {
+struct CookieIdentityInner {
     key: Key,
     key_v2: Key,
     name: String,
@@ -324,7 +303,6 @@ struct CookieIdentityInner<Err> {
     same_site: Option<SameSite>,
     visit_deadline: Option<Duration>,
     login_deadline: Option<Duration>,
-    _t: PhantomData<Err>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -341,8 +319,8 @@ struct CookieIdentityExtention {
     login_timestamp: Option<SystemTime>,
 }
 
-impl<Err: ErrorRenderer> CookieIdentityInner<Err> {
-    fn new(key: &[u8]) -> CookieIdentityInner<Err> {
+impl CookieIdentityInner {
+    fn new(key: &[u8]) -> CookieIdentityInner {
         let key_v2: Vec<u8> = key.iter().chain([1, 0, 0, 0].iter()).cloned().collect();
         CookieIdentityInner {
             key: Key::derive_from(key),
@@ -355,7 +333,6 @@ impl<Err: ErrorRenderer> CookieIdentityInner<Err> {
             same_site: None,
             visit_deadline: None,
             login_deadline: None,
-            _t: PhantomData,
         }
     }
 
@@ -377,13 +354,10 @@ impl<Err: ErrorRenderer> CookieIdentityInner<Err> {
         cookie.set_path(self.path.clone());
         cookie.set_secure(self.secure);
         cookie.set_http_only(true);
+        cookie.set_max_age(self.max_age);
 
         if let Some(ref domain) = self.domain {
             cookie.set_domain(domain.clone());
-        }
-
-        if let Some(max_age) = self.max_age {
-            cookie.set_max_age(max_age);
         }
 
         if let Some(same_site) = self.same_site {
@@ -405,7 +379,7 @@ impl<Err: ErrorRenderer> CookieIdentityInner<Err> {
         Ok(())
     }
 
-    fn load(&self, req: &WebRequest<Err>) -> Option<CookieValue> {
+    fn load<Err>(&self, req: &WebRequest<Err>) -> Option<CookieValue> {
         let cookie = req.cookie(&self.name)?;
         let mut jar = CookieJar::new();
         jar.add_original(cookie.clone());
@@ -472,7 +446,7 @@ impl<Err: ErrorRenderer> CookieIdentityInner<Err> {
 ///            .secure(true),
 /// ));
 /// ```
-pub struct CookieIdentityPolicy<Err>(Rc<CookieIdentityInner<Err>>);
+pub struct CookieIdentityPolicy(Rc<CookieIdentityInner>);
 
 #[derive(Debug, Display, From)]
 pub enum CookieIdentityPolicyError {
@@ -482,7 +456,7 @@ pub enum CookieIdentityPolicyError {
 
 impl WebResponseError<DefaultError> for CookieIdentityPolicyError {}
 
-impl<Err: ErrorRenderer> CookieIdentityPolicy<Err> {
+impl CookieIdentityPolicy {
     /// Construct new `CookieIdentityPolicy` instance.
     ///
     /// Panics if key length is less than 32 bytes.
@@ -551,7 +525,7 @@ impl<Err: ErrorRenderer> CookieIdentityPolicy<Err> {
     }
 }
 
-impl<Err: ErrorRenderer> IdentityPolicy<Err> for CookieIdentityPolicy<Err> {
+impl<Err: ErrorRenderer> IdentityPolicy<Err> for CookieIdentityPolicy {
     type Error = CookieIdentityPolicyError;
     type Future = Ready<Result<Option<String>, CookieIdentityPolicyError>>;
     type ResponseFuture = Ready<Result<(), CookieIdentityPolicyError>>;
@@ -610,10 +584,9 @@ mod tests {
     use std::borrow::Borrow;
 
     use super::*;
-    use ntex::http::StatusCode;
-    use ntex::service::into_service;
     use ntex::web::test::{self, TestRequest};
     use ntex::web::{self, error, App, Error, HttpResponse};
+    use ntex::{http::StatusCode, service::into_service, time};
 
     const COOKIE_KEY_MASTER: [u8; 32] = [0; 32];
     const COOKIE_NAME: &'static str = "ntex_auth";
@@ -731,18 +704,11 @@ mod tests {
     }
 
     async fn create_identity_server<
-        F: Fn(CookieIdentityPolicy<DefaultError>) -> CookieIdentityPolicy<DefaultError>
-            + Sync
-            + Send
-            + Clone
-            + 'static,
+        F: Fn(CookieIdentityPolicy) -> CookieIdentityPolicy + Sync + Send + Clone + 'static,
     >(
         f: F,
-    ) -> impl ntex::service::Service<
-        Request = ntex::http::Request,
-        Response = WebResponse,
-        Error = Error,
-    > {
+    ) -> impl ntex::service::Service<ntex::http::Request, Response = WebResponse, Error = Error>
+    {
         test::init_service(
             App::new()
                 .wrap(IdentityService::new(f(CookieIdentityPolicy::new(&COOKIE_KEY_MASTER)
@@ -1051,10 +1017,9 @@ mod tests {
         let srv = IdentityServiceMiddleware {
             backend: Rc::new(Ident),
             service: Rc::new(into_service(|_: WebRequest<DefaultError>| async move {
-                ntex::rt::time::delay_for(std::time::Duration::from_secs(100)).await;
+                time::sleep(time::Seconds(100)).await;
                 Err::<WebResponse, _>(error::ErrorBadRequest("error"))
             })),
-            _t: PhantomData,
         };
 
         let srv2 = srv.clone();
@@ -1062,7 +1027,7 @@ mod tests {
         ntex::rt::spawn(async move {
             let _ = srv2.call(req).await;
         });
-        ntex::rt::time::delay_for(std::time::Duration::from_millis(50)).await;
+        time::sleep(time::Millis(50)).await;
 
         let _ = lazy(|cx| srv.poll_ready(cx)).await;
     }

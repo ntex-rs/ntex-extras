@@ -17,10 +17,10 @@ use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex::service::{IntoServiceFactory, Service, ServiceFactory};
 use ntex::util::Bytes;
-use ntex::web::dev::{WebRequest, WebResponse, WebServiceConfig, WebServiceFactory};
+use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
 use ntex::web::error::ErrorRenderer;
 use ntex::web::guard::Guard;
-use ntex::web::{self, FromRequest, HttpRequest, HttpResponse};
+use ntex::web::{self, FromRequest, HttpRequest, HttpResponse, WebRequest, WebResponse};
 use percent_encoding::{utf8_percent_encode, CONTROLS};
 use v_htmlescape::escape as escape_html_entity;
 
@@ -366,13 +366,9 @@ impl<Err: ErrorRenderer> Files<Err> {
     /// Sets default handler which is used when no matched file could be found.
     pub fn default_handler<F, U>(mut self, f: F) -> Self
     where
-        F: IntoServiceFactory<U>,
-        U: ServiceFactory<
-                Config = (),
-                Request = WebRequest<Err>,
-                Response = WebResponse,
-                Error = Err::Container,
-            > + 'static,
+        F: IntoServiceFactory<U, WebRequest<Err>>,
+        U: ServiceFactory<WebRequest<Err>, Response = WebResponse, Error = Err::Container>
+            + 'static,
     {
         // create and configure default resource
         self.default = Some(Rc::new(boxed::factory(f.into_factory().map_init_err(|_| ()))));
@@ -399,15 +395,13 @@ where
     }
 }
 
-impl<Err> ServiceFactory for Files<Err>
+impl<Err> ServiceFactory<WebRequest<Err>> for Files<Err>
 where
     Err: ErrorRenderer,
     Err::Container: From<FilesError>,
 {
-    type Request = WebRequest<Err>;
     type Response = WebResponse;
     type Error = Err::Container;
-    type Config = ();
     type Service = FilesService<Err>;
     type InitError = ();
     type Future = LocalBoxFuture<'static, Result<Self::Service, Self::InitError>>;
@@ -475,12 +469,11 @@ where
     }
 }
 
-impl<Err> Service for FilesService<Err>
+impl<Err> Service<WebRequest<Err>> for FilesService<Err>
 where
     Err: ErrorRenderer,
     Err::Container: From<FilesError>,
 {
-    type Request = WebRequest<Err>;
     type Response = WebResponse;
     type Error = Err::Container;
     type Future = Either<
