@@ -423,7 +423,8 @@ impl DerefMut for NamedFile {
 /// Returns true if `req` has no `If-Match` header or one which matches `etag`.
 fn any_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
     if let Some(val) = req.headers().get(http::header::IF_MATCH) {
-        if let Ok(val) = header::IfMatch::parse_header(&val) {
+        let hdr = ::http::HeaderValue::from(val);
+        if let Ok(val) = header::IfMatch::parse_header(&&hdr) {
             match val {
                 header::IfMatch::Any => return true,
                 header::IfMatch::Items(ref items) => {
@@ -445,7 +446,8 @@ fn any_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
 /// Returns true if `req` doesn't have an `If-None-Match` header matching `req`.
 fn none_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
     if let Some(val) = req.headers().get(http::header::IF_NONE_MATCH) {
-        if let Ok(val) = header::IfNoneMatch::parse_header(&val) {
+        let hdr = ::http::HeaderValue::from(val);
+        if let Ok(val) = header::IfNoneMatch::parse_header(&&hdr) {
             return match val {
                 header::IfNoneMatch::Any => false,
                 header::IfNoneMatch::Items(ref items) => {
