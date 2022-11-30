@@ -295,8 +295,8 @@ impl NamedFile {
 
             (last_modified, header)
         } {
-            let t1: SystemTime = m.clone().into();
-            let t2: SystemTime = since.clone().into();
+            let t1: SystemTime = (*m).into();
+            let t2: SystemTime = (*since).into();
             match (t1.duration_since(UNIX_EPOCH), t2.duration_since(UNIX_EPOCH)) {
                 (Ok(t1), Ok(t2)) => t1 > t2,
                 _ => false,
@@ -322,8 +322,8 @@ impl NamedFile {
             }
             (last_modified, header)
         } {
-            let t1: SystemTime = m.clone().into();
-            let t2: SystemTime = since.clone().into();
+            let t1: SystemTime = (*m).into();
+            let t2: SystemTime = (*since).into();
             match (t1.duration_since(UNIX_EPOCH), t2.duration_since(UNIX_EPOCH)) {
                 (Ok(t1), Ok(t2)) => t1 <= t2,
                 _ => false,

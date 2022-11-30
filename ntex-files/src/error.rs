@@ -38,7 +38,7 @@ impl WebResponseError<DefaultError> for FilesError {
     }
 }
 
-#[derive(Display, Debug, PartialEq)]
+#[derive(Display, Debug, PartialEq, Eq)]
 pub enum UriSegmentError {
     /// The segment started with the wrapped invalid character.
     #[display(fmt = "The segment started with the wrapped invalid character")]

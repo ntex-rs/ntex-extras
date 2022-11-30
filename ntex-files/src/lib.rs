@@ -91,8 +91,8 @@ impl Stream for ChunkedReadFile {
             let mut file = self.file.take().expect("Use after completion");
             self.fut = Some(
                 web::block(move || {
-                    let max_bytes: usize;
-                    max_bytes = cmp::min(size.saturating_sub(counter), 65_536) as usize;
+                    let max_bytes: usize =
+                        cmp::min(size.saturating_sub(counter), 65_536) as usize;
                     let mut buf = Vec::with_capacity(max_bytes);
                     file.seek(io::SeekFrom::Start(offset))?;
                     let nbytes = file.by_ref().take(max_bytes as u64).read_to_end(&mut buf)?;
@@ -165,7 +165,7 @@ fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<WebResponse, 
         if dir.is_visible(&entry) {
             let entry = entry.unwrap();
             let p = match entry.path().strip_prefix(&dir.path) {
-                Ok(p) if cfg!(windows) => base.join(p).to_string_lossy().replace("\\", "/"),
+                Ok(p) if cfg!(windows) => base.join(p).to_string_lossy().replace('\\', "/"),
                 Ok(p) => base.join(p).to_string_lossy().into_owned(),
                 Err(_) => continue,
             };
@@ -419,7 +419,7 @@ where
             guards: self.guards.clone(),
         };
 
-        if let Some(ref default) = self.default.as_ref() {
+        if let Some(default) = self.default.as_ref() {
             default
                 .new_service(())
                 .map(move |result| match result {
@@ -491,10 +491,7 @@ where
             (**guard).check(req.head())
         } else {
             // default behaviour
-            match *req.method() {
-                Method::HEAD | Method::GET => true,
-                _ => false,
-            }
+            matches!(*req.method(), Method::HEAD | Method::GET)
         };
 
         if !is_method_valid {
