@@ -15,17 +15,14 @@
 //! The constructors take a key as an argument. This is the private key
 //! for cookie session - when this value is changed, all session data is lost.
 
-use std::collections::HashMap;
-use std::convert::Infallible;
-use std::rc::Rc;
 use std::task::{Context, Poll};
+use std::{collections::HashMap, convert::Infallible, rc::Rc};
 
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
 use futures::future::{FutureExt, LocalBoxFuture};
-use ntex::http::header::{HeaderValue, SET_COOKIE};
-use ntex::http::HttpMessage;
-use ntex::service::{Service, Transform};
+use ntex::http::{header::HeaderValue, header::SET_COOKIE, HttpMessage};
+use ntex::service::{Middleware, Service};
 use ntex::web::{DefaultError, ErrorRenderer, WebRequest, WebResponse, WebResponseError};
 use serde_json::error::Error as JsonError;
 use time::{Duration, OffsetDateTime};
@@ -281,10 +278,10 @@ impl CookieSession {
     }
 }
 
-impl<S> Transform<S> for CookieSession {
+impl<S> Middleware<S> for CookieSession {
     type Service = CookieSessionMiddleware<S>;
 
-    fn new_transform(&self, service: S) -> Self::Service {
+    fn create(&self, service: S) -> Self::Service {
         CookieSessionMiddleware { service, inner: self.0.clone() }
     }
 }
@@ -298,14 +295,13 @@ pub struct CookieSessionMiddleware<S> {
 impl<S, Err> Service<WebRequest<Err>> for CookieSessionMiddleware<S>
 where
     S: Service<WebRequest<Err>, Response = WebResponse>,
-    S::Future: 'static,
     S::Error: 'static,
     Err: ErrorRenderer,
     Err::Container: From<CookieSessionError>,
 {
     type Response = WebResponse;
     type Error = S::Error;
-    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future<'f> = LocalBoxFuture<'f, Result<Self::Response, Self::Error>> where Self: 'f;
 
     fn poll_ready(&self, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         self.service.poll_ready(cx)
@@ -320,7 +316,7 @@ where
     /// session state changes, then set-cookie is returned in response.  As
     /// a user logs out, call session.purge() to set SessionStatus accordingly
     /// and this will trigger removal of the session cookie in the response.
-    fn call(&self, req: WebRequest<Err>) -> Self::Future {
+    fn call(&self, req: WebRequest<Err>) -> Self::Future<'_> {
         let inner = self.inner.clone();
         let (is_new, state) = self.inner.load(&req);
         let prolong_expiration = self.inner.expires_in.is_some();

@@ -6,3 +6,13 @@ members = [
   "ntex-multipart",
   "ntex-session",
 ]
+
+[patch.crates-io]
+ntex = { git = "https://github.com/ntex-rs/ntex.git", branch = "service-0-4" }
+ntex-connect = { git = "https://github.com/ntex-rs/ntex.git", branch = "service-0-4" }
+ntex-io = { git = "https://github.com/ntex-rs/ntex.git", branch = "service-0-4" }
+ntex-service = { git = "https://github.com/ntex-rs/ntex.git", branch = "service-0-4" }
+ntex-util = { git = "https://github.com/ntex-rs/ntex.git", branch = "service-0-4" }
+ntex-tls = { git = "https://github.com/ntex-rs/ntex.git", branch = "service-0-4" }
+ntex-tokio = { git = "https://github.com/ntex-rs/ntex.git", branch = "service-0-4" }
+ntex-h2 = { git = "https://github.com/ntex-rs/ntex-h2.git", branch = "service-0-4" }

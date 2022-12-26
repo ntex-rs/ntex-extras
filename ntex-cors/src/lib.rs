@@ -54,7 +54,7 @@ use derive_more::Display;
 use futures::future::{ok, Either, FutureExt, LocalBoxFuture, Ready};
 use ntex::http::header::{self, HeaderName, HeaderValue};
 use ntex::http::{error::HttpError, HeaderMap, Method, RequestHead, StatusCode, Uri};
-use ntex::service::{Service, Transform};
+use ntex::service::{Middleware, Service};
 use ntex::web::{
     DefaultError, ErrorRenderer, HttpResponse, WebRequest, WebResponse, WebResponseError,
 };
@@ -721,14 +721,13 @@ pub struct CorsFactory<Err> {
     _t: PhantomData<Err>,
 }
 
-impl<S, Err> Transform<S> for CorsFactory<Err>
+impl<S, Err> Middleware<S> for CorsFactory<Err>
 where
     S: Service<WebRequest<Err>, Response = WebResponse>,
-    S::Future: 'static,
 {
     type Service = CorsMiddleware<S>;
 
-    fn new_transform(&self, service: S) -> Self::Service {
+    fn create(&self, service: S) -> Self::Service {
         CorsMiddleware { service, inner: self.inner.clone() }
     }
 }
@@ -746,17 +745,16 @@ pub struct CorsMiddleware<S> {
 impl<S, Err> Service<WebRequest<Err>> for CorsMiddleware<S>
 where
     S: Service<WebRequest<Err>, Response = WebResponse>,
-    S::Future: 'static,
     Err: ErrorRenderer,
     Err::Container: From<S::Error>,
     CorsError: WebResponseError<Err>,
 {
     type Response = WebResponse;
     type Error = S::Error;
-    type Future = Either<
+    type Future<'f> = Either<
         Ready<Result<Self::Response, S::Error>>,
-        LocalBoxFuture<'static, Result<Self::Response, S::Error>>,
-    >;
+        LocalBoxFuture<'f, Result<Self::Response, S::Error>>,
+    > where Self: 'f;
 
     fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.service.poll_ready(cx)
@@ -766,7 +764,7 @@ where
         self.service.poll_shutdown(cx, is_error)
     }
 
-    fn call(&self, req: WebRequest<Err>) -> Self::Future {
+    fn call(&self, req: WebRequest<Err>) -> Self::Future<'_> {
         match self.inner.preflight_check(req.head()) {
             Ok(Either::Left(res)) => Either::Left(ok(req.into_response(res))),
             Ok(Either::Right(_)) => {
@@ -794,7 +792,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use ntex::service::{fn_service, Transform};
+    use ntex::service::{fn_service, Middleware};
     use ntex::web::{self, test, test::TestRequest};
 
     use super::*;
@@ -808,7 +806,7 @@ mod tests {
 
     #[ntex::test]
     async fn validate_origin_allows_all_origins() {
-        let cors = Cors::new().finish().new_transform(test::ok_service());
+        let cors = Cors::new().finish().create(test::ok_service());
         let req =
             TestRequest::with_header("Origin", "https://www.example.com").to_srv_request();
 
@@ -818,7 +816,7 @@ mod tests {
 
     #[ntex::test]
     async fn default() {
-        let cors = Cors::default().new_transform(test::ok_service());
+        let cors = Cors::default().create(test::ok_service());
         let req =
             TestRequest::with_header("Origin", "https://www.example.com").to_srv_request();
 
@@ -835,7 +833,7 @@ mod tests {
             .allowed_headers(vec![header::AUTHORIZATION, header::ACCEPT])
             .allowed_header(header::CONTENT_TYPE)
             .finish()
-            .new_transform(test::ok_service());
+            .create(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::OPTIONS)
@@ -914,7 +912,7 @@ mod tests {
         let cors = Cors::new()
             .allowed_origin("https://www.example.com")
             .finish()
-            .new_transform(test::ok_service::<web::DefaultError>());
+            .create(test::ok_service::<web::DefaultError>());
 
         let req = TestRequest::with_header("Origin", "https://www.unknown.com")
             .method(Method::GET)
@@ -929,7 +927,7 @@ mod tests {
         let cors = Cors::new()
             .allowed_origin("https://www.example.com")
             .finish()
-            .new_transform(test::ok_service());
+            .create(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::GET)
@@ -941,7 +939,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_no_origin_response() {
-        let cors = Cors::new().disable_preflight().finish().new_transform(test::ok_service());
+        let cors = Cors::new().disable_preflight().finish().create(test::ok_service());
 
         let req = TestRequest::default().method(Method::GET).to_srv_request();
         let resp = test::call_service(&cors, req).await;
@@ -969,7 +967,7 @@ mod tests {
             .expose_headers(exposed_headers.clone())
             .allowed_header(header::CONTENT_TYPE)
             .finish()
-            .new_transform(test::ok_service());
+            .create(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::OPTIONS)
@@ -1009,7 +1007,7 @@ mod tests {
                 .expose_headers(exposed_headers.clone())
                 .allowed_header(header::CONTENT_TYPE)
                 .finish()
-                .new_transform(fn_service(|req: WebRequest<DefaultError>| {
+                .create(fn_service(|req: WebRequest<DefaultError>| {
                     ok::<_, std::convert::Infallible>(req.into_response(
                         HttpResponse::Ok().header(header::VARY, "Accept").finish(),
                     ))
@@ -1028,7 +1026,7 @@ mod tests {
             .allowed_origin("https://www.example.com")
             .allowed_origin("https://www.google.com")
             .finish()
-            .new_transform(test::ok_service());
+            .create(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::OPTIONS)
@@ -1049,7 +1047,7 @@ mod tests {
             .allowed_origin("https://example.org")
             .allowed_methods(vec![Method::GET])
             .finish()
-            .new_transform(test::ok_service());
+            .create(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://example.com")
             .method(Method::GET)
@@ -1079,7 +1077,7 @@ mod tests {
             .allowed_origin("https://example.org")
             .allowed_methods(vec![Method::GET])
             .finish()
-            .new_transform(test::ok_service());
+            .create(test::ok_service());
 
         let req = TestRequest::with_header("Origin", "https://example.com")
             .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")

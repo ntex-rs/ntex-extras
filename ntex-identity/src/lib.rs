@@ -57,7 +57,7 @@ use time::Duration;
 use ntex::http::error::HttpError;
 use ntex::http::header::{self, HeaderValue};
 use ntex::http::{HttpMessage, Payload};
-use ntex::service::{Service, Transform};
+use ntex::service::{Middleware, Service};
 use ntex::util::Extensions;
 use ntex::web::{
     DefaultError, ErrorRenderer, FromRequest, HttpRequest, WebRequest, WebResponse,
@@ -220,10 +220,10 @@ impl<T> IdentityService<T> {
     }
 }
 
-impl<S, T> Transform<S> for IdentityService<T> {
+impl<S, T> Middleware<S> for IdentityService<T> {
     type Service = IdentityServiceMiddleware<S, T>;
 
-    fn new_transform(&self, service: S) -> Self::Service {
+    fn create(&self, service: S) -> Self::Service {
         IdentityServiceMiddleware { backend: self.backend.clone(), service: Rc::new(service) }
     }
 }
@@ -243,7 +243,6 @@ impl<S, T> Clone for IdentityServiceMiddleware<S, T> {
 impl<S, T, Err> Service<WebRequest<Err>> for IdentityServiceMiddleware<S, T>
 where
     S: Service<WebRequest<Err>, Response = WebResponse> + 'static,
-    S::Future: 'static,
     T: IdentityPolicy<Err>,
     Err: ErrorRenderer,
     Err::Container: From<S::Error>,
@@ -251,7 +250,7 @@ where
 {
     type Response = WebResponse;
     type Error = S::Error;
-    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future<'f> = LocalBoxFuture<'f, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&self, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         self.service.poll_ready(cx)
@@ -261,7 +260,7 @@ where
         self.service.poll_shutdown(cx, is_error)
     }
 
-    fn call(&self, mut req: WebRequest<Err>) -> Self::Future {
+    fn call(&self, mut req: WebRequest<Err>) -> Self::Future<'_> {
         let srv = self.service.clone();
         let backend = self.backend.clone();
         let fut = self.backend.from_request(&mut req);

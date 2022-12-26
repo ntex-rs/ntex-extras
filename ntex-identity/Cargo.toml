@@ -1,6 +1,6 @@
 [package]
 name = "ntex-identity"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Identity service for ntex web framework."
 readme = "README.md"
@@ -21,7 +21,7 @@ default = ["cookie-policy"]
 cookie-policy = ["cookie/secure", "ntex/cookie"]
 
 [dependencies]
-ntex = "0.5.14"
+ntex = "0.6.0-alpha.0"
 futures = "0.3"
 serde = "1.0"
 serde_json = "1.0"
@@ -30,4 +30,4 @@ cookie = { version = "0.16", features = ["private"] }
 time = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-ntex = { version = "0.5", features=["tokio"] }
+ntex = { version = "0.6.0-alpha.0", features=["tokio"] }

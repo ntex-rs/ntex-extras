@@ -404,9 +404,9 @@ where
     type Error = Err::Container;
     type Service = FilesService<Err>;
     type InitError = ();
-    type Future = LocalBoxFuture<'static, Result<Self::Service, Self::InitError>>;
+    type Future<'f> = LocalBoxFuture<'f, Result<Self::Service, Self::InitError>>;
 
-    fn new_service(&self, _: ()) -> Self::Future {
+    fn create(&self, _: ()) -> Self::Future<'_> {
         let mut srv = FilesService {
             directory: self.directory.clone(),
             index: self.index.clone(),
@@ -421,7 +421,7 @@ where
 
         if let Some(default) = self.default.as_ref() {
             default
-                .new_service(())
+                .create(())
                 .map(move |result| match result {
                     Ok(default) => {
                         srv.default = Some(default);
@@ -458,7 +458,7 @@ where
         req: WebRequest<Err>,
     ) -> Either<
         Ready<Result<WebResponse, Err::Container>>,
-        LocalBoxFuture<'static, Result<WebResponse, Err::Container>>,
+        LocalBoxFuture<'_, Result<WebResponse, Err::Container>>,
     > {
         log::debug!("Files: Failed to handle {}: {}", req.path(), e);
         if let Some(ref default) = self.default {
@@ -476,16 +476,12 @@ where
 {
     type Response = WebResponse;
     type Error = Err::Container;
-    type Future = Either<
+    type Future<'f> = Either<
         Ready<Result<Self::Response, Self::Error>>,
-        LocalBoxFuture<'static, Result<Self::Response, Self::Error>>,
+        LocalBoxFuture<'f, Result<Self::Response, Self::Error>>,
     >;
 
-    fn poll_ready(&self, _: &mut Context) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&self, req: WebRequest<Err>) -> Self::Future {
+    fn call(&self, req: WebRequest<Err>) -> Self::Future<'_> {
         let is_method_valid = if let Some(guard) = &self.guards {
             // execute user defined guards
             (**guard).check(req.head())
@@ -1185,7 +1181,7 @@ mod tests {
             .default_handler(|req: WebRequest<DefaultError>| {
                 ok(req.into_response(HttpResponse::Ok().body("default content")))
             })
-            .new_service(())
+            .create(())
             .await
             .unwrap();
         let req = TestRequest::with_uri("/missing").to_srv_request();
