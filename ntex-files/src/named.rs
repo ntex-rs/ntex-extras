@@ -467,7 +467,6 @@ fn none_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
 }
 
 impl<Err: ErrorRenderer> Responder<Err> for NamedFile {
-    type Error = Err::Container;
     type Future = Ready<HttpResponse>;
 
     fn respond_to(self, req: &HttpRequest) -> Self::Future {

@@ -760,8 +760,8 @@ where
         self.service.poll_ready(cx)
     }
 
-    fn poll_shutdown(&self, cx: &mut Context<'_>, is_error: bool) -> Poll<()> {
-        self.service.poll_shutdown(cx, is_error)
+    fn poll_shutdown(&self, cx: &mut Context<'_>) -> Poll<()> {
+        self.service.poll_shutdown(cx)
     }
 
     fn call(&self, req: WebRequest<Err>) -> Self::Future<'_> {

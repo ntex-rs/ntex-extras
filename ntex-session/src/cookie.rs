@@ -307,8 +307,8 @@ where
         self.service.poll_ready(cx)
     }
 
-    fn poll_shutdown(&self, cx: &mut Context, is_error: bool) -> Poll<()> {
-        self.service.poll_shutdown(cx, is_error)
+    fn poll_shutdown(&self, cx: &mut Context) -> Poll<()> {
+        self.service.poll_shutdown(cx)
     }
 
     /// On first request, a new session cookie is returned in response, regardless
