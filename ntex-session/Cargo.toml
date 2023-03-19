@@ -23,7 +23,7 @@ cookie-session = ["cookie/secure", "ntex/cookie"]
 
 [dependencies]
 ntex = "0.6.0-beta.0"
-cookie = "0.16"
+cookie = "0.17"
 derive_more = "0.99"
 futures = "0.3"
 serde = "1.0"
