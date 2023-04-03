@@ -378,7 +378,7 @@ mod tests {
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(response.response().cookies().find(|c| c.name() == "ntex-session").is_some());
+        assert!(response.response().cookies().any(|c| c.name() == "ntex-session"));
     }
 
     #[ntex::test]
@@ -395,7 +395,7 @@ mod tests {
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(response.response().cookies().find(|c| c.name() == "ntex-session").is_some());
+        assert!(response.response().cookies().any(|c| c.name() == "ntex-session"));
     }
 
     #[ntex::test]
@@ -412,7 +412,7 @@ mod tests {
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(response.response().cookies().find(|c| c.name() == "ntex-session").is_some());
+        assert!(response.response().cookies().any(|c| c.name() == "ntex-session"));
     }
 
     #[ntex::test]
