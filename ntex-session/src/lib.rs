@@ -89,19 +89,19 @@ pub trait UserSession {
 
 impl UserSession for HttpRequest {
     fn get_session(&self) -> Session {
-        Session::get_session(&mut *self.extensions_mut())
+        Session::get_session(&mut self.extensions_mut())
     }
 }
 
 impl<Err> UserSession for WebRequest<Err> {
     fn get_session(&self) -> Session {
-        Session::get_session(&mut *self.extensions_mut())
+        Session::get_session(&mut self.extensions_mut())
     }
 }
 
 impl UserSession for RequestHead {
     fn get_session(&self) -> Session {
-        Session::get_session(&mut *self.extensions_mut())
+        Session::get_session(&mut self.extensions_mut())
     }
 }
 
@@ -112,6 +112,8 @@ pub enum SessionStatus {
     Renewed,
     Unchanged,
 }
+
+/// #[default] macro can be used but will depend on specific rust version
 impl Default for SessionStatus {
     fn default() -> SessionStatus {
         SessionStatus::Unchanged
@@ -181,7 +183,7 @@ impl Session {
         data: impl Iterator<Item = (String, String)>,
         req: &WebRequest<Err>,
     ) {
-        let session = Session::get_session(&mut *req.extensions_mut());
+        let session = Session::get_session(&mut req.extensions_mut());
         let mut inner = session.0.borrow_mut();
         inner.state.extend(data);
     }
@@ -190,7 +192,7 @@ impl Session {
         res: &mut WebResponse,
     ) -> (SessionStatus, Option<impl Iterator<Item = (String, String)>>) {
         if let Some(s_impl) = res.request().extensions().get::<Rc<RefCell<SessionInner>>>() {
-            let state = std::mem::replace(&mut s_impl.borrow_mut().state, HashMap::new());
+            let state = std::mem::take(&mut s_impl.borrow_mut().state);
             (s_impl.borrow().status.clone(), Some(state.into_iter()))
         } else {
             (SessionStatus::Unchanged, None)
@@ -199,7 +201,7 @@ impl Session {
 
     fn get_session(extensions: &mut Extensions) -> Session {
         if let Some(s_impl) = extensions.get::<Rc<RefCell<SessionInner>>>() {
-            return Session(Rc::clone(&s_impl));
+            return Session(Rc::clone(s_impl));
         }
         let inner = Rc::new(RefCell::new(SessionInner::default()));
         extensions.insert(inner.clone());
@@ -230,7 +232,7 @@ impl<Err> FromRequest<Err> for Session {
 
     #[inline]
     fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
-        ok(Session::get_session(&mut *req.extensions_mut()))
+        ok(Session::get_session(&mut req.extensions_mut()))
     }
 }
 
@@ -242,13 +244,13 @@ mod tests {
 
     #[test]
     fn session() {
-        let mut req = test::TestRequest::default().to_srv_request();
+        let req = test::TestRequest::default().to_srv_request();
 
         Session::set_session(
             vec![("key".to_string(), "\"value\"".to_string())].into_iter(),
-            &mut req,
+            &req,
         );
-        let session = Session::get_session(&mut *req.extensions_mut());
+        let session = Session::get_session(&mut req.extensions_mut());
         let res = session.get::<String>("key").unwrap();
         assert_eq!(res, Some("value".to_string()));
 
@@ -263,11 +265,11 @@ mod tests {
 
     #[test]
     fn get_session() {
-        let mut req = test::TestRequest::default().to_srv_request();
+        let req = test::TestRequest::default().to_srv_request();
 
         Session::set_session(
             vec![("key".to_string(), "\"value\"".to_string())].into_iter(),
-            &mut req,
+            &req,
         );
 
         let session = req.get_session();
@@ -281,7 +283,7 @@ mod tests {
 
         Session::set_session(
             vec![("key".to_string(), "\"value\"".to_string())].into_iter(),
-            &mut req,
+            &req,
         );
 
         let session = req.head_mut().get_session();
@@ -292,7 +294,7 @@ mod tests {
     #[test]
     fn purge_session() {
         let req = test::TestRequest::default().to_srv_request();
-        let session = Session::get_session(&mut *req.extensions_mut());
+        let session = Session::get_session(&mut req.extensions_mut());
         assert_eq!(session.0.borrow().status, SessionStatus::Unchanged);
         session.purge();
         assert_eq!(session.0.borrow().status, SessionStatus::Purged);
@@ -301,7 +303,7 @@ mod tests {
     #[test]
     fn renew_session() {
         let req = test::TestRequest::default().to_srv_request();
-        let session = Session::get_session(&mut *req.extensions_mut());
+        let session = Session::get_session(&mut req.extensions_mut());
         assert_eq!(session.0.borrow().status, SessionStatus::Unchanged);
         session.renew();
         assert_eq!(session.0.borrow().status, SessionStatus::Renewed);

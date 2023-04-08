@@ -536,7 +536,7 @@ impl Inner {
                     AllOrSome::Some(ref allowed_origins) => allowed_origins
                         .get(origin)
                         .map(|_| ())
-                        .ok_or_else(|| CorsError::OriginNotAllowed),
+                        .ok_or(CorsError::OriginNotAllowed),
                 };
             }
             Err(CorsError::BadOrigin)
@@ -553,10 +553,8 @@ impl Inner {
             AllOrSome::All => {
                 if self.send_wildcard {
                     Some(HeaderValue::from_static("*"))
-                } else if let Some(origin) = headers.get(&header::ORIGIN) {
-                    Some(origin.clone())
                 } else {
-                    None
+                    headers.get(&header::ORIGIN).cloned()
                 }
             }
             AllOrSome::Some(ref origins) => {
@@ -582,7 +580,7 @@ impl Inner {
                         .methods
                         .get(&method)
                         .map(|_| ())
-                        .ok_or_else(|| CorsError::MethodNotAllowed);
+                        .ok_or(CorsError::MethodNotAllowed);
                 }
             }
             Err(CorsError::BadRequestMethod)
@@ -641,10 +639,8 @@ impl Inner {
                     )
                     .unwrap(),
                 )
-            } else if let Some(hdr) = req.headers.get(&header::ACCESS_CONTROL_REQUEST_HEADERS) {
-                Some(hdr.clone())
             } else {
-                None
+                req.headers.get(&header::ACCESS_CONTROL_REQUEST_HEADERS).cloned()
             };
 
             let res = HttpResponse::Ok()
