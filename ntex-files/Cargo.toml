@@ -20,16 +20,18 @@ path = "src/lib.rs"
 [dependencies]
 ntex = "0.6.0-beta.0"
 ntex-http = "0.1.8"
-bitflags = "1.3"
+bitflags = "2.1"
 futures = "0.3"
 derive_more = "0.99"
 http = "0.2"
-hyperx = "1.4.0"
 log = "0.4"
 mime = "0.3"
 mime_guess = "2.0.1"
 percent-encoding = "2.1"
-v_htmlescape = "0.14.1"
+v_htmlescape = "0.15.8"
+unicase = "2.6.0"
+language-tags = "0.3.2"
+httpdate = "1.0.2"
 
 [dev-dependencies]
-ntex = { version = "0.6.0-beta.0", features=["tokio", "openssl", "compress"] }
+ntex = { version = "0.6.5", features = ["tokio", "openssl", "compress"] }

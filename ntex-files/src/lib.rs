@@ -9,7 +9,6 @@ use std::{
 
 use futures::future::{ok, ready, Either, FutureExt, LocalBoxFuture, Ready};
 use futures::{Future, Stream};
-use hyperx::header::DispositionType;
 use mime_guess::from_ext;
 use ntex::http::error::BlockingError;
 use ntex::http::{header, Method, Payload, Uri};
@@ -25,6 +24,7 @@ use percent_encoding::{utf8_percent_encode, CONTROLS};
 use v_htmlescape::escape as escape_html_entity;
 
 mod error;
+mod file_header;
 mod named;
 mod range;
 
@@ -208,7 +208,7 @@ fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<WebResponse, 
     ))
 }
 
-type MimeOverride = dyn Fn(&mime::Name) -> DispositionType;
+type MimeOverride = dyn Fn(&mime::Name) -> file_header::DispositionType;
 
 /// Static files handling
 ///
@@ -245,7 +245,7 @@ impl<Err: ErrorRenderer> Clone for Files<Err> {
             redirect_to_slash: self.redirect_to_slash,
             default: self.default.clone(),
             renderer: self.renderer.clone(),
-            file_flags: self.file_flags,
+            file_flags: self.file_flags.clone(),
             path: self.path.clone(),
             mime_override: self.mime_override.clone(),
             guards: self.guards.clone(),
@@ -312,7 +312,7 @@ impl<Err: ErrorRenderer> Files<Err> {
     /// Specifies mime override callback
     pub fn mime_override<F>(mut self, f: F) -> Self
     where
-        F: Fn(&mime::Name) -> DispositionType + 'static,
+        F: Fn(&mime::Name) -> file_header::DispositionType + 'static,
     {
         self.mime_override = Some(Rc::new(f));
         self
@@ -415,7 +415,7 @@ where
             default: None,
             renderer: self.renderer.clone(),
             mime_override: self.mime_override.clone(),
-            file_flags: self.file_flags,
+            file_flags: self.file_flags.clone(),
             guards: self.guards.clone(),
         };
 
@@ -500,7 +500,7 @@ where
         };
 
         // full filepath
-        let path = match self.directory.join(&real_path.0).canonicalize() {
+        let path = match self.directory.join(real_path.0).canonicalize() {
             Ok(path) => path,
             Err(e) => return self.handle_io_error(e, req),
         };
@@ -527,7 +527,7 @@ where
                             named_file.content_disposition.disposition = new_disposition;
                         }
 
-                        named_file.flags = self.file_flags;
+                        named_file.flags = self.file_flags.clone();
                         let (req, _) = req.into_parts();
                         Either::Left(ok(WebResponse::new(named_file.into_response(&req), req)))
                     }
@@ -558,7 +558,7 @@ where
                         named_file.content_disposition.disposition = new_disposition;
                     }
 
-                    named_file.flags = self.file_flags;
+                    named_file.flags = self.file_flags.clone();
                     let (req, _) = req.into_parts();
                     Either::Left(ok(WebResponse::new(named_file.into_response(&req), req)))
                 }
@@ -637,8 +637,7 @@ mod tests {
     #[ntex::test]
     async fn test_if_modified_since_without_if_none_match() {
         let file = NamedFile::open("Cargo.toml").unwrap();
-        let since =
-            hyperx::header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
+        let since = file_header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
 
         let req = TestRequest::default()
             .header(http::header::IF_MODIFIED_SINCE, since.to_string())
@@ -650,8 +649,7 @@ mod tests {
     #[ntex::test]
     async fn test_if_modified_since_with_if_none_match() {
         let file = NamedFile::open("Cargo.toml").unwrap();
-        let since =
-            hyperx::header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
+        let since = file_header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
 
         let req = TestRequest::default()
             .header(http::header::IF_NONE_MATCH, "miss_etag")
@@ -776,7 +774,9 @@ mod tests {
 
     #[ntex::test]
     async fn test_named_file_image_attachment() {
-        use hyperx::header::{Charset, ContentDisposition, DispositionParam, DispositionType};
+        use crate::file_header::{
+            Charset, ContentDisposition, DispositionParam, DispositionType,
+        };
 
         let cd = ContentDisposition {
             disposition: DispositionType::Attachment,
@@ -851,17 +851,17 @@ mod tests {
 
     #[ntex::test]
     async fn test_mime_override() {
-        fn all_attachment(_: &mime::Name) -> DispositionType {
-            DispositionType::Attachment
+        fn all_attachment(_: &mime::Name) -> file_header::DispositionType {
+            file_header::DispositionType::Attachment
         }
 
-        let mut srv = test::init_service(App::new().service(
+        let srv = test::init_service(App::new().service(
             Files::new("/", ".").mime_override(all_attachment).index_file("Cargo.toml"),
         ))
         .await;
 
         let request = TestRequest::get().uri("/").to_request();
-        let response = test::call_service(&mut srv, request).await;
+        let response = test::call_service(&srv, request).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let content_disposition = response
@@ -875,7 +875,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_named_file_ranges_status_code() {
-        let mut srv = test::init_service(
+        let srv = test::init_service(
             App::new().service(Files::new("/test", ".").index_file("Cargo.toml")),
         )
         .await;
@@ -885,7 +885,7 @@ mod tests {
             .uri("/t%65st/Cargo.toml")
             .header(http::header::RANGE, "bytes=10-20")
             .to_request();
-        let response = test::call_service(&mut srv, request).await;
+        let response = test::call_service(&srv, request).await;
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
 
         // Invalid range header
@@ -893,14 +893,14 @@ mod tests {
             .uri("/t%65st/Cargo.toml")
             .header(http::header::RANGE, "bytes=1-0")
             .to_request();
-        let response = test::call_service(&mut srv, request).await;
+        let response = test::call_service(&srv, request).await;
 
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     }
 
     #[ntex::test]
     async fn test_named_file_content_range_headers() {
-        let mut srv = test::init_service(
+        let srv = test::init_service(
             App::new().service(Files::new("/test", ".").index_file("tests/test.binary")),
         )
         .await;
@@ -911,7 +911,7 @@ mod tests {
             .header(http::header::RANGE, "bytes=10-20")
             .to_request();
 
-        let response = test::call_service(&mut srv, request).await;
+        let response = test::call_service(&srv, request).await;
         let contentrange =
             response.headers().get(http::header::CONTENT_RANGE).unwrap().to_str().unwrap();
 
@@ -922,7 +922,7 @@ mod tests {
             .uri("/t%65st/tests/test.binary")
             .header(http::header::RANGE, "bytes=10-5")
             .to_request();
-        let response = test::call_service(&mut srv, request).await;
+        let response = test::call_service(&srv, request).await;
 
         let contentrange =
             response.headers().get(http::header::CONTENT_RANGE).unwrap().to_str().unwrap();
@@ -932,7 +932,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_named_file_content_length_headers() {
-        let mut srv = test::init_service(
+        let srv = test::init_service(
             App::new().service(Files::new("test", ".").index_file("tests/test.binary")),
         )
         .await;
@@ -942,7 +942,7 @@ mod tests {
             .uri("/t%65st/tests/test.binary")
             .header(http::header::RANGE, "bytes=10-20")
             .to_request();
-        let _response = test::call_service(&mut srv, request).await;
+        let _response = test::call_service(&srv, request).await;
 
         // let contentlength = _response
         //     .headers()
@@ -957,7 +957,7 @@ mod tests {
             .uri("/t%65st/tests/test.binary")
             .header(http::header::RANGE, "bytes=10-8")
             .to_request();
-        let response = test::call_service(&mut srv, request).await;
+        let response = test::call_service(&srv, request).await;
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
 
         // Without range header
@@ -965,7 +965,7 @@ mod tests {
             .uri("/t%65st/tests/test.binary")
             // .no_default_headers()
             .to_request();
-        let _response = test::call_service(&mut srv, request).await;
+        let _response = test::call_service(&srv, request).await;
 
         // let contentlength = response
         //     .headers()
@@ -977,7 +977,7 @@ mod tests {
 
         // chunked
         let request = TestRequest::get().uri("/t%65st/tests/test.binary").to_request();
-        let response = test::call_service(&mut srv, request).await;
+        let response = test::call_service(&srv, request).await;
 
         // with enabled compression
         // {
@@ -997,7 +997,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_head_content_length_headers() {
-        let mut srv = test::init_service(
+        let srv = test::init_service(
             App::new().service(Files::new("test", ".").index_file("tests/test.binary")),
         )
         .await;
@@ -1007,7 +1007,7 @@ mod tests {
             .method(Method::HEAD)
             .uri("/t%65st/tests/test.binary")
             .to_request();
-        let _response = test::call_service(&mut srv, request).await;
+        let _response = test::call_service(&srv, request).await;
 
         // TODO: fix check
         // let contentlength = response
@@ -1036,35 +1036,35 @@ mod tests {
 
     #[ntex::test]
     async fn test_files_not_allowed() {
-        let mut srv = test::init_service(App::new().service(Files::new("/", "."))).await;
+        let srv = test::init_service(App::new().service(Files::new("/", "."))).await;
 
         let req = TestRequest::default().uri("/Cargo.toml").method(Method::POST).to_request();
 
-        let resp = test::call_service(&mut srv, req).await;
+        let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 
-        let mut srv = test::init_service(App::new().service(Files::new("/", "."))).await;
+        let srv = test::init_service(App::new().service(Files::new("/", "."))).await;
         let req = TestRequest::default().method(Method::PUT).uri("/Cargo.toml").to_request();
-        let resp = test::call_service(&mut srv, req).await;
+        let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[ntex::test]
     async fn test_files_guards() {
-        let mut srv = test::init_service(
+        let srv = test::init_service(
             App::new().service(Files::new("/", ".").use_guards(guard::Post())),
         )
         .await;
 
         let req = TestRequest::default().uri("/Cargo.toml").method(Method::POST).to_request();
 
-        let resp = test::call_service(&mut srv, req).await;
+        let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[ntex::test]
     async fn test_named_file_content_encoding() {
-        let mut srv = test::init_service(App::new().wrap(Compress::default()).service(
+        let srv = test::init_service(App::new().wrap(Compress::default()).service(
             web::resource("/").to(|| async {
                 NamedFile::open("Cargo.toml")
                     .unwrap()
@@ -1077,14 +1077,14 @@ mod tests {
             .uri("/")
             .header(http::header::ACCEPT_ENCODING, "gzip")
             .to_request();
-        let res = test::call_service(&mut srv, request).await;
+        let res = test::call_service(&srv, request).await;
         assert_eq!(res.status(), StatusCode::OK);
         assert!(!res.headers().contains_key(http::header::CONTENT_ENCODING));
     }
 
     #[ntex::test]
     async fn test_named_file_content_encoding_gzip() {
-        let mut srv = test::init_service(App::new().wrap(Compress::default()).service(
+        let srv = test::init_service(App::new().wrap(Compress::default()).service(
             web::resource("/").to(|| async {
                 NamedFile::open("Cargo.toml")
                     .unwrap()
@@ -1097,7 +1097,7 @@ mod tests {
             .uri("/")
             .header(http::header::ACCEPT_ENCODING, "gzip")
             .to_request();
-        let res = test::call_service(&mut srv, request).await;
+        let res = test::call_service(&srv, request).await;
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
             res.headers().get(http::header::CONTENT_ENCODING).unwrap().to_str().unwrap(),
@@ -1115,25 +1115,25 @@ mod tests {
 
     #[ntex::test]
     async fn test_static_files() {
-        let mut srv =
+        let srv =
             test::init_service(App::new().service(Files::new("/", ".").show_files_listing()))
                 .await;
         let req = TestRequest::with_uri("/missing").to_request();
 
-        let resp = test::call_service(&mut srv, req).await;
+        let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-        let mut srv = test::init_service(App::new().service(Files::new("/", "."))).await;
+        let srv = test::init_service(App::new().service(Files::new("/", "."))).await;
 
         let req = TestRequest::default().to_request();
-        let resp = test::call_service(&mut srv, req).await;
+        let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-        let mut srv =
+        let srv =
             test::init_service(App::new().service(Files::new("/", ".").show_files_listing()))
                 .await;
         let req = TestRequest::with_uri("/tests").to_request();
-        let resp = test::call_service(&mut srv, req).await;
+        let resp = test::call_service(&srv, req).await;
         assert_eq!(
             resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
             "text/html; charset=utf-8"
@@ -1146,26 +1146,26 @@ mod tests {
     #[ntex::test]
     async fn test_redirect_to_slash_directory() {
         // should not redirect if no index
-        let mut srv = test::init_service(
+        let srv = test::init_service(
             App::new().service(Files::new("/", ".").redirect_to_slash_directory()),
         )
         .await;
         let req = TestRequest::with_uri("/tests").to_request();
-        let resp = test::call_service(&mut srv, req).await;
+        let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         // should redirect if index present
-        let mut srv = test::init_service(App::new().service(
+        let srv = test::init_service(App::new().service(
             Files::new("/", ".").index_file("test.png").redirect_to_slash_directory(),
         ))
         .await;
         let req = TestRequest::with_uri("/tests").to_request();
-        let resp = test::call_service(&mut srv, req).await;
+        let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::FOUND);
 
         // should not redirect if the path is wrong
         let req = TestRequest::with_uri("/not_existing").to_request();
-        let resp = test::call_service(&mut srv, req).await;
+        let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
@@ -1177,7 +1177,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_default_handler_file_missing() {
-        let mut st = Files::new("/", ".")
+        let st = Files::new("/", ".")
             .default_handler(|req: WebRequest<DefaultError>| {
                 ok(req.into_response(HttpResponse::Ok().body("default content")))
             })
@@ -1186,7 +1186,7 @@ mod tests {
             .unwrap();
         let req = TestRequest::with_uri("/missing").to_srv_request();
 
-        let resp = test::call_service(&mut st, req).await;
+        let resp = test::call_service(&st, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = test::read_body(resp).await;
         assert_eq!(bytes, Bytes::from_static(b"default content"));
@@ -1257,7 +1257,7 @@ mod tests {
 
     //     #[ntex::test]
     //     fn integration_serve_index() {
-    //         let mut srv = test::TestServer::with_factory(|| {
+    //         let srv = test::TestServer::with_factory(|| {
     //             App::new().handler(
     //                 "test",
     //                 Files::new(".").index_file("Cargo.toml"),
@@ -1290,7 +1290,7 @@ mod tests {
 
     //     #[ntex::test]
     //     fn integration_percent_encoded() {
-    //         let mut srv = test::TestServer::with_factory(|| {
+    //         let srv = test::TestServer::with_factory(|| {
     //             App::new().handler(
     //                 "test",
     //                 Files::new(".").index_file("Cargo.toml"),
