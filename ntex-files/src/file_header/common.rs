@@ -21,17 +21,6 @@ header! {
     ///
     /// * `Sat, 29 Oct 1994 19:43:31 GMT`
     ///
-    /// # Example
-    ///
-    /// ```
-    /// # extern crate http;
-    /// use hyperx::header::{IfUnmodifiedSince, TypedHeaders};
-    /// use std::time::{SystemTime, Duration};
-    ///
-    /// let mut headers = http::HeaderMap::new();
-    /// let modified = SystemTime::now() - Duration::from_secs(60 * 60 * 24);
-    /// headers.encode(&IfUnmodifiedSince(modified.into()));
-    /// ```
     (IfUnmodifiedSince, "If-Unmodified-Since") => [HttpDate]
 }
 
@@ -56,17 +45,6 @@ header! {
     /// # Example values
     /// * `Sat, 29 Oct 1994 19:43:31 GMT`
     ///
-    /// # Example
-    ///
-    /// ```
-    /// # extern crate http;
-    /// use hyperx::header::{IfModifiedSince, TypedHeaders};
-    /// use std::time::{SystemTime, Duration};
-    ///
-    /// let mut headers = http::HeaderMap::new();
-    /// let modified = SystemTime::now() - Duration::from_secs(60 * 60 * 24);
-    /// headers.encode(&IfModifiedSince(modified.into()));
-    /// ```
     (IfModifiedSince, "If-Modified-Since") => [HttpDate]
 
 }
@@ -92,17 +70,6 @@ header! {
     ///
     /// * `Sat, 29 Oct 1994 19:43:31 GMT`
     ///
-    /// # Example
-    ///
-    /// ```
-    /// # extern crate http;
-    /// use hyperx::header::{LastModified, TypedHeaders};
-    /// use std::time::{SystemTime, Duration};
-    ///
-    /// let mut headers = http::HeaderMap::new();
-    /// let modified = SystemTime::now() - Duration::from_secs(60 * 60 * 24);
-    /// headers.encode(&LastModified(modified.into()));
-    /// ```
     (LastModified, "Last-Modified") => [HttpDate]
 
 }
@@ -134,22 +101,6 @@ header! {
     /// * `W/"xyzzy"`
     /// * `""`
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// # extern crate http;
-    /// use hyperx::header::{ETag, EntityTag, TypedHeaders};
-    ///
-    /// let mut headers = http::HeaderMap::new();
-    /// headers.encode(&ETag(EntityTag::new(false, "xyzzy".to_owned())));
-    /// ```
-    /// ```
-    /// # extern crate http;
-    /// use hyperx::header::{ETag, EntityTag, TypedHeaders};
-    ///
-    /// let mut headers = http::HeaderMap::new();
-    /// headers.encode(&ETag(EntityTag::new(true, "xyzzy".to_owned())));
-    /// ```
     (ETag, "ETag") => [EntityTag]
 }
 
@@ -184,29 +135,6 @@ header! {
     /// * `W/"xyzzy", W/"r2d2xxxx", W/"c3piozzzz"`
     /// * `*`
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// # extern crate http;
-    /// use hyperx::header::{IfNoneMatch, TypedHeaders};
-    ///
-    /// let mut headers = http::HeaderMap::new();
-    /// headers.encode(&IfNoneMatch::Any);
-    /// ```
-    ///
-    /// ```
-    /// # extern crate http;
-    /// use hyperx::header::{IfNoneMatch, EntityTag, TypedHeaders};
-    ///
-    /// let mut headers = http::HeaderMap::new();
-    /// headers.encode(
-    ///     &IfNoneMatch::Items(vec![
-    ///         EntityTag::new(false, "xyzzy".to_owned()),
-    ///         EntityTag::new(false, "foobar".to_owned()),
-    ///         EntityTag::new(false, "bazquux".to_owned()),
-    ///     ])
-    /// );
-    /// ```
     (IfNoneMatch, "If-None-Match") => {Any / (EntityTag)+}
 }
 
@@ -239,29 +167,6 @@ header! {
     /// * `"xyzzy"`
     /// * "xyzzy", "r2d2xxxx", "c3piozzzz"
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// # extern crate http;
-    /// use hyperx::header::{IfMatch, TypedHeaders};
-    ///
-    /// let mut headers = http::HeaderMap::new();
-    /// headers.encode(&IfMatch::Any);
-    /// ```
-    ///
-    /// ```
-    /// # extern crate http;
-    /// use hyperx::header::{IfMatch, EntityTag, TypedHeaders};
-    ///
-    /// let mut headers = http::HeaderMap::new();
-    /// headers.encode(
-    ///     &IfMatch::Items(vec![
-    ///         EntityTag::new(false, "xyzzy".to_owned()),
-    ///         EntityTag::new(false, "foobar".to_owned()),
-    ///         EntityTag::new(false, "bazquux".to_owned()),
-    ///     ])
-    /// );
-    /// ```
     (IfMatch, "If-Match") => {Any / (EntityTag)+}
 
 }

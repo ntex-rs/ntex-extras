@@ -67,22 +67,6 @@ pub enum DispositionParam {
 /// ext-token           = <the characters in token, followed by "*">
 /// ```
 ///
-/// # Example
-///
-/// ```
-/// # extern crate http;
-/// use hyperx::header::{ContentDisposition, DispositionType, DispositionParam, Charset, TypedHeaders};
-///
-/// let mut headers = http::HeaderMap::new();
-/// headers.encode(&ContentDisposition {
-///     disposition: DispositionType::Attachment,
-///     parameters: vec![DispositionParam::Filename(
-///       Charset::Iso_8859_1, // The character set for the bytes of the filename
-///       None, // The optional language tag (see `language-tag` crate)
-///       b"\xa9 Copyright 1989.txt".to_vec() // the actual bytes of the filename
-///     )]
-/// });
-/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContentDisposition {
     /// The disposition
