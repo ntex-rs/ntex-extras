@@ -13,18 +13,18 @@ use mime_guess::from_path;
 
 use futures::future::{ready, Ready};
 use futures::stream::TryStreamExt;
-use hyperx::header::{
-    self, Charset, ContentDisposition, DispositionParam, DispositionType, Header,
-};
 use ntex::http::body::SizedStream;
 use ntex::http::header::ContentEncoding;
 use ntex::http::{self, StatusCode};
 use ntex::web::{BodyEncoding, ErrorRenderer, HttpRequest, HttpResponse, Responder};
 
+use crate::file_header::{self, Header};
+
 use crate::range::HttpRange;
 use crate::ChunkedReadFile;
 
 bitflags! {
+    #[derive(Clone)]
     pub(crate) struct Flags: u8 {
         const ETAG = 0b0000_0001;
         const LAST_MD = 0b0000_0010;
@@ -48,8 +48,18 @@ pub struct NamedFile {
     pub(crate) flags: Flags,
     pub(crate) status_code: StatusCode,
     pub(crate) content_type: mime::Mime,
-    pub(crate) content_disposition: header::ContentDisposition,
+    pub(crate) content_disposition: file_header::ContentDisposition,
     pub(crate) encoding: Option<ContentEncoding>,
+}
+
+impl std::fmt::Debug for Flags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Flags")
+            .field("etag", &self.contains(Flags::ETAG))
+            .field("last_modified", &self.contains(Flags::LAST_MD))
+            .field("content_disposition", &self.contains(Flags::CONTENT_DISPOSITION))
+            .finish()
+    }
 }
 
 impl NamedFile {
@@ -92,15 +102,15 @@ impl NamedFile {
 
             let ct = from_path(&path).first_or_octet_stream();
             let disposition = match ct.type_() {
-                mime::IMAGE | mime::TEXT | mime::VIDEO => DispositionType::Inline,
-                _ => DispositionType::Attachment,
+                mime::IMAGE | mime::TEXT | mime::VIDEO => file_header::DispositionType::Inline,
+                _ => file_header::DispositionType::Attachment,
             };
-            let parameters = vec![DispositionParam::Filename(
-                Charset::Ext(String::from("UTF-8")),
+            let parameters = vec![file_header::DispositionParam::Filename(
+                file_header::Charset::Ext(String::from("UTF-8")),
                 None,
                 filename.into_owned().into_bytes(),
             )];
-            let cd = ContentDisposition { disposition, parameters };
+            let cd = file_header::ContentDisposition { disposition, parameters };
             (ct, cd)
         };
 
@@ -179,7 +189,7 @@ impl NamedFile {
     /// after converting it to UTF-8 using.
     /// [to_string_lossy](https://doc.rust-lang.org/std/ffi/struct.OsStr.html#method.to_string_lossy).
     #[inline]
-    pub fn set_content_disposition(mut self, cd: header::ContentDisposition) -> Self {
+    pub fn set_content_disposition(mut self, cd: file_header::ContentDisposition) -> Self {
         self.content_disposition = cd;
         self.flags.insert(Flags::CONTENT_DISPOSITION);
         self
@@ -219,7 +229,7 @@ impl NamedFile {
         self
     }
 
-    pub(crate) fn etag(&self) -> Option<header::EntityTag> {
+    pub(crate) fn etag(&self) -> Option<file_header::EntityTag> {
         // This etag format is similar to Apache's.
         self.modified.as_ref().map(|mtime| {
             let ino = {
@@ -236,7 +246,7 @@ impl NamedFile {
             let dur = mtime
                 .duration_since(UNIX_EPOCH)
                 .expect("modification time must be after epoch");
-            header::EntityTag::strong(format!(
+            file_header::EntityTag::strong(format!(
                 "{:x}:{:x}:{:x}:{:x}",
                 ino,
                 self.md.len(),
@@ -246,7 +256,7 @@ impl NamedFile {
         })
     }
 
-    pub(crate) fn last_modified(&self) -> Option<header::HttpDate> {
+    pub(crate) fn last_modified(&self) -> Option<file_header::HttpDate> {
         self.modified.map(|mtime| mtime.into())
     }
 
@@ -282,12 +292,12 @@ impl NamedFile {
         // check preconditions
         let precondition_failed = if !any_match(etag.as_ref(), req) {
             true
-        } else if let (Some(ref m), Some(header::IfUnmodifiedSince(ref since))) = {
+        } else if let (Some(ref m), Some(file_header::IfUnmodifiedSince(ref since))) = {
             let mut header = None;
             for hdr in req.headers().get_all(http::header::IF_UNMODIFIED_SINCE) {
-                if let Ok(v) =
-                    header::IfUnmodifiedSince::parse_header(&header::Raw::from(hdr.as_bytes()))
-                {
+                if let Ok(v) = file_header::IfUnmodifiedSince::parse_header(
+                    &file_header::Raw::from(hdr.as_bytes()),
+                ) {
                     header = Some(v);
                     break;
                 }
@@ -310,12 +320,12 @@ impl NamedFile {
             true
         } else if req.headers().contains_key(&http::header::IF_NONE_MATCH) {
             false
-        } else if let (Some(ref m), Some(header::IfModifiedSince(ref since))) = {
+        } else if let (Some(ref m), Some(file_header::IfModifiedSince(ref since))) = {
             let mut header = None;
             for hdr in req.headers().get_all(http::header::IF_MODIFIED_SINCE) {
-                if let Ok(v) =
-                    header::IfModifiedSince::parse_header(&header::Raw::from(hdr.as_bytes()))
-                {
+                if let Ok(v) = file_header::IfModifiedSince::parse_header(
+                    &file_header::Raw::from(hdr.as_bytes()),
+                ) {
                     header = Some(v);
                     break;
                 }
@@ -348,10 +358,10 @@ impl NamedFile {
         }
 
         resp.if_some(last_modified, |lm, resp| {
-            resp.header(http::header::LAST_MODIFIED, header::LastModified(lm).to_string());
+            resp.header(http::header::LAST_MODIFIED, file_header::LastModified(lm).to_string());
         })
         .if_some(etag, |etag, resp| {
-            resp.header(http::header::ETAG, header::ETag(etag).to_string());
+            resp.header(http::header::ETAG, file_header::ETag(etag).to_string());
         });
 
         resp.header(http::header::ACCEPT_RANGES, "bytes");
@@ -421,13 +431,13 @@ impl DerefMut for NamedFile {
 }
 
 /// Returns true if `req` has no `If-Match` header or one which matches `etag`.
-fn any_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
+fn any_match(etag: Option<&file_header::EntityTag>, req: &HttpRequest) -> bool {
     if let Some(val) = req.headers().get(http::header::IF_MATCH) {
         let hdr = ::http::HeaderValue::from(val);
-        if let Ok(val) = header::IfMatch::parse_header(&&hdr) {
+        if let Ok(val) = file_header::IfMatch::parse_header(&&hdr) {
             match val {
-                header::IfMatch::Any => return true,
-                header::IfMatch::Items(ref items) => {
+                file_header::IfMatch::Any => return true,
+                file_header::IfMatch::Items(ref items) => {
                     if let Some(some_etag) = etag {
                         for item in items {
                             if item.strong_eq(some_etag) {
@@ -444,13 +454,13 @@ fn any_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
 }
 
 /// Returns true if `req` doesn't have an `If-None-Match` header matching `req`.
-fn none_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
+fn none_match(etag: Option<&file_header::EntityTag>, req: &HttpRequest) -> bool {
     if let Some(val) = req.headers().get(http::header::IF_NONE_MATCH) {
         let hdr = ::http::HeaderValue::from(val);
-        if let Ok(val) = header::IfNoneMatch::parse_header(&&hdr) {
+        if let Ok(val) = file_header::IfNoneMatch::parse_header(&&hdr) {
             return match val {
-                header::IfNoneMatch::Any => false,
-                header::IfNoneMatch::Items(ref items) => {
+                file_header::IfNoneMatch::Any => false,
+                file_header::IfNoneMatch::Items(ref items) => {
                     if let Some(some_etag) = etag {
                         for item in items {
                             if item.weak_eq(some_etag) {

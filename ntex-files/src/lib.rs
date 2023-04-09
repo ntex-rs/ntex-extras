@@ -9,7 +9,6 @@ use std::{
 
 use futures::future::{ok, ready, Either, FutureExt, LocalBoxFuture, Ready};
 use futures::{Future, Stream};
-use hyperx::header::DispositionType;
 use mime_guess::from_ext;
 use ntex::http::error::BlockingError;
 use ntex::http::{header, Method, Payload, Uri};
@@ -25,6 +24,7 @@ use percent_encoding::{utf8_percent_encode, CONTROLS};
 use v_htmlescape::escape as escape_html_entity;
 
 mod error;
+mod file_header;
 mod named;
 mod range;
 
@@ -208,7 +208,7 @@ fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<WebResponse, 
     ))
 }
 
-type MimeOverride = dyn Fn(&mime::Name) -> DispositionType;
+type MimeOverride = dyn Fn(&mime::Name) -> file_header::DispositionType;
 
 /// Static files handling
 ///
@@ -245,7 +245,7 @@ impl<Err: ErrorRenderer> Clone for Files<Err> {
             redirect_to_slash: self.redirect_to_slash,
             default: self.default.clone(),
             renderer: self.renderer.clone(),
-            file_flags: self.file_flags,
+            file_flags: self.file_flags.clone(),
             path: self.path.clone(),
             mime_override: self.mime_override.clone(),
             guards: self.guards.clone(),
@@ -312,7 +312,7 @@ impl<Err: ErrorRenderer> Files<Err> {
     /// Specifies mime override callback
     pub fn mime_override<F>(mut self, f: F) -> Self
     where
-        F: Fn(&mime::Name) -> DispositionType + 'static,
+        F: Fn(&mime::Name) -> file_header::DispositionType + 'static,
     {
         self.mime_override = Some(Rc::new(f));
         self
@@ -415,7 +415,7 @@ where
             default: None,
             renderer: self.renderer.clone(),
             mime_override: self.mime_override.clone(),
-            file_flags: self.file_flags,
+            file_flags: self.file_flags.clone(),
             guards: self.guards.clone(),
         };
 
@@ -527,7 +527,7 @@ where
                             named_file.content_disposition.disposition = new_disposition;
                         }
 
-                        named_file.flags = self.file_flags;
+                        named_file.flags = self.file_flags.clone();
                         let (req, _) = req.into_parts();
                         Either::Left(ok(WebResponse::new(named_file.into_response(&req), req)))
                     }
@@ -558,7 +558,7 @@ where
                         named_file.content_disposition.disposition = new_disposition;
                     }
 
-                    named_file.flags = self.file_flags;
+                    named_file.flags = self.file_flags.clone();
                     let (req, _) = req.into_parts();
                     Either::Left(ok(WebResponse::new(named_file.into_response(&req), req)))
                 }
@@ -637,8 +637,7 @@ mod tests {
     #[ntex::test]
     async fn test_if_modified_since_without_if_none_match() {
         let file = NamedFile::open("Cargo.toml").unwrap();
-        let since =
-            hyperx::header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
+        let since = file_header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
 
         let req = TestRequest::default()
             .header(http::header::IF_MODIFIED_SINCE, since.to_string())
@@ -650,8 +649,7 @@ mod tests {
     #[ntex::test]
     async fn test_if_modified_since_with_if_none_match() {
         let file = NamedFile::open("Cargo.toml").unwrap();
-        let since =
-            hyperx::header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
+        let since = file_header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
 
         let req = TestRequest::default()
             .header(http::header::IF_NONE_MATCH, "miss_etag")
@@ -776,7 +774,9 @@ mod tests {
 
     #[ntex::test]
     async fn test_named_file_image_attachment() {
-        use hyperx::header::{Charset, ContentDisposition, DispositionParam, DispositionType};
+        use crate::file_header::{
+            Charset, ContentDisposition, DispositionParam, DispositionType,
+        };
 
         let cd = ContentDisposition {
             disposition: DispositionType::Attachment,
@@ -851,8 +851,8 @@ mod tests {
 
     #[ntex::test]
     async fn test_mime_override() {
-        fn all_attachment(_: &mime::Name) -> DispositionType {
-            DispositionType::Attachment
+        fn all_attachment(_: &mime::Name) -> file_header::DispositionType {
+            file_header::DispositionType::Attachment
         }
 
         let srv = test::init_service(App::new().service(
@@ -1177,7 +1177,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_default_handler_file_missing() {
-        let mut st = Files::new("/", ".")
+        let st = Files::new("/", ".")
             .default_handler(|req: WebRequest<DefaultError>| {
                 ok(req.into_response(HttpResponse::Ok().body("default content")))
             })
@@ -1186,7 +1186,7 @@ mod tests {
             .unwrap();
         let req = TestRequest::with_uri("/missing").to_srv_request();
 
-        let resp = test::call_service(&mut st, req).await;
+        let resp = test::call_service(&st, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = test::read_body(resp).await;
         assert_eq!(bytes, Bytes::from_static(b"default content"));
