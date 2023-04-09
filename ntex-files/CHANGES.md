@@ -1,9 +1,5 @@
 # Changes
 
-## [0.2.2] - 2023-04-09
-
-* Remove hyperx dependencies
-
 ## [0.2.1] - 2019-12-22
 
 * Use the same format for file URLs regardless of platforms
