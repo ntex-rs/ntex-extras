@@ -93,9 +93,9 @@ impl Header for ContentDisposition {
             };
 
             let mut cd = ContentDisposition {
-                disposition: if unicase::eq_ascii(&*disposition, "inline") {
+                disposition: if unicase::eq_ascii(disposition, "inline") {
                     DispositionType::Inline
-                } else if unicase::eq_ascii(&*disposition, "attachment") {
+                } else if unicase::eq_ascii(disposition, "attachment") {
                     DispositionType::Attachment
                 } else {
                     DispositionType::Ext(disposition.to_owned())
@@ -118,13 +118,13 @@ impl Header for ContentDisposition {
                     return Err(error::Error::Header);
                 };
 
-                cd.parameters.push(if unicase::eq_ascii(&*key, "filename") {
+                cd.parameters.push(if unicase::eq_ascii(key, "filename") {
                     DispositionParam::Filename(
                         Charset::Ext("UTF-8".to_owned()),
                         None,
                         val.trim_matches('"').as_bytes().to_owned(),
                     )
-                } else if unicase::eq_ascii(&*key, "filename*") {
+                } else if unicase::eq_ascii(key, "filename*") {
                     let extended_value = parse_extended_value(val)?;
                     DispositionParam::Filename(
                         extended_value.charset,

@@ -61,10 +61,7 @@ impl Method {
     /// See [the spec](https://tools.ietf.org/html/rfc7231#section-4.2.1)
     /// for more words.
     pub fn safe(&self) -> bool {
-        match *self {
-            Get | Head | Options | Trace => true,
-            _ => false,
-        }
+        matches!(*self, Get | Head | Options | Trace)
     }
 
     /// Whether a method is considered "idempotent", meaning the request has
@@ -76,10 +73,7 @@ impl Method {
         if self.safe() {
             true
         } else {
-            match *self {
-                Put | Delete => true,
-                _ => false,
-            }
+            matches!(*self, Put | Delete)
         }
     }
 }
@@ -200,15 +194,15 @@ mod tests {
 
     #[test]
     fn test_safe() {
-        assert_eq!(true, Get.safe());
-        assert_eq!(false, Post.safe());
+        assert!(Get.safe());
+        assert!(!Post.safe());
     }
 
     #[test]
     fn test_idempotent() {
-        assert_eq!(true, Get.idempotent());
-        assert_eq!(true, Put.idempotent());
-        assert_eq!(false, Post.idempotent());
+        assert!(Get.idempotent());
+        assert!(Put.idempotent());
+        assert!(!Post.idempotent());
     }
 
     #[test]
