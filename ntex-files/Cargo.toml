@@ -1,6 +1,6 @@
 [package]
 name = "ntex-files"
-version = "0.2.2"
+version = "0.3.0"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Static files support for ntex web."
 readme = "README.md"
@@ -18,7 +18,7 @@ name = "ntex_files"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "0.6.5"
+ntex = "0.7.0-beta.1"
 ntex-http = "0.1.8"
 bitflags = "2.1"
 futures = "0.3"
@@ -34,4 +34,4 @@ language-tags = "0.3.2"
 httpdate = "1.0.2"
 
 [dev-dependencies]
-ntex = { version = "0.6.5", features = ["tokio", "openssl", "compress"] }
+ntex = { version = "0.7.0-beta.1", features = ["tokio", "openssl", "compress"] }

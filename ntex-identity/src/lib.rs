@@ -54,10 +54,9 @@ use futures::future::{ok, FutureExt, LocalBoxFuture, Ready};
 use serde::{Deserialize, Serialize};
 use time::Duration;
 
-use ntex::http::error::HttpError;
 use ntex::http::header::{self, HeaderValue};
-use ntex::http::{HttpMessage, Payload};
-use ntex::service::{Middleware, Service};
+use ntex::http::{error::HttpError, HttpMessage, Payload};
+use ntex::service::{Middleware, Service, ServiceCtx};
 use ntex::util::Extensions;
 use ntex::web::{
     DefaultError, ErrorRenderer, FromRequest, HttpRequest, WebRequest, WebResponse,
@@ -224,17 +223,17 @@ impl<S, T> Middleware<S> for IdentityService<T> {
     type Service = IdentityServiceMiddleware<S, T>;
 
     fn create(&self, service: S) -> Self::Service {
-        IdentityServiceMiddleware { backend: self.backend.clone(), service: Rc::new(service) }
+        IdentityServiceMiddleware { service, backend: self.backend.clone() }
     }
 }
 
 #[doc(hidden)]
 pub struct IdentityServiceMiddleware<S, T> {
     backend: Rc<T>,
-    service: Rc<S>,
+    service: S,
 }
 
-impl<S, T> Clone for IdentityServiceMiddleware<S, T> {
+impl<S: Clone, T> Clone for IdentityServiceMiddleware<S, T> {
     fn clone(&self) -> Self {
         Self { backend: self.backend.clone(), service: self.service.clone() }
     }
@@ -260,23 +259,22 @@ where
         self.service.poll_shutdown(cx)
     }
 
-    fn call(&self, mut req: WebRequest<Err>) -> Self::Future<'_> {
-        let srv = self.service.clone();
-        let backend = self.backend.clone();
-        let fut = self.backend.from_request(&mut req);
-
+    fn call<'a>(
+        &'a self,
+        mut req: WebRequest<Err>,
+        ctx: ServiceCtx<'a, Self>,
+    ) -> Self::Future<'a> {
         async move {
-            match fut.await {
+            match self.backend.from_request(&mut req).await {
                 Ok(id) => {
                     req.extensions_mut().insert(IdentityItem { id, changed: false });
 
                     // https://github.com/actix/actix-web/issues/1263
-                    let fut = { srv.call(req) };
-                    let mut res = fut.await?;
+                    let mut res = ctx.call(&self.service, req).await?;
                     let id = res.request().extensions_mut().remove::<IdentityItem>();
 
                     if let Some(id) = id {
-                        match backend.to_response(id.id, id.changed, &mut res).await {
+                        match self.backend.to_response(id.id, id.changed, &mut res).await {
                             Ok(_) => Ok(res),
                             Err(e) => Ok(WebResponse::error_response::<Err, _>(res, e)),
                         }

@@ -22,7 +22,7 @@ use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
 use futures::future::{FutureExt, LocalBoxFuture};
 use ntex::http::{header::HeaderValue, header::SET_COOKIE, HttpMessage};
-use ntex::service::{Middleware, Service};
+use ntex::service::{Middleware, Service, ServiceCtx};
 use ntex::web::{DefaultError, ErrorRenderer, WebRequest, WebResponse, WebResponseError};
 use serde_json::error::Error as JsonError;
 use time::{Duration, OffsetDateTime};
@@ -316,16 +316,14 @@ where
     /// session state changes, then set-cookie is returned in response.  As
     /// a user logs out, call session.purge() to set SessionStatus accordingly
     /// and this will trigger removal of the session cookie in the response.
-    fn call(&self, req: WebRequest<Err>) -> Self::Future<'_> {
+    fn call<'a>(&'a self, req: WebRequest<Err>, ctx: ServiceCtx<'a, Self>) -> Self::Future<'a> {
         let inner = self.inner.clone();
         let (is_new, state) = self.inner.load(&req);
         let prolong_expiration = self.inner.expires_in.is_some();
         Session::set_session(state.into_iter(), &req);
 
-        let fut = self.service.call(req);
-
         async move {
-            fut.await.map(|mut res| {
+            ctx.call(&self.service, req).await.map(|mut res| {
                 match Session::get_changes(&mut res) {
                     (SessionStatus::Changed, Some(state))
                     | (SessionStatus::Renewed, Some(state)) => {

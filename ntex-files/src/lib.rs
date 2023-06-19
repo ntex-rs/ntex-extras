@@ -14,7 +14,7 @@ use ntex::http::error::BlockingError;
 use ntex::http::{header, Method, Payload, Uri};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
-use ntex::service::{IntoServiceFactory, Service, ServiceFactory};
+use ntex::service::{IntoServiceFactory, Service, ServiceCall, ServiceCtx, ServiceFactory};
 use ntex::util::Bytes;
 use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
 use ntex::web::error::ErrorRenderer;
@@ -452,17 +452,18 @@ impl<Err: ErrorRenderer> FilesService<Err>
 where
     Err::Container: From<FilesError>,
 {
-    fn handle_io_error(
-        &self,
+    fn handle_io_error<'a>(
+        &'a self,
         e: io::Error,
         req: WebRequest<Err>,
+        ctx: ServiceCtx<'a, Self>,
     ) -> Either<
         Ready<Result<WebResponse, Err::Container>>,
-        LocalBoxFuture<'_, Result<WebResponse, Err::Container>>,
+        ServiceCall<'a, HttpService<Err>, WebRequest<Err>>,
     > {
         log::debug!("Files: Failed to handle {}: {}", req.path(), e);
         if let Some(ref default) = self.default {
-            Either::Right(default.call(req))
+            Either::Right(ctx.call(default, req))
         } else {
             Either::Left(ok(req.error_response(FilesError::from(e))))
         }
@@ -478,10 +479,10 @@ where
     type Error = Err::Container;
     type Future<'f> = Either<
         Ready<Result<Self::Response, Self::Error>>,
-        LocalBoxFuture<'f, Result<Self::Response, Self::Error>>,
+        ServiceCall<'f, HttpService<Err>, WebRequest<Err>>,
     >;
 
-    fn call(&self, req: WebRequest<Err>) -> Self::Future<'_> {
+    fn call<'a>(&'a self, req: WebRequest<Err>, ctx: ServiceCtx<'a, Self>) -> Self::Future<'a> {
         let is_method_valid = if let Some(guard) = &self.guards {
             // execute user defined guards
             (**guard).check(req.head())
@@ -502,7 +503,7 @@ where
         // full filepath
         let path = match self.directory.join(real_path.0).canonicalize() {
             Ok(path) => path,
-            Err(e) => return self.handle_io_error(e, req),
+            Err(e) => return self.handle_io_error(e, req, ctx),
         };
 
         if path.is_dir() {
@@ -531,7 +532,7 @@ where
                         let (req, _) = req.into_parts();
                         Either::Left(ok(WebResponse::new(named_file.into_response(&req), req)))
                     }
-                    Err(e) => self.handle_io_error(e, req),
+                    Err(e) => self.handle_io_error(e, req, ctx),
                 }
             } else if self.show_index {
                 let dir = Directory::new(self.directory.clone(), path);
@@ -562,7 +563,7 @@ where
                     let (req, _) = req.into_parts();
                     Either::Left(ok(WebResponse::new(named_file.into_response(&req), req)))
                 }
-                Err(e) => self.handle_io_error(e, req),
+                Err(e) => self.handle_io_error(e, req, ctx),
             }
         }
     }

@@ -54,7 +54,7 @@ use derive_more::Display;
 use futures::future::{ok, Either, FutureExt, LocalBoxFuture, Ready};
 use ntex::http::header::{self, HeaderName, HeaderValue};
 use ntex::http::{error::HttpError, HeaderMap, Method, RequestHead, StatusCode, Uri};
-use ntex::service::{Middleware, Service};
+use ntex::service::{Middleware, Service, ServiceCtx};
 use ntex::web::{
     DefaultError, ErrorRenderer, HttpResponse, WebRequest, WebResponse, WebResponseError,
 };
@@ -760,18 +760,17 @@ where
         self.service.poll_shutdown(cx)
     }
 
-    fn call(&self, req: WebRequest<Err>) -> Self::Future<'_> {
+    fn call<'a>(&'a self, req: WebRequest<Err>, ctx: ServiceCtx<'a, Self>) -> Self::Future<'a> {
         match self.inner.preflight_check(req.head()) {
             Ok(Either::Left(res)) => Either::Left(ok(req.into_response(res))),
             Ok(Either::Right(_)) => {
                 let inner = self.inner.clone();
                 let has_origin = req.headers().contains_key(&header::ORIGIN);
                 let allowed_origin = inner.access_control_allow_origin(req.headers());
-                let fut = self.service.call(req);
 
                 Either::Right(
                     async move {
-                        let mut res = fut.await?;
+                        let mut res = ctx.call(&self.service, req).await?;
 
                         if has_origin {
                             inner.handle_response(res.headers_mut(), allowed_origin);
