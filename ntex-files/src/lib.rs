@@ -1182,7 +1182,7 @@ mod tests {
             .default_handler(|req: WebRequest<DefaultError>| {
                 ok(req.into_response(HttpResponse::Ok().body("default content")))
             })
-            .container(())
+            .pipeline(())
             .await
             .unwrap();
         let req = TestRequest::with_uri("/missing").to_srv_request();

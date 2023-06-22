@@ -583,7 +583,7 @@ mod tests {
     use super::*;
     use ntex::web::test::{self, TestRequest};
     use ntex::web::{self, error, App, Error, HttpResponse};
-    use ntex::{http::StatusCode, service::into_service, service::Container, time};
+    use ntex::{http::StatusCode, service::into_service, service::Pipeline, time};
 
     const COOKIE_KEY_MASTER: [u8; 32] = [0; 32];
     const COOKIE_NAME: &str = "ntex_auth";
@@ -700,7 +700,7 @@ mod tests {
         F: Fn(CookieIdentityPolicy) -> CookieIdentityPolicy + Sync + Send + Clone + 'static,
     >(
         f: F,
-    ) -> Container<
+    ) -> Pipeline<
         impl ntex::service::Service<ntex::http::Request, Response = WebResponse, Error = Error>,
     > {
         test::init_service(
@@ -1007,7 +1007,7 @@ mod tests {
             }
         }
 
-        let srv: Container<_> = IdentityServiceMiddleware {
+        let srv: Pipeline<_> = IdentityServiceMiddleware {
             backend: Rc::new(Ident),
             service: into_service(|_: WebRequest<DefaultError>| async move {
                 time::sleep(time::Seconds(100)).await;

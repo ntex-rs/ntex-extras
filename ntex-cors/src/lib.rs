@@ -787,7 +787,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use ntex::service::{fn_service, Container, Middleware};
+    use ntex::service::{fn_service, Middleware, Pipeline};
     use ntex::web::{self, test, test::TestRequest};
 
     use super::*;
@@ -821,7 +821,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_preflight() {
-        let mut cors: Container<_> = Cors::new()
+        let mut cors: Pipeline<_> = Cors::new()
             .send_wildcard()
             .max_age(3600)
             .allowed_methods(vec![Method::GET, Method::OPTIONS, Method::POST])
@@ -836,8 +836,8 @@ mod tests {
             .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "X-Not-Allowed")
             .to_srv_request();
 
-        assert!(cors.inner.validate_allowed_method(req.head()).is_err());
-        assert!(cors.inner.validate_allowed_headers(req.head()).is_err());
+        assert!(cors.get_ref().inner.validate_allowed_method(req.head()).is_err());
+        assert!(cors.get_ref().inner.validate_allowed_headers(req.head()).is_err());
         let resp = test::call_service(&cors, req).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
@@ -846,8 +846,8 @@ mod tests {
             .method(Method::OPTIONS)
             .to_srv_request();
 
-        assert!(cors.inner.validate_allowed_method(req.head()).is_err());
-        assert!(cors.inner.validate_allowed_headers(req.head()).is_ok());
+        assert!(cors.get_ref().inner.validate_allowed_method(req.head()).is_err());
+        assert!(cors.get_ref().inner.validate_allowed_headers(req.head()).is_ok());
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
@@ -905,7 +905,7 @@ mod tests {
     #[ntex::test]
     #[should_panic(expected = "OriginNotAllowed")]
     async fn test_validate_not_allowed_origin() {
-        let cors: Container<_> = Cors::new()
+        let cors: Pipeline<_> = Cors::new()
             .allowed_origin("https://www.example.com")
             .finish()
             .create(test::ok_service::<web::DefaultError>())
@@ -914,9 +914,9 @@ mod tests {
         let req = TestRequest::with_header("Origin", "https://www.unknown.com")
             .method(Method::GET)
             .to_srv_request();
-        cors.inner.validate_origin(req.head()).unwrap();
-        cors.inner.validate_allowed_method(req.head()).unwrap();
-        cors.inner.validate_allowed_headers(req.head()).unwrap();
+        cors.get_ref().inner.validate_origin(req.head()).unwrap();
+        cors.get_ref().inner.validate_allowed_method(req.head()).unwrap();
+        cors.get_ref().inner.validate_allowed_headers(req.head()).unwrap();
     }
 
     #[ntex::test]
