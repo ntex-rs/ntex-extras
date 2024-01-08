@@ -7,14 +7,14 @@ use std::{
     cmp, fmt::Write, io, io::Read, io::Seek, pin::Pin, rc::Rc, task::Context, task::Poll,
 };
 
-use futures::future::{ok, ready, Either, FutureExt, LocalBoxFuture, Ready};
+use futures::future::{FutureExt, LocalBoxFuture};
 use futures::{Future, Stream};
 use mime_guess::from_ext;
 use ntex::http::error::BlockingError;
 use ntex::http::{header, Method, Payload, Uri};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
-use ntex::service::{IntoServiceFactory, Service, ServiceCall, ServiceCtx, ServiceFactory};
+use ntex::service::{IntoServiceFactory, Service, ServiceCtx, ServiceFactory};
 use ntex::util::Bytes;
 use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
 use ntex::web::error::ErrorRenderer;
@@ -404,9 +404,8 @@ where
     type Error = Err::Container;
     type Service = FilesService<Err>;
     type InitError = ();
-    type Future<'f> = LocalBoxFuture<'f, Result<Self::Service, Self::InitError>>;
 
-    fn create(&self, _: ()) -> Self::Future<'_> {
+    async fn create(&self, _: ()) -> Result<Self::Service, Self::InitError> {
         let mut srv = FilesService {
             directory: self.directory.clone(),
             index: self.index.clone(),
@@ -429,9 +428,9 @@ where
                     }
                     Err(_) => Err(()),
                 })
-                .boxed_local()
+                .await
         } else {
-            ok(srv).boxed_local()
+            Ok(srv)
         }
     }
 }
@@ -452,20 +451,17 @@ impl<Err: ErrorRenderer> FilesService<Err>
 where
     Err::Container: From<FilesError>,
 {
-    fn handle_io_error<'a>(
-        &'a self,
+    async fn handle_io_error(
+        &self,
         e: io::Error,
         req: WebRequest<Err>,
-        ctx: ServiceCtx<'a, Self>,
-    ) -> Either<
-        Ready<Result<WebResponse, Err::Container>>,
-        ServiceCall<'a, HttpService<Err>, WebRequest<Err>>,
-    > {
+        ctx: ServiceCtx<'_, Self>,
+    ) -> Result<WebResponse, Err::Container> {
         log::debug!("Files: Failed to handle {}: {}", req.path(), e);
         if let Some(ref default) = self.default {
-            Either::Right(ctx.call(default, req))
+            ctx.call(default, req).await
         } else {
-            Either::Left(ok(req.error_response(FilesError::from(e))))
+            Ok(req.error_response(FilesError::from(e)))
         }
     }
 }
@@ -477,12 +473,12 @@ where
 {
     type Response = WebResponse;
     type Error = Err::Container;
-    type Future<'f> = Either<
-        Ready<Result<Self::Response, Self::Error>>,
-        ServiceCall<'f, HttpService<Err>, WebRequest<Err>>,
-    >;
 
-    fn call<'a>(&'a self, req: WebRequest<Err>, ctx: ServiceCtx<'a, Self>) -> Self::Future<'a> {
+    async fn call(
+        &self,
+        req: WebRequest<Err>,
+        ctx: ServiceCtx<'_, Self>,
+    ) -> Result<Self::Response, Self::Error> {
         let is_method_valid = if let Some(guard) = &self.guards {
             // execute user defined guards
             (**guard).check(req.head())
@@ -492,30 +488,30 @@ where
         };
 
         if !is_method_valid {
-            return Either::Left(ok(req.error_response(FilesError::MethodNotAllowed)));
+            return Ok(req.error_response(FilesError::MethodNotAllowed));
         }
 
         let real_path = match PathBufWrp::get_pathbuf(req.match_info().path()) {
             Ok(item) => item,
-            Err(e) => return Either::Left(ok(req.error_response(FilesError::from(e)))),
+            Err(e) => return Ok(req.error_response(FilesError::from(e))),
         };
 
         // full filepath
         let path = match self.directory.join(real_path.0).canonicalize() {
             Ok(path) => path,
-            Err(e) => return self.handle_io_error(e, req, ctx),
+            Err(e) => return self.handle_io_error(e, req, ctx).await,
         };
 
         if path.is_dir() {
             if let Some(ref redir_index) = self.index {
                 if self.redirect_to_slash && !req.path().ends_with('/') {
                     let redirect_to = format!("{}/", req.path());
-                    return Either::Left(ok(req.into_response(
+                    return Ok(req.into_response(
                         HttpResponse::Found()
                             .header(header::LOCATION, redirect_to)
                             .body("")
                             .into_body(),
-                    )));
+                    ));
                 }
 
                 let path = path.join(redir_index);
@@ -530,26 +526,20 @@ where
 
                         named_file.flags = self.file_flags.clone();
                         let (req, _) = req.into_parts();
-                        Either::Left(ok(WebResponse::new(named_file.into_response(&req), req)))
+                        Ok(WebResponse::new(named_file.into_response(&req), req))
                     }
-                    Err(e) => self.handle_io_error(e, req, ctx),
+                    Err(e) => self.handle_io_error(e, req, ctx).await,
                 }
             } else if self.show_index {
                 let dir = Directory::new(self.directory.clone(), path);
                 let (req, _) = req.into_parts();
                 let x = (self.renderer)(&dir, &req);
                 match x {
-                    Ok(resp) => Either::Left(ok(resp)),
-                    Err(e) => Either::Left(ok(WebResponse::from_err::<Err, _>(
-                        FilesError::from(e),
-                        req,
-                    ))),
+                    Ok(resp) => Ok(resp),
+                    Err(e) => Ok(WebResponse::from_err::<Err, _>(FilesError::from(e), req)),
                 }
             } else {
-                Either::Left(ok(WebResponse::from_err::<Err, _>(
-                    FilesError::IsDirectory,
-                    req.into_parts().0,
-                )))
+                Ok(WebResponse::from_err::<Err, _>(FilesError::IsDirectory, req.into_parts().0))
             }
         } else {
             match NamedFile::open(path) {
@@ -561,9 +551,9 @@ where
 
                     named_file.flags = self.file_flags.clone();
                     let (req, _) = req.into_parts();
-                    Either::Left(ok(WebResponse::new(named_file.into_response(&req), req)))
+                    Ok(WebResponse::new(named_file.into_response(&req), req))
                 }
-                Err(e) => self.handle_io_error(e, req, ctx),
+                Err(e) => self.handle_io_error(e, req, ctx).await,
             }
         }
     }
@@ -603,10 +593,9 @@ impl PathBufWrp {
 
 impl<Err> FromRequest<Err> for PathBufWrp {
     type Error = UriSegmentError;
-    type Future = Ready<Result<Self, Self::Error>>;
 
-    fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
-        ready(PathBufWrp::get_pathbuf(req.match_info().path()))
+    async fn from_request(req: &HttpRequest, _: &mut Payload) -> Result<Self, Self::Error> {
+        PathBufWrp::get_pathbuf(req.match_info().path())
     }
 }
 
@@ -1179,8 +1168,8 @@ mod tests {
     #[ntex::test]
     async fn test_default_handler_file_missing() {
         let st = Files::new("/", ".")
-            .default_handler(|req: WebRequest<DefaultError>| {
-                ok(req.into_response(HttpResponse::Ok().body("default content")))
+            .default_handler(|req: WebRequest<DefaultError>| async move {
+                Ok(req.into_response(HttpResponse::Ok().body("default content")))
             })
             .pipeline(())
             .await

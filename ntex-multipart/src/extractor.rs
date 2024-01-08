@@ -1,7 +1,6 @@
 //! Multipart payload support
 use std::convert::Infallible;
 
-use futures::future::{ok, Ready};
 use ntex::http::Payload;
 use ntex::web::{FromRequest, HttpRequest};
 
@@ -34,10 +33,12 @@ use crate::server::Multipart;
 /// ```
 impl<Err> FromRequest<Err> for Multipart {
     type Error = Infallible;
-    type Future = Ready<Result<Multipart, Infallible>>;
 
     #[inline]
-    fn from_request(req: &HttpRequest, payload: &mut Payload) -> Self::Future {
-        ok(Multipart::new(req.headers(), payload.take()))
+    async fn from_request(
+        req: &HttpRequest,
+        payload: &mut Payload,
+    ) -> Result<Multipart, Infallible> {
+        Ok(Multipart::new(req.headers(), payload.take()))
     }
 }

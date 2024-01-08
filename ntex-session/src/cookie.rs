@@ -15,12 +15,10 @@
 //! The constructors take a key as an argument. This is the private key
 //! for cookie session - when this value is changed, all session data is lost.
 
-use std::task::{Context, Poll};
 use std::{collections::HashMap, convert::Infallible, rc::Rc};
 
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
-use futures::future::{FutureExt, LocalBoxFuture};
 use ntex::http::{header::HeaderValue, header::SET_COOKIE, HttpMessage};
 use ntex::service::{Middleware, Service, ServiceCtx};
 use ntex::web::{DefaultError, ErrorRenderer, WebRequest, WebResponse, WebResponseError};
@@ -125,7 +123,7 @@ impl CookieSessionInner {
 
     /// invalidates session cookie
     fn remove_cookie(&self, res: &mut WebResponse) -> Result<(), Infallible> {
-        let mut cookie = Cookie::named(self.name.clone());
+        let mut cookie = Cookie::from(self.name.clone());
         cookie.set_value("");
         cookie.set_max_age(Duration::ZERO);
         cookie.set_expires(OffsetDateTime::now_utc() - Duration::days(365));
@@ -301,58 +299,53 @@ where
 {
     type Response = WebResponse;
     type Error = S::Error;
-    type Future<'f> = LocalBoxFuture<'f, Result<Self::Response, Self::Error>> where Self: 'f;
 
-    fn poll_ready(&self, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        self.service.poll_ready(cx)
-    }
-
-    fn poll_shutdown(&self, cx: &mut Context) -> Poll<()> {
-        self.service.poll_shutdown(cx)
-    }
+    ntex::forward_poll_ready!(service);
+    ntex::forward_poll_shutdown!(service);
 
     /// On first request, a new session cookie is returned in response, regardless
     /// of whether any session state is set.  With subsequent requests, if the
     /// session state changes, then set-cookie is returned in response.  As
     /// a user logs out, call session.purge() to set SessionStatus accordingly
     /// and this will trigger removal of the session cookie in the response.
-    fn call<'a>(&'a self, req: WebRequest<Err>, ctx: ServiceCtx<'a, Self>) -> Self::Future<'a> {
+    async fn call(
+        &self,
+        req: WebRequest<Err>,
+        ctx: ServiceCtx<'_, Self>,
+    ) -> Result<Self::Response, Self::Error> {
         let inner = self.inner.clone();
         let (is_new, state) = self.inner.load(&req);
         let prolong_expiration = self.inner.expires_in.is_some();
         Session::set_session(state.into_iter(), &req);
 
-        async move {
-            ctx.call(&self.service, req).await.map(|mut res| {
-                match Session::get_changes(&mut res) {
-                    (SessionStatus::Changed, Some(state))
-                    | (SessionStatus::Renewed, Some(state)) => {
-                        res.checked_expr::<Err, _, _>(|res| inner.set_cookie(res, state))
-                    }
-                    (SessionStatus::Unchanged, Some(state)) if prolong_expiration => {
-                        res.checked_expr::<Err, _, _>(|res| inner.set_cookie(res, state))
-                    }
-                    (SessionStatus::Unchanged, _) =>
-                    // set a new session cookie upon first request (new client)
-                    {
-                        if is_new {
-                            let state: HashMap<String, String> = HashMap::new();
-                            res.checked_expr::<Err, _, _>(|res| {
-                                inner.set_cookie(res, state.into_iter())
-                            })
-                        } else {
-                            res
-                        }
-                    }
-                    (SessionStatus::Purged, _) => {
-                        let _ = inner.remove_cookie(&mut res);
+        ctx.call(&self.service, req).await.map(|mut res| {
+            match Session::get_changes(&mut res) {
+                (SessionStatus::Changed, Some(state))
+                | (SessionStatus::Renewed, Some(state)) => {
+                    res.checked_expr::<Err, _, _>(|res| inner.set_cookie(res, state))
+                }
+                (SessionStatus::Unchanged, Some(state)) if prolong_expiration => {
+                    res.checked_expr::<Err, _, _>(|res| inner.set_cookie(res, state))
+                }
+                (SessionStatus::Unchanged, _) =>
+                // set a new session cookie upon first request (new client)
+                {
+                    if is_new {
+                        let state: HashMap<String, String> = HashMap::new();
+                        res.checked_expr::<Err, _, _>(|res| {
+                            inner.set_cookie(res, state.into_iter())
+                        })
+                    } else {
                         res
                     }
-                    _ => res,
                 }
-            })
-        }
-        .boxed_local()
+                (SessionStatus::Purged, _) => {
+                    let _ = inner.remove_cookie(&mut res);
+                    res
+                }
+                _ => res,
+            }
+        })
     }
 }
 
@@ -439,8 +432,12 @@ mod tests {
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        let cookie =
-            response.response().cookies().find(|c| c.name() == "ntex-test").unwrap().clone();
+        let cookie = response
+            .response()
+            .cookies()
+            .find(|c| c.name() == "ntex-test")
+            .unwrap()
+            .into_owned();
         assert_eq!(cookie.path().unwrap(), "/test/");
 
         let request = test::TestRequest::with_uri("/test/").cookie(cookie).to_request();

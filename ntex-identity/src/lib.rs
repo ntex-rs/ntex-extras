@@ -44,13 +44,11 @@
 //!     .service(web::resource("/login.html").to(login))
 //!     .service(web::resource("/logout.html").to(logout));
 //! ```
-use std::task::{Context, Poll};
-use std::time::SystemTime;
-use std::{convert::Infallible, future::Future, rc::Rc};
+use std::{convert::Infallible, future::Future, rc::Rc, time::SystemTime};
 
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
-use futures::future::{ok, FutureExt, LocalBoxFuture, Ready};
+use futures::future::{ok, Ready};
 use serde::{Deserialize, Serialize};
 use time::Duration;
 
@@ -164,11 +162,10 @@ where
 /// ```
 impl<Err: ErrorRenderer> FromRequest<Err> for Identity {
     type Error = Infallible;
-    type Future = Ready<Result<Identity, Infallible>>;
 
     #[inline]
-    fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
-        ok(Identity(req.clone()))
+    async fn from_request(req: &HttpRequest, _: &mut Payload) -> Result<Identity, Infallible> {
+        Ok(Identity(req.clone()))
     }
 }
 
@@ -249,43 +246,34 @@ where
 {
     type Response = WebResponse;
     type Error = S::Error;
-    type Future<'f> = LocalBoxFuture<'f, Result<Self::Response, Self::Error>>;
 
-    fn poll_ready(&self, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        self.service.poll_ready(cx)
-    }
+    ntex::forward_poll_ready!(service);
+    ntex::forward_poll_shutdown!(service);
 
-    fn poll_shutdown(&self, cx: &mut Context) -> Poll<()> {
-        self.service.poll_shutdown(cx)
-    }
-
-    fn call<'a>(
-        &'a self,
+    async fn call(
+        &self,
         mut req: WebRequest<Err>,
-        ctx: ServiceCtx<'a, Self>,
-    ) -> Self::Future<'a> {
-        async move {
-            match self.backend.from_request(&mut req).await {
-                Ok(id) => {
-                    req.extensions_mut().insert(IdentityItem { id, changed: false });
+        ctx: ServiceCtx<'_, Self>,
+    ) -> Result<Self::Response, Self::Error> {
+        match self.backend.from_request(&mut req).await {
+            Ok(id) => {
+                req.extensions_mut().insert(IdentityItem { id, changed: false });
 
-                    // https://github.com/actix/actix-web/issues/1263
-                    let mut res = ctx.call(&self.service, req).await?;
-                    let id = res.request().extensions_mut().remove::<IdentityItem>();
+                // https://github.com/actix/actix-web/issues/1263
+                let mut res = ctx.call(&self.service, req).await?;
+                let id = res.request().extensions_mut().remove::<IdentityItem>();
 
-                    if let Some(id) = id {
-                        match self.backend.to_response(id.id, id.changed, &mut res).await {
-                            Ok(_) => Ok(res),
-                            Err(e) => Ok(WebResponse::error_response::<Err, _>(res, e)),
-                        }
-                    } else {
-                        Ok(res)
+                if let Some(id) = id {
+                    match self.backend.to_response(id.id, id.changed, &mut res).await {
+                        Ok(_) => Ok(res),
+                        Err(e) => Ok(WebResponse::error_response::<Err, _>(res, e)),
                     }
+                } else {
+                    Ok(res)
                 }
-                Err(err) => Ok(req.error_response(err)),
             }
+            Err(err) => Ok(req.error_response(err)),
         }
-        .boxed_local()
     }
 }
 
@@ -621,12 +609,13 @@ mod tests {
                 })),
         )
         .await;
+
         let resp = test::call_service(&srv, TestRequest::with_uri("/index").to_request()).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let resp = test::call_service(&srv, TestRequest::with_uri("/login").to_request()).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let c = resp.response().cookies().next().unwrap().to_owned();
+        let c = resp.response().cookies().next().unwrap().into_owned();
 
         let resp = test::call_service(
             &srv,

@@ -46,7 +46,6 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::rc::Rc;
 
-use futures::future::{ok, Ready};
 use ntex::http::{Payload, RequestHead};
 use ntex::util::Extensions;
 use ntex::web::{Error, FromRequest, HttpRequest, WebRequest, WebResponse};
@@ -228,11 +227,10 @@ impl Session {
 /// ```
 impl<Err> FromRequest<Err> for Session {
     type Error = Infallible;
-    type Future = Ready<Result<Session, Infallible>>;
 
     #[inline]
-    fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
-        ok(Session::get_session(&mut req.extensions_mut()))
+    async fn from_request(req: &HttpRequest, _: &mut Payload) -> Result<Session, Infallible> {
+        Ok(Session::get_session(&mut req.extensions_mut()))
     }
 }
 

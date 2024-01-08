@@ -45,16 +45,15 @@
 //! endpoint.
 //!
 //! Cors middleware automatically handle *OPTIONS* preflight request.
-use std::task::{Context, Poll};
 use std::{
     collections::HashSet, convert::TryFrom, iter::FromIterator, marker::PhantomData, rc::Rc,
 };
 
 use derive_more::Display;
-use futures::future::{ok, Either, FutureExt, LocalBoxFuture, Ready};
 use ntex::http::header::{self, HeaderName, HeaderValue};
 use ntex::http::{error::HttpError, HeaderMap, Method, RequestHead, StatusCode, Uri};
 use ntex::service::{Middleware, Service, ServiceCtx};
+use ntex::util::Either;
 use ntex::web::{
     DefaultError, ErrorRenderer, HttpResponse, WebRequest, WebResponse, WebResponseError,
 };
@@ -747,40 +746,30 @@ where
 {
     type Response = WebResponse;
     type Error = S::Error;
-    type Future<'f> = Either<
-        Ready<Result<Self::Response, S::Error>>,
-        LocalBoxFuture<'f, Result<Self::Response, S::Error>>,
-    > where Self: 'f;
 
-    fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.service.poll_ready(cx)
-    }
+    ntex::forward_poll_ready!(service);
+    ntex::forward_poll_shutdown!(service);
 
-    fn poll_shutdown(&self, cx: &mut Context<'_>) -> Poll<()> {
-        self.service.poll_shutdown(cx)
-    }
-
-    fn call<'a>(&'a self, req: WebRequest<Err>, ctx: ServiceCtx<'a, Self>) -> Self::Future<'a> {
+    async fn call(
+        &self,
+        req: WebRequest<Err>,
+        ctx: ServiceCtx<'_, Self>,
+    ) -> Result<Self::Response, S::Error> {
         match self.inner.preflight_check(req.head()) {
-            Ok(Either::Left(res)) => Either::Left(ok(req.into_response(res))),
+            Ok(Either::Left(res)) => Ok(req.into_response(res)),
             Ok(Either::Right(_)) => {
                 let inner = self.inner.clone();
                 let has_origin = req.headers().contains_key(&header::ORIGIN);
                 let allowed_origin = inner.access_control_allow_origin(req.headers());
 
-                Either::Right(
-                    async move {
-                        let mut res = ctx.call(&self.service, req).await?;
+                let mut res = ctx.call(&self.service, req).await?;
 
-                        if has_origin {
-                            inner.handle_response(res.headers_mut(), allowed_origin);
-                        }
-                        Ok(res)
-                    }
-                    .boxed_local(),
-                )
+                if has_origin {
+                    inner.handle_response(res.headers_mut(), allowed_origin);
+                }
+                Ok(res)
             }
-            Err(e) => Either::Left(ok(req.render_error(e))),
+            Err(e) => Ok(req.render_error(e)),
         }
     }
 }
@@ -821,7 +810,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_preflight() {
-        let mut cors: Pipeline<_> = Cors::new()
+        let cors: Pipeline<_> = Cors::new()
             .send_wildcard()
             .max_age(3600)
             .allowed_methods(vec![Method::GET, Method::OPTIONS, Method::POST])
@@ -1006,8 +995,8 @@ mod tests {
                 .expose_headers(exposed_headers.clone())
                 .allowed_header(header::CONTENT_TYPE)
                 .finish()
-                .create(fn_service(|req: WebRequest<DefaultError>| {
-                    ok::<_, std::convert::Infallible>(req.into_response(
+                .create(fn_service(|req: WebRequest<DefaultError>| async move {
+                    Ok::<_, std::convert::Infallible>(req.into_response(
                         HttpResponse::Ok().header(header::VARY, "Accept").finish(),
                     ))
                 }))
