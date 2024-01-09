@@ -11,7 +11,6 @@ use std::os::unix::fs::MetadataExt;
 use bitflags::bitflags;
 use mime_guess::from_path;
 
-use futures::future::{ready, Ready};
 use futures::stream::TryStreamExt;
 use ntex::http::body::SizedStream;
 use ntex::http::header::ContentEncoding;
@@ -477,9 +476,7 @@ fn none_match(etag: Option<&file_header::EntityTag>, req: &HttpRequest) -> bool 
 }
 
 impl<Err: ErrorRenderer> Responder<Err> for NamedFile {
-    type Future = Ready<HttpResponse>;
-
-    fn respond_to(self, req: &HttpRequest) -> Self::Future {
-        ready(self.into_response(req))
+    async fn respond_to(self, req: &HttpRequest) -> HttpResponse {
+        self.into_response(req)
     }
 }
