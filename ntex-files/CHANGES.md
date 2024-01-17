@@ -1,5 +1,9 @@
 # Changes
 
+## [0.4.1] - 2024-01-17
+
+* Fix compatibility #11
+
 ## [0.2.2] - 2023-04-09
 
 * Remove hyperx dependencies

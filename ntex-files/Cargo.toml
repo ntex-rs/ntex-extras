@@ -1,6 +1,6 @@
 [package]
 name = "ntex-files"
-version = "0.4.0"
+version = "0.4.1"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Static files support for ntex web."
 readme = "README.md"
@@ -19,18 +19,18 @@ path = "src/lib.rs"
 
 [dependencies]
 ntex = "1.0"
-ntex-http = "0.1"
+ntex-http = "0.1.12"
 bitflags = "2.1"
 futures = "0.3"
 derive_more = "0.99"
-http = "0.2"
+http = "1.0"
 log = "0.4"
 mime = "0.3"
-mime_guess = "2.0.1"
+mime_guess = "2.0"
 percent-encoding = "2.1"
-v_htmlescape = "0.15.8"
-unicase = "2.6.0"
-language-tags = "0.3.2"
+v_htmlescape = "0.15"
+unicase = "2.6"
+language-tags = "0.3"
 httpdate = "1.0"
 
 [dev-dependencies]
