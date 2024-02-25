@@ -4,7 +4,7 @@
   <p>
 
 [![Build Status](https://github.com/ntex-rs/ntex-extras/workflows/CI%20(Linux)/badge.svg)](https://travis-ci.org/ntex-rs/ntex) 
-[![Version](https://img.shields.io/badge/rustc-1.65+-lightgray.svg)](https://blog.rust-lang.org/2022/11/03/Rust-1.65.0.html) 
+[![Version](https://img.shields.io/badge/rustc-1.75+-lightgray.svg)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html) 
 [![codecov](https://codecov.io/gh/ntex-rs/ntex-extras/branch/master/graph/badge.svg)](https://codecov.io/gh/ntex-rs/ntex-extras) 
 
   </p>
