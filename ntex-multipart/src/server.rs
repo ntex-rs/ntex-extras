@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use std::{cmp, convert::TryFrom, fmt, marker::PhantomData, pin::Pin, rc::Rc};
 
 use futures::stream::{LocalBoxStream, Stream, StreamExt};
-use ntex::http::error::{ParseError, PayloadError};
+use ntex::http::error::{DecodeError, PayloadError};
 use ntex::http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use ntex::task::LocalWaker;
 use ntex::util::{Bytes, BytesMut};
@@ -134,16 +134,16 @@ impl InnerMultipart {
                                 if let Ok(value) = HeaderValue::try_from(h.value) {
                                     headers.append(name, value);
                                 } else {
-                                    return Err(ParseError::Header.into());
+                                    return Err(DecodeError::Header.into());
                                 }
                             } else {
-                                return Err(ParseError::Header.into());
+                                return Err(DecodeError::Header.into());
                             }
                         }
                         Ok(Some(headers))
                     }
-                    Ok(httparse::Status::Partial) => Err(ParseError::Header.into()),
-                    Err(err) => Err(ParseError::from(err).into()),
+                    Ok(httparse::Status::Partial) => Err(DecodeError::Header.into()),
+                    Err(err) => Err(DecodeError::from(err).into()),
                 }
             }
         }

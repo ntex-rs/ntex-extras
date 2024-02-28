@@ -1,6 +1,6 @@
 //! Error and Result module
 use derive_more::{Display, From};
-use ntex::http::error::{ParseError, PayloadError};
+use ntex::http::error::{DecodeError, PayloadError};
 use ntex::http::StatusCode;
 use ntex::web::error::{DefaultError, WebResponseError};
 
@@ -24,7 +24,7 @@ pub enum MultipartError {
     Incomplete,
     /// Error during field parsing
     #[display(fmt = "{}", _0)]
-    Parse(ParseError),
+    Decode(DecodeError),
     /// Payload error
     #[display(fmt = "{}", _0)]
     Payload(PayloadError),
