@@ -104,19 +104,15 @@ impl WebResponseError<DefaultError> for CorsError {
 /// allowed).
 ///
 /// `Default` is implemented for this enum and is `All`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Default, Clone, Debug, Eq, PartialEq)]
 pub enum AllOrSome<T> {
     /// Everything is allowed. Usually equivalent to the "*" value.
+    #[default]
     All,
     /// Only some of `T` is allowed
     Some(T),
 }
 
-impl<T> Default for AllOrSome<T> {
-    fn default() -> Self {
-        AllOrSome::All
-    }
-}
 
 impl<T> AllOrSome<T> {
     /// Returns whether this is an `All` variant

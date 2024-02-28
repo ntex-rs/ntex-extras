@@ -3,7 +3,7 @@
   <p><strong>A collection of additional crates supporting the ntex frameworks.</strong> </p>
   <p>
 
-[![Build Status](https://github.com/ntex-rs/ntex-extras/workflows/CI%20(Linux)/badge.svg)](https://travis-ci.org/ntex-rs/ntex) 
+[![Build Status](https://github.com/ntex-rs/ntex-extras/actions/workflows/linux.yml/badge.svg)](https://github.com/ntex-rs/ntex-extras/actions/workflows/linux.yml)
 [![Version](https://img.shields.io/badge/rustc-1.75+-lightgray.svg)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html) 
 [![codecov](https://codecov.io/gh/ntex-rs/ntex-extras/branch/master/graph/badge.svg)](https://codecov.io/gh/ntex-rs/ntex-extras) 
 
