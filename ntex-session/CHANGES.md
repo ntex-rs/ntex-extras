@@ -1,8 +1,9 @@
 # Changes
 
-## [Unreleased] - 2020-01-xx
+## [1.0.0] 2024-02-28
 
-* Update the `time` dependency to 0.2.5
+* Update the `ntex` dependency to 1.1
+* Update the `time` dependency to 0.3
 * [#1292](https://github.com/actix/actix-web/pull/1292) Long lasting auto-prolonged session
 
 ## [0.3.0] - 2019-12-20

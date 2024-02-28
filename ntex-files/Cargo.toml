@@ -1,6 +1,6 @@
 [package]
 name = "ntex-files"
-version = "0.4.1"
+version = "1.0.0"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Static files support for ntex web."
 readme = "README.md"

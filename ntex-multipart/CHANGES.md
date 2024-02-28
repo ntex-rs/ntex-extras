@@ -1,5 +1,10 @@
 # Changes
 
+## [1.0.0] - 2024-02-28
+
+* Update the `ntex` dependency to 1.1
+* Rename `ParseError` to `DecodeError`
+
 ## [0.2.1] - 2020-01-xx
 
 * Remove the unused `time` dependency

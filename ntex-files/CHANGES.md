@@ -1,5 +1,9 @@
 # Changes
 
+## [1.0.0] - 2024-02-28
+
+* Update the `ntex` dependency to 1.1
+
 ## [0.4.1] - 2024-01-17
 
 * Fix compatibility #11

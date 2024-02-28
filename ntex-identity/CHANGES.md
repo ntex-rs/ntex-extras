@@ -1,8 +1,9 @@
 # Changes
 
-## [Unreleased] - 2020-xx-xx
+## [1.0.0] - 2024-02-28
 
-* Update the `time` dependency to 0.2.5
+* Update the `ntex` dependency to 1.1
+* Update the `time` dependency to 0.3
 
 ## [0.2.1] - 2020-01-10
 
