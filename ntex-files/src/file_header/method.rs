@@ -13,11 +13,12 @@ use self::Method::{Connect, Delete, Extension, Get, Head, Options, Patch, Post, 
 ///
 /// It may make sense to grow this to include all variants currently
 /// registered with IANA, if they are at all common to use.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Default, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Method {
     /// OPTIONS
     Options,
     /// GET
+    #[default]
     Get,
     /// POST
     Post,
@@ -138,12 +139,6 @@ impl fmt::Display for Method {
             Patch => "PATCH",
             Extension(ref s) => s.as_ref(),
         })
-    }
-}
-
-impl Default for Method {
-    fn default() -> Method {
-        Method::Get
     }
 }
 

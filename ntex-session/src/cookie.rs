@@ -300,8 +300,8 @@ where
     type Response = WebResponse;
     type Error = S::Error;
 
-    ntex::forward_poll_ready!(service);
-    ntex::forward_poll_shutdown!(service);
+    ntex::forward_ready!(service);
+    ntex::forward_shutdown!(service);
 
     /// On first request, a new session cookie is returned in response, regardless
     /// of whether any session state is set.  With subsequent requests, if the

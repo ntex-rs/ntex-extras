@@ -18,7 +18,7 @@ name = "ntex_files"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "1.1"
+ntex = "2"
 ntex-http = "0.1.12"
 bitflags = "2.1"
 futures = "0.3"
@@ -34,4 +34,4 @@ language-tags = "0.3"
 httpdate = "1.0"
 
 [dev-dependencies]
-ntex = { version = "1.1", features = ["tokio", "openssl", "compress"] }
+ntex = { version = "2", features = ["tokio", "openssl", "compress"] }
