@@ -247,8 +247,8 @@ where
     type Response = WebResponse;
     type Error = S::Error;
 
-    ntex::forward_poll_ready!(service);
-    ntex::forward_poll_shutdown!(service);
+    ntex::forward_ready!(service);
+    ntex::forward_shutdown!(service);
 
     async fn call(
         &self,
@@ -571,7 +571,7 @@ mod tests {
     use super::*;
     use ntex::web::test::{self, TestRequest};
     use ntex::web::{self, error, App, Error, HttpResponse};
-    use ntex::{http::StatusCode, service::into_service, service::Pipeline, time};
+    use ntex::{http::StatusCode, service::fn_service, service::Pipeline, time};
 
     const COOKIE_KEY_MASTER: [u8; 32] = [0; 32];
     const COOKIE_NAME: &str = "ntex_auth";
@@ -973,7 +973,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_borrowed_mut_error() {
-        use futures::future::{lazy, ok, Ready};
+        use futures::future::{ok, Ready};
         use ntex::web::{DefaultError, Error};
 
         struct Ident;
@@ -998,7 +998,7 @@ mod tests {
 
         let srv: Pipeline<_> = IdentityServiceMiddleware {
             backend: Rc::new(Ident),
-            service: into_service(|_: WebRequest<DefaultError>| async move {
+            service: fn_service(|_: WebRequest<DefaultError>| async move {
                 time::sleep(time::Seconds(100)).await;
                 Err::<WebResponse, _>(error::ErrorBadRequest("error"))
             }),
@@ -1012,6 +1012,6 @@ mod tests {
         });
         time::sleep(time::Millis(50)).await;
 
-        let _ = lazy(|cx| srv.poll_ready(cx)).await;
+        srv.ready().await.expect("srv to be ready");
     }
 }
