@@ -1,6 +1,6 @@
 [package]
 name = "ntex-identity"
-version = "1.0.0"
+version = "2.0.0"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Identity service for ntex web framework."
 readme = "README.md"
