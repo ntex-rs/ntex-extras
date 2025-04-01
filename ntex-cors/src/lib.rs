@@ -26,7 +26,7 @@
 //!         .wrap(
 //!             Cors::new() // <- Construct CORS middleware builder
 //!               .allowed_origin("https://www.rust-lang.org/")
-//!               .allowed_methods(vec!["GET", "POST"])
+//!               .allowed_methods(vec![http::Method::GET, http::Method::POST])
 //!               .allowed_headers(vec![http::header::AUTHORIZATION, http::header::ACCEPT])
 //!               .allowed_header(http::header::CONTENT_TYPE)
 //!               .max_age(3600)
@@ -259,7 +259,18 @@ impl Cors {
     /// This is the `list of methods` in the
     /// [Resource Processing Model](https://www.w3.org/TR/cors/#resource-processing-model).
     ///
-    /// Defaults to `[GET, HEAD, POST, OPTIONS, PUT, PATCH, DELETE]`
+    /// You can use either `&str` (e.g. `"GET"`) or directly use the [`http::Method`] enum
+    /// (e.g. `http::Method::GET`). Using [`http::Method`] is recommended for better type safety
+    /// and to avoid runtime errors due to typos.
+    ///
+    /// # Example
+    /// ```rust
+    /// use ntex::http::Method;
+    ///
+    /// cors.allowed_methods(vec![Method::GET, Method::POST]);
+    /// ```
+    ///
+    /// The default is `[GET, HEAD, POST, OPTIONS, PUT, PATCH, DELETE]`.
     pub fn allowed_methods<U, M>(mut self, methods: U) -> Self
     where
         U: IntoIterator<Item = M>,
