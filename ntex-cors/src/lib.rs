@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn test_allowed_origin_to_all() {
+    async fn test_set_allowed_origin_to_all() {
         let cors = Cors::new().allowed_origin("*").finish().create(test::ok_service()).into();
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
