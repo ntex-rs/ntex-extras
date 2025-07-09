@@ -25,4 +25,4 @@ mime = "0.3"
 twoway = "0.2"
 
 [dev-dependencies]
-ntex = { version = "2", features=["tokio"] }
+ntex = { version = "2", features=["neon"] }
