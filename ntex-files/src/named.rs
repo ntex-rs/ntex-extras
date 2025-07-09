@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-
+use std::rc::Rc;
 use bitflags::bitflags;
 use mime_guess::from_path;
 
@@ -407,7 +407,7 @@ impl NamedFile {
             resp.body(SizedStream::new(
                 length,
                 reader.map_err(|e| {
-                    let e: Box<dyn Error> = Box::new(e);
+                    let e: Rc<dyn Error> = Rc::new(e);
                     e
                 }),
             ))
