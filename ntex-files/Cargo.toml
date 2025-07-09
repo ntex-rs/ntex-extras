@@ -1,6 +1,6 @@
 [package]
 name = "ntex-files"
-version = "2.0.1"
+version = "2.1.0"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Static files support for ntex web."
 readme = "README.md"
@@ -18,12 +18,12 @@ name = "ntex_files"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "2"
-ntex-http = "0.1.12"
-bitflags = "2.1"
+ntex = "2.15"
+ntex-http = "0.1.14"
+bitflags = "2"
 futures = "0.3"
 derive_more = "0.99"
-http = "1.0"
+http = "1"
 log = "0.4"
 mime = "0.3"
 mime_guess = "2.0"
