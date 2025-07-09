@@ -1,5 +1,9 @@
 # Changes
 
+## [2.1.0] - 2025-07-09
+
+* Fix Cors::allowed_origin to set "*" as AllOrSome::All #17
+
 ## [1.0.0] - 2024-02-28
 
 * Update the `ntex` dependency to 1.1

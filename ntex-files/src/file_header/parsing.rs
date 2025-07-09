@@ -35,7 +35,7 @@ where
 {
     let mut result = Vec::new();
     for s in raw.iter() {
-        let s = str::from_utf8(s.as_ref())?;
+        let s = str::from_utf8(s)?;
         result.extend(
             s.split(',')
                 .filter_map(|x| match x.trim() {

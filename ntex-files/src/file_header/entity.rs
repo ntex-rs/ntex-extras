@@ -120,9 +120,8 @@ impl Display for EntityTag {
 
 impl FromStr for EntityTag {
     type Err = Error;
-    fn from_str(s: &str) -> Result<EntityTag> {
-        let length: usize = s.len();
-        let slice = &s[..];
+    fn from_str(slice: &str) -> Result<EntityTag> {
+        let length: usize = slice.len();
         // Early exits if it doesn't terminate in a DQUOTE.
         if !slice.ends_with('"') || slice.len() < 2 {
             return Err(Error::Header);

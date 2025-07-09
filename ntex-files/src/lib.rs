@@ -1,4 +1,10 @@
-#![allow(type_alias_bounds, clippy::borrow_interior_mutable_const, clippy::type_complexity)]
+#![allow(
+    type_alias_bounds,
+    clippy::borrow_interior_mutable_const,
+    clippy::type_complexity,
+    clippy::result_unit_err,
+    clippy::enum_variant_names
+)]
 
 //! Static files support
 use std::fs::{DirEntry, File};
@@ -71,9 +77,7 @@ impl Stream for ChunkedReadFile {
                 Poll::Ready(Err(e)) => {
                     let e = match e {
                         BlockingError::Error(e) => e,
-                        BlockingError::Canceled => {
-                            io::Error::new(io::ErrorKind::Other, "Operation is canceled")
-                        }
+                        BlockingError::Canceled => io::Error::other("Operation is canceled"),
                     };
                     Poll::Ready(Some(Err(e)))
                 }
@@ -218,10 +222,8 @@ type MimeOverride = dyn Fn(&mime::Name) -> file_header::DispositionType;
 /// use ntex::web::App;
 /// use ntex_files as fs;
 ///
-/// fn main() {
-///     let app = App::new()
-///         .service(fs::Files::new("/static", "."));
-/// }
+/// let app = App::new()
+///    .service(fs::Files::new("/static", "."));
 /// ```
 pub struct Files<Err: ErrorRenderer> {
     path: String,
