@@ -238,6 +238,11 @@ impl Cors {
         if let Some(cors) = cors(&mut self.cors, &self.error) {
             match Uri::try_from(origin) {
                 Ok(_) => {
+                    // If the origin is "*", set the origins to `All`
+                    if origin.trim() == "*" {
+                        cors.origins = AllOrSome::All;
+                        return self;
+                    }
                     if cors.origins.is_all() {
                         cors.origins = AllOrSome::Some(HashSet::new());
                     }
@@ -1098,5 +1103,17 @@ mod tests {
             &b"https://example.org"[..],
             resp.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap().as_bytes()
         );
+    }
+
+    #[ntex::test]
+    async fn test_set_allowed_origin_to_all() {
+        let cors = Cors::new().allowed_origin("*").finish().create(test::ok_service()).into();
+
+        let req = TestRequest::with_header("Origin", "https://www.example.com")
+            .method(Method::GET)
+            .to_srv_request();
+
+        let resp = test::call_service(&cors, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
