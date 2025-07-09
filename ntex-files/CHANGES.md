@@ -1,5 +1,9 @@
 # Changes
 
+## [2.1.0] - 2025-07-09
+
+* Fix ntex 2.15 compat
+
 ## [1.0.0] - 2024-02-28
 
 * Update the `ntex` dependency to 1.1

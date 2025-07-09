@@ -269,7 +269,7 @@ impl Cors {
     /// and to avoid runtime errors due to typos.
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// use ntex::http::Method;
     ///
     /// cors.allowed_methods(vec![Method::GET, Method::POST]);

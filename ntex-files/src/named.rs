@@ -1,17 +1,15 @@
-use std::error::Error;
 use std::fs::{File, Metadata};
-use std::io;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{error::Error, io, rc::Rc};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use std::rc::Rc;
-use bitflags::bitflags;
-use mime_guess::from_path;
 
+use bitflags::bitflags;
 use futures::stream::TryStreamExt;
+use mime_guess::from_path;
 use ntex::http::body::SizedStream;
 use ntex::http::header::ContentEncoding;
 use ntex::http::{self, StatusCode};

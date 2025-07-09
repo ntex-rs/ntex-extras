@@ -1,3 +1,5 @@
+#![allow(dead_code, clippy::useless_conversion)]
+
 mod charset;
 mod common;
 mod content_disposition;

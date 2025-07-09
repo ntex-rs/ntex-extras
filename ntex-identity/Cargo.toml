@@ -30,4 +30,4 @@ cookie = { version = "0.18", features = ["private"] }
 time = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-ntex = { version = "2", features=["tokio"] }
+ntex = { version = "2", features=["neon"] }

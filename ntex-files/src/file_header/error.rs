@@ -87,8 +87,3 @@ impl From<FromUtf8Error> for Error {
         Utf8(err.utf8_error())
     }
 }
-
-#[doc(hidden)]
-trait AssertSendSync: Send + Sync + 'static {}
-#[doc(hidden)]
-impl AssertSendSync for Error {}

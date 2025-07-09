@@ -128,7 +128,7 @@ impl PartialEq<[Vec<u8>]> for Raw {
     }
 }
 
-impl<'a> PartialEq<[&'a [u8]]> for Raw {
+impl PartialEq<[&[u8]]> for Raw {
     fn eq(&self, bytes: &[&[u8]]) -> bool {
         eq(self, bytes)
     }
@@ -202,17 +202,14 @@ impl From<Bytes> for Raw {
     }
 }
 
-#[cfg(feature = "headers")]
 pub fn parsed(val: Bytes) -> Raw {
     Raw(Lines::One(From::from(val)))
 }
 
-#[cfg(feature = "headers")]
 pub fn push(raw: &mut Raw, val: Bytes) {
     raw.push_line(val);
 }
 
-#[cfg(feature = "headers")]
 pub fn new() -> Raw {
     Raw(Lines::Empty)
 }
