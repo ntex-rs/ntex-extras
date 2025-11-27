@@ -21,11 +21,11 @@ use ntex::http::{header, Method, Payload, Uri};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex::service::{IntoServiceFactory, Service, ServiceCtx, ServiceFactory};
-use ntex::util::Bytes;
 use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
 use ntex::web::error::ErrorRenderer;
 use ntex::web::guard::Guard;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse, WebRequest, WebResponse};
+use ntex::{util::Bytes, SharedCfg};
 use percent_encoding::{utf8_percent_encode, CONTROLS};
 use v_htmlescape::escape as escape_html_entity;
 
@@ -40,7 +40,7 @@ pub use crate::range::HttpRange;
 
 type HttpService<Err: ErrorRenderer> = BoxService<WebRequest<Err>, WebResponse, Err::Container>;
 type HttpServiceFactory<Err: ErrorRenderer> =
-    BoxServiceFactory<(), WebRequest<Err>, WebResponse, Err::Container, ()>;
+    BoxServiceFactory<SharedCfg, WebRequest<Err>, WebResponse, Err::Container, ()>;
 
 /// Return the MIME type associated with a filename extension (case-insensitive).
 /// If `ext` is empty or no associated type for the extension was found, returns
@@ -368,9 +368,13 @@ impl<Err: ErrorRenderer> Files<Err> {
     /// Sets default handler which is used when no matched file could be found.
     pub fn default_handler<F, U>(mut self, f: F) -> Self
     where
-        F: IntoServiceFactory<U, WebRequest<Err>>,
-        U: ServiceFactory<WebRequest<Err>, Response = WebResponse, Error = Err::Container>
-            + 'static,
+        F: IntoServiceFactory<U, WebRequest<Err>, SharedCfg>,
+        U: ServiceFactory<
+                WebRequest<Err>,
+                SharedCfg,
+                Response = WebResponse,
+                Error = Err::Container,
+            > + 'static,
     {
         // create and configure default resource
         self.default = Some(Rc::new(boxed::factory(f.into_factory().map_init_err(|_| ()))));
@@ -397,7 +401,7 @@ where
     }
 }
 
-impl<Err> ServiceFactory<WebRequest<Err>> for Files<Err>
+impl<Err> ServiceFactory<WebRequest<Err>, SharedCfg> for Files<Err>
 where
     Err: ErrorRenderer,
     Err::Container: From<FilesError>,
@@ -407,7 +411,7 @@ where
     type Service = FilesService<Err>;
     type InitError = ();
 
-    async fn create(&self, _: ()) -> Result<Self::Service, Self::InitError> {
+    async fn create(&self, cfg: SharedCfg) -> Result<Self::Service, Self::InitError> {
         let mut srv = FilesService {
             directory: self.directory.clone(),
             index: self.index.clone(),
@@ -422,7 +426,7 @@ where
 
         if let Some(default) = self.default.as_ref() {
             default
-                .create(())
+                .create(cfg)
                 .map(move |result| match result {
                     Ok(default) => {
                         srv.default = Some(default);
@@ -1173,7 +1177,7 @@ mod tests {
             .default_handler(|req: WebRequest<DefaultError>| async move {
                 Ok(req.into_response(HttpResponse::Ok().body("default content")))
             })
-            .pipeline(())
+            .pipeline(SharedCfg::default())
             .await
             .unwrap();
         let req = TestRequest::with_uri("/missing").to_srv_request();

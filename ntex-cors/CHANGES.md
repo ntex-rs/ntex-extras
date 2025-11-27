@@ -1,5 +1,9 @@
 # Changes
 
+## [3.0.0] - 2025-11-27
+
+* Update the `ntex` to 3.0
+
 ## [2.1.0] - 2025-07-09
 
 * Fix Cors::allowed_origin to set "*" as AllOrSome::All #17

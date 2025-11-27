@@ -51,7 +51,7 @@ use std::{
 
 use derive_more::Display;
 use ntex::http::header::{self, HeaderName, HeaderValue};
-use ntex::http::{error::HttpError, HeaderMap, Method, RequestHead, StatusCode, Uri};
+use ntex::http::{HeaderMap, Method, RequestHead, StatusCode, Uri, error::HttpError};
 use ntex::service::{Middleware, Service, ServiceCtx};
 use ntex::util::Either;
 use ntex::web::{
@@ -62,34 +62,30 @@ use ntex::web::{
 #[derive(Debug, Display)]
 pub enum CorsError {
     /// The HTTP request header `Origin` is required but was not provided
-    #[display(fmt = "The HTTP request header `Origin` is required but was not provided")]
+    #[display("The HTTP request header `Origin` is required but was not provided")]
     MissingOrigin,
     /// The HTTP request header `Origin` could not be parsed correctly.
-    #[display(fmt = "The HTTP request header `Origin` could not be parsed correctly.")]
+    #[display("The HTTP request header `Origin` could not be parsed correctly.")]
     BadOrigin,
     /// The request header `Access-Control-Request-Method` is required but is
     /// missing
-    #[display(
-        fmt = "The request header `Access-Control-Request-Method` is required but is missing"
-    )]
+    #[display("The request header `Access-Control-Request-Method` is required but is missing")]
     MissingRequestMethod,
     /// The request header `Access-Control-Request-Method` has an invalid value
-    #[display(fmt = "The request header `Access-Control-Request-Method` has an invalid value")]
+    #[display("The request header `Access-Control-Request-Method` has an invalid value")]
     BadRequestMethod,
     /// The request header `Access-Control-Request-Headers`  has an invalid
     /// value
-    #[display(
-        fmt = "The request header `Access-Control-Request-Headers`  has an invalid value"
-    )]
+    #[display("The request header `Access-Control-Request-Headers`  has an invalid value")]
     BadRequestHeaders,
     /// Origin is not allowed to make this request
-    #[display(fmt = "Origin is not allowed to make this request")]
+    #[display("Origin is not allowed to make this request")]
     OriginNotAllowed,
     /// Requested method is not allowed
-    #[display(fmt = "Requested method is not allowed")]
+    #[display("Requested method is not allowed")]
     MethodNotAllowed,
     /// One or more headers requested are not allowed
-    #[display(fmt = "One or more headers requested are not allowed")]
+    #[display("One or more headers requested are not allowed")]
     HeadersNotAllowed,
 }
 
@@ -787,7 +783,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use ntex::service::{fn_service, Middleware, Pipeline};
+    use ntex::service::{Middleware, Pipeline, fn_service};
     use ntex::web::{self, test, test::TestRequest};
 
     use super::*;

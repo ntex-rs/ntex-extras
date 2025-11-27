@@ -31,10 +31,10 @@ use crate::{Session, SessionStatus};
 #[derive(Debug, From, Display)]
 pub enum CookieSessionError {
     /// Size of the serialized session is greater than 4000 bytes.
-    #[display(fmt = "Size of the serialized session is greater than 4000 bytes.")]
+    #[display("Size of the serialized session is greater than 4000 bytes.")]
     Overflow,
     /// Fail to serialize session.
-    #[display(fmt = "Fail to serialize session")]
+    #[display("Fail to serialize session")]
     Serialize(JsonError),
 }
 

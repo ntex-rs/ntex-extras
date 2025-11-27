@@ -8,28 +8,28 @@ use ntex::web::error::{DefaultError, WebResponseError};
 #[derive(Debug, Display, From)]
 pub enum MultipartError {
     /// Content-Type header is not found
-    #[display(fmt = "No Content-type header found")]
+    #[display("No Content-type header found")]
     NoContentType,
     /// Can not parse Content-Type header
-    #[display(fmt = "Can not parse Content-Type header")]
+    #[display("Can not parse Content-Type header")]
     ParseContentType,
     /// Multipart boundary is not found
-    #[display(fmt = "Multipart boundary is not found")]
+    #[display("Multipart boundary is not found")]
     Boundary,
     /// Nested multipart is not supported
-    #[display(fmt = "Nested multipart is not supported")]
+    #[display("Nested multipart is not supported")]
     Nested,
     /// Multipart stream is incomplete
-    #[display(fmt = "Multipart stream is incomplete")]
+    #[display("Multipart stream is incomplete")]
     Incomplete,
     /// Error during field parsing
-    #[display(fmt = "{}", _0)]
+    #[display("{}", _0)]
     Decode(DecodeError),
     /// Payload error
-    #[display(fmt = "{}", _0)]
+    #[display("{}", _0)]
     Payload(PayloadError),
     /// Not consumed
-    #[display(fmt = "Multipart stream is not consumed")]
+    #[display("Multipart stream is not consumed")]
     NotConsumed,
 }
 
