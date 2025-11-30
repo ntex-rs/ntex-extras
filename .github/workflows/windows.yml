@@ -12,7 +12,7 @@ jobs:
       matrix:
         version:
           - stable
-          - nightly
+          - beta
 
     name: ${{ matrix.version }} - x86_64-pc-windows-msvc
     runs-on: windows-latest

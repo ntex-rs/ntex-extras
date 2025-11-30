@@ -9,7 +9,7 @@ jobs:
       matrix:
         version:
           - stable
-          - nightly
+          - beta
 
     name: ${{ matrix.version }} - x86_64-apple-darwin
     runs-on: macOS-latest
