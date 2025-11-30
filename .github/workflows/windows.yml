@@ -12,7 +12,7 @@ jobs:
       matrix:
         version:
           - stable
-          - beta
+          - nightly
 
     name: ${{ matrix.version }} - x86_64-pc-windows-msvc
     runs-on: windows-latest
@@ -21,26 +21,46 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install ${{ matrix.version }}
-        uses: actions-rs/toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ matrix.version }}-x86_64-pc-windows-msvc
-          profile: minimal
-          override: true
 
       - name: Generate Cargo.lock
-        uses: actions-rs/cargo@v1
+        run: cargo generate-lockfile
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
         with:
-          command: generate-lockfile
+          path: C:\vcpkg\installed\x64-windows\
+          key: x86_64-pc-windows-msvc-openssl
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ matrix.version }}-x86_64-pc-windows-msvc-cargo-registry-trimmed-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ matrix.version }}-x86_64-pc-windows-msvc-cargo-index-trimmed-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cmake
+        uses: lukka/get-cmake@latest
+
+      - name: Install nasm
+        uses: ilammy/setup-nasm@v1
 
       - name: Install OpenSSL
         run: |
           vcpkg integrate install
           vcpkg install openssl:x64-windows
+          Copy-Item C:\vcpkg\installed\x64-windows\bin\libcrypto-3-x64.dll C:\vcpkg\installed\x64-windows\bin\libcrypto.dll
+          Copy-Item C:\vcpkg\installed\x64-windows\bin\libssl-3-x64.dll C:\vcpkg\installed\x64-windows\bin\libssl.dll
+          Get-ChildItem C:\vcpkg\installed\x64-windows\bin
+          Get-ChildItem C:\vcpkg\installed\x64-windows\lib
 
       - name: Run tests
-        uses: actions-rs/cargo@v1
-        env:
-          OPENSSL_ROOT_DIR: D:\vcpkg\installed\x64-windows-static-md
-        with:
-          command: test
-          args: --all --all-features -- --nocapture
+        run: |
+          cargo test --all --lib --no-fail-fast
