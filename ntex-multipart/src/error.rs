@@ -1,7 +1,7 @@
 //! Error and Result module
 use derive_more::{Display, From};
-use ntex::http::error::{DecodeError, PayloadError};
 use ntex::http::StatusCode;
+use ntex::http::error::{DecodeError, PayloadError};
 use ntex::web::error::{DefaultError, WebResponseError};
 
 /// A set of errors that can occur during parsing multipart streams
@@ -45,8 +45,8 @@ impl WebResponseError<DefaultError> for MultipartError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ntex::web::test::TestRequest;
     use ntex::web::HttpResponse;
+    use ntex::web::test::TestRequest;
 
     #[test]
     fn test_multipart_error() {

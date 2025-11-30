@@ -191,7 +191,7 @@ mod percent_encoding_http {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_extended_value, Charset, ExtendedValue};
+    use super::{Charset, ExtendedValue, parse_extended_value};
     use language_tags::LanguageTag;
 
     #[test]

@@ -22,7 +22,7 @@
 //!
 //! #[ntex::main]
 //! async fn main() -> std::io::Result<()> {
-//!     web::server(|| App::new()
+//!     web::server(async || App::new()
 //!         .wrap(
 //!             Cors::new() // <- Construct CORS middleware builder
 //!               .allowed_origin("https://www.rust-lang.org/")
@@ -139,8 +139,7 @@ impl<T> AllOrSome<T> {
 ///
 ///   1. Call [`Cors::build`](struct.Cors.html#method.build) to start building.
 ///   2. Use any of the builder methods to set fields in the backend.
-/// 3. Call [finish](struct.Cors.html#method.finish) to retrieve the
-/// constructed backend.
+///   3. Call [finish](struct.Cors.html#method.finish) to retrieve the constructed backend.
 ///
 /// # Example
 ///
@@ -185,23 +184,21 @@ impl Cors {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     /// Build a new CORS default middleware
     pub fn default<Err>() -> CorsFactory<Err> {
         let inner = Inner {
             origins: AllOrSome::default(),
             origins_str: None,
-            methods: HashSet::from_iter(
-                vec![
-                    Method::GET,
-                    Method::HEAD,
-                    Method::POST,
-                    Method::OPTIONS,
-                    Method::PUT,
-                    Method::PATCH,
-                    Method::DELETE,
-                ]
-                .into_iter(),
-            ),
+            methods: HashSet::from_iter(vec![
+                Method::GET,
+                Method::HEAD,
+                Method::POST,
+                Method::OPTIONS,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+            ]),
             headers: AllOrSome::All,
             expose_hdrs: None,
             max_age: None,

@@ -17,7 +17,7 @@ use futures::future::{FutureExt, LocalBoxFuture};
 use futures::{Future, Stream};
 use mime_guess::from_ext;
 use ntex::http::error::BlockingError;
-use ntex::http::{header, Method, Payload, Uri};
+use ntex::http::{Method, Payload, Uri, header};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex::service::{IntoServiceFactory, Service, ServiceCtx, ServiceFactory};
@@ -25,8 +25,8 @@ use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
 use ntex::web::error::ErrorRenderer;
 use ntex::web::guard::Guard;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse, WebRequest, WebResponse};
-use ntex::{util::Bytes, SharedCfg};
-use percent_encoding::{utf8_percent_encode, CONTROLS};
+use ntex::{SharedCfg, util::Bytes};
+use percent_encoding::{CONTROLS, utf8_percent_encode};
 use v_htmlescape::escape as escape_html_entity;
 
 mod error;
@@ -616,7 +616,7 @@ mod tests {
     use ntex::http::{self, Method, StatusCode};
     use ntex::web::middleware::Compress;
     use ntex::web::test::{self, TestRequest};
-    use ntex::web::{guard, App, DefaultError};
+    use ntex::web::{App, DefaultError, guard};
 
     #[ntex::test]
     async fn test_file_extension_to_mime() {

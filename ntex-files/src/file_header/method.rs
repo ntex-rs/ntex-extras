@@ -71,11 +71,7 @@ impl Method {
     /// See [the spec](https://tools.ietf.org/html/rfc7231#section-4.2.2) for
     /// more words.
     pub fn idempotent(&self) -> bool {
-        if self.safe() {
-            true
-        } else {
-            matches!(*self, Put | Delete)
-        }
+        if self.safe() { true } else { matches!(*self, Put | Delete) }
     }
 }
 

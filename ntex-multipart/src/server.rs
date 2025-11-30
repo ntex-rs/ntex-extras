@@ -594,11 +594,7 @@ impl PayloadRef {
     where
         'a: 'b,
     {
-        if s.current() {
-            Some(self.payload.borrow_mut())
-        } else {
-            None
-        }
+        if s.current() { Some(self.payload.borrow_mut()) } else { None }
     }
 }
 
@@ -696,11 +692,7 @@ impl PayloadBuffer {
     /// Read exact number of bytes
     #[cfg(test)]
     fn read_exact(&mut self, size: usize) -> Option<Bytes> {
-        if size <= self.buf.len() {
-            Some(self.buf.split_to(size).freeze())
-        } else {
-            None
-        }
+        if size <= self.buf.len() { Some(self.buf.split_to(size).freeze()) } else { None }
     }
 
     fn read_max(&mut self, size: u64) -> Result<Option<Bytes>, MultipartError> {
@@ -719,11 +711,7 @@ impl PayloadBuffer {
         let res = twoway::find_bytes(&self.buf, line)
             .map(|idx| self.buf.split_to(idx + line.len()).freeze());
 
-        if res.is_none() && self.eof {
-            Err(MultipartError::Incomplete)
-        } else {
-            Ok(res)
-        }
+        if res.is_none() && self.eof { Err(MultipartError::Incomplete) } else { Ok(res) }
     }
 
     /// Read bytes until new line delimiter
