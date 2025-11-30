@@ -31,7 +31,7 @@
 //! #[ntex::main]
 //! async fn main() -> std::io::Result<()> {
 //!     web::server(
-//!         || App::new().wrap(
+//!         async || App::new().wrap(
 //!               CookieSession::signed(&[0; 32]) // <- create cookie based session middleware
 //!                     .secure(false)
 //!              )
@@ -49,8 +49,8 @@ use std::rc::Rc;
 use ntex::http::{Payload, RequestHead};
 use ntex::util::Extensions;
 use ntex::web::{Error, FromRequest, HttpRequest, WebRequest, WebResponse};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 #[cfg(feature = "cookie-session")]
 mod cookie;
@@ -189,7 +189,7 @@ impl Session {
 
     pub fn get_changes(
         res: &mut WebResponse,
-    ) -> (SessionStatus, Option<impl Iterator<Item = (String, String)>>) {
+    ) -> (SessionStatus, Option<impl Iterator<Item = (String, String)> + use<>>) {
         if let Some(s_impl) = res.request().extensions().get::<Rc<RefCell<SessionInner>>>() {
             let state = std::mem::take(&mut s_impl.borrow_mut().state);
             (s_impl.borrow().status.clone(), Some(state.into_iter()))
@@ -236,7 +236,7 @@ impl<Err> FromRequest<Err> for Session {
 
 #[cfg(test)]
 mod tests {
-    use ntex::web::{test, HttpResponse};
+    use ntex::web::{HttpResponse, test};
 
     use super::*;
 

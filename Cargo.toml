@@ -6,3 +6,4 @@ members = [
   "ntex-multipart",
   "ntex-session",
 ]
+resolver = "3"

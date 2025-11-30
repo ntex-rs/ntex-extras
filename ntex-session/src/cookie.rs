@@ -19,7 +19,7 @@ use std::{collections::HashMap, convert::Infallible, rc::Rc};
 
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
-use ntex::http::{header::HeaderValue, header::SET_COOKIE, HttpMessage};
+use ntex::http::{HttpMessage, header::HeaderValue, header::SET_COOKIE};
 use ntex::service::{Middleware, Service, ServiceCtx};
 use ntex::web::{DefaultError, ErrorRenderer, WebRequest, WebResponse, WebResponseError};
 use serde_json::error::Error as JsonError;
@@ -352,7 +352,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ntex::web::{self, test, App};
+    use ntex::web::{self, App, test};
     use ntex::{time, util::Bytes};
 
     #[ntex::test]

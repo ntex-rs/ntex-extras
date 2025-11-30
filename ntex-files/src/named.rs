@@ -17,8 +17,8 @@ use ntex::web::{BodyEncoding, ErrorRenderer, HttpRequest, HttpResponse, Responde
 
 use crate::file_header::{self, Header};
 
-use crate::range::HttpRange;
 use crate::ChunkedReadFile;
+use crate::range::HttpRange;
 
 bitflags! {
     #[derive(Clone)]

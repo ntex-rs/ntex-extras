@@ -48,12 +48,12 @@ use std::{convert::Infallible, future::Future, rc::Rc, time::SystemTime};
 
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
-use futures::future::{ok, Ready};
+use futures::future::{Ready, ok};
 use serde::{Deserialize, Serialize};
 use time::Duration;
 
 use ntex::http::header::{self, HeaderValue};
-use ntex::http::{error::HttpError, HttpMessage, Payload};
+use ntex::http::{HttpMessage, Payload, error::HttpError};
 use ntex::service::{Middleware, Service, ServiceCtx};
 use ntex::util::Extensions;
 use ntex::web::{
@@ -115,11 +115,7 @@ impl Identity {
     }
 
     fn get_identity(extensions: &Extensions) -> Option<String> {
-        if let Some(id) = extensions.get::<IdentityItem>() {
-            id.id.clone()
-        } else {
-            None
-        }
+        if let Some(id) = extensions.get::<IdentityItem>() { id.id.clone() } else { None }
     }
 }
 
@@ -169,6 +165,7 @@ impl<Err: ErrorRenderer> FromRequest<Err> for Identity {
     }
 }
 
+#[allow(clippy::wrong_self_convention)]
 /// Identity policy definition.
 pub trait IdentityPolicy<Err>: Sized + 'static {
     /// The return type of the middleware
@@ -570,8 +567,8 @@ mod tests {
 
     use super::*;
     use ntex::web::test::{self, TestRequest};
-    use ntex::web::{self, error, App, Error, HttpResponse};
-    use ntex::{http::StatusCode, service::fn_service, service::Pipeline, time};
+    use ntex::web::{self, App, Error, HttpResponse, error};
+    use ntex::{http::StatusCode, service::Pipeline, service::fn_service, time};
 
     const COOKIE_KEY_MASTER: [u8; 32] = [0; 32];
     const COOKIE_NAME: &str = "ntex_auth";
@@ -973,7 +970,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_borrowed_mut_error() {
-        use futures::future::{ok, Ready};
+        use futures::future::{Ready, ok};
         use ntex::web::{DefaultError, Error};
 
         struct Ident;
