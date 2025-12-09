@@ -260,15 +260,12 @@ impl NamedFile {
     pub fn into_response(self, req: &HttpRequest) -> HttpResponse {
         if self.status_code != StatusCode::OK {
             let mut resp = HttpResponse::build(self.status_code);
-            resp.header(http::header::CONTENT_TYPE, self.content_type.to_string()).if_true(
-                self.flags.contains(Flags::CONTENT_DISPOSITION),
-                |res| {
-                    res.header(
-                        http::header::CONTENT_DISPOSITION,
-                        self.content_disposition.to_string(),
-                    );
-                },
-            );
+            if self.flags.contains(Flags::CONTENT_DISPOSITION) {
+                resp.header(
+                    http::header::CONTENT_DISPOSITION,
+                    self.content_disposition.to_string(),
+                );
+            }
             if let Some(current_encoding) = self.encoding {
                 resp.encoding(current_encoding);
             }
@@ -279,6 +276,7 @@ impl NamedFile {
                 fut: None,
                 counter: 0,
             };
+            resp.header(http::header::CONTENT_TYPE, self.content_type.to_string());
             return resp.streaming(reader);
         }
 
@@ -340,27 +338,24 @@ impl NamedFile {
         };
 
         let mut resp = HttpResponse::build(self.status_code);
-        resp.header(http::header::CONTENT_TYPE, self.content_type.to_string()).if_true(
-            self.flags.contains(Flags::CONTENT_DISPOSITION),
-            |res| {
-                res.header(
-                    http::header::CONTENT_DISPOSITION,
-                    self.content_disposition.to_string(),
-                );
-            },
-        );
+        if self.flags.contains(Flags::CONTENT_DISPOSITION) {
+            resp.header(
+                http::header::CONTENT_DISPOSITION,
+                self.content_disposition.to_string(),
+            );
+        }
         // default compressing
         if let Some(current_encoding) = self.encoding {
             resp.encoding(current_encoding);
         }
-
-        resp.if_some(last_modified, |lm, resp| {
+        if let Some(lm) = last_modified {
             resp.header(http::header::LAST_MODIFIED, file_header::LastModified(lm).to_string());
-        })
-        .if_some(etag, |etag, resp| {
+        }
+        if let Some(etag) = etag {
             resp.header(http::header::ETAG, file_header::ETag(etag).to_string());
-        });
+        }
 
+        resp.header(http::header::CONTENT_TYPE, self.content_type.to_string());
         resp.header(http::header::ACCEPT_RANGES, "bytes");
 
         let mut length = self.md.len();
