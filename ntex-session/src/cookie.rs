@@ -20,7 +20,7 @@ use std::{collections::HashMap, convert::Infallible, rc::Rc};
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
 use ntex::http::{HttpMessage, header::HeaderValue, header::SET_COOKIE};
-use ntex::service::{Middleware2, Service, ServiceCtx};
+use ntex::service::{Middleware, Service, ServiceCtx};
 use ntex::web::{DefaultError, ErrorRenderer, WebRequest, WebResponse, WebResponseError};
 use serde_json::error::Error as JsonError;
 use time::{Duration, OffsetDateTime};
@@ -276,7 +276,7 @@ impl CookieSession {
     }
 }
 
-impl<S, C> Middleware2<S, C> for CookieSession {
+impl<S, C> Middleware<S, C> for CookieSession {
     type Service = CookieSessionMiddleware<S>;
 
     fn create(&self, service: S, _: C) -> Self::Service {

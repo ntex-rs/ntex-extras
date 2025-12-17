@@ -52,7 +52,7 @@ use std::{
 use derive_more::Display;
 use ntex::http::header::{self, HeaderName, HeaderValue};
 use ntex::http::{HeaderMap, Method, RequestHead, StatusCode, Uri, error::HttpError};
-use ntex::service::{Middleware2, Service, ServiceCtx};
+use ntex::service::{Middleware, Service, ServiceCtx};
 use ntex::util::{ByteString, Either};
 use ntex::web::{
     DefaultError, ErrorRenderer, HttpResponse, WebRequest, WebResponse, WebResponseError,
@@ -722,7 +722,7 @@ pub struct CorsFactory<Err> {
     _t: PhantomData<Err>,
 }
 
-impl<S, C, Err> Middleware2<S, C> for CorsFactory<Err>
+impl<S, C, Err> Middleware<S, C> for CorsFactory<Err>
 where
     S: Service<WebRequest<Err>, Response = WebResponse>,
 {

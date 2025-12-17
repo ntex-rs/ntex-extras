@@ -54,7 +54,7 @@ use time::Duration;
 
 use ntex::http::header::{self, HeaderValue};
 use ntex::http::{HttpMessage, Payload, error::HttpError};
-use ntex::service::{Middleware2, Service, ServiceCtx};
+use ntex::service::{Middleware, Service, ServiceCtx};
 use ntex::util::Extensions;
 use ntex::web::{
     DefaultError, ErrorRenderer, FromRequest, HttpRequest, WebRequest, WebResponse,
@@ -213,7 +213,7 @@ impl<T> IdentityService<T> {
     }
 }
 
-impl<S, C, T> Middleware2<S, C> for IdentityService<T> {
+impl<S, C, T> Middleware<S, C> for IdentityService<T> {
     type Service = IdentityServiceMiddleware<S, T>;
 
     fn create(&self, service: S, _: C) -> Self::Service {
