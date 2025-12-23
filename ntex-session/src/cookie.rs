@@ -127,10 +127,10 @@ impl CookieSessionInner {
         cookie.set_value("");
         cookie.set_max_age(Duration::ZERO);
         cookie.set_expires(OffsetDateTime::now_utc() - Duration::days(365));
-        cookie.set_path(self.path.clone());
+        cookie.set_path(&self.path);
 
         if let Some(ref domain) = self.domain {
-            cookie.set_domain(domain.clone());
+            cookie.set_domain(domain);
         }
 
         let val = HeaderValue::from_str(&cookie.to_string()).unwrap();
