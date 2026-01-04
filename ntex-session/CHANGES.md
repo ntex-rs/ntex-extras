@@ -1,5 +1,9 @@
 # Changes
 
+## [3.2.0] - 2026-01-04
+
+* Include path and domain in remove_cookie #22
+
 ## [3.0.0] - 2025-11-27
 
 * Update the `ntex` to 3.0
