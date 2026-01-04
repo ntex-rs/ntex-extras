@@ -23,7 +23,7 @@ default = ["cookie-session"]
 cookie-session = ["cookie/secure", "ntex/cookie"]
 
 [dependencies]
-ntex = "3.0.0-pre.9"
+ntex = "3.0.0-pre.10"
 cookie = "0.18"
 derive_more = { version = "2", features = ["from", "display"] }
 futures = "0.3"
