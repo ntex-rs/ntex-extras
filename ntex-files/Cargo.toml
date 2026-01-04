@@ -18,7 +18,7 @@ name = "ntex_files"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "3.0.0-pre.6"
+ntex = "3.0.0-pre.10"
 ntex-http = "1"
 bitflags = "2"
 futures = "0.3"
