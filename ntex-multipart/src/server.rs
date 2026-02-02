@@ -507,7 +507,7 @@ impl InnerField {
                 // check if we have enough data for boundary detection
                 if cur + 4 > len {
                     if cur > 0 {
-                        Poll::Ready(Some(Ok(payload.buf.split_to_bytes(cur))))
+                        Poll::Ready(Some(Ok(payload.buf.split_to(cur))))
                     } else {
                         Poll::Pending
                     }
@@ -520,7 +520,7 @@ impl InnerField {
                     {
                         if cur != 0 {
                             // return buffer
-                            Poll::Ready(Some(Ok(payload.buf.split_to_bytes(cur))))
+                            Poll::Ready(Some(Ok(payload.buf.split_to(cur))))
                         } else {
                             pos = cur + 1;
                             continue;
@@ -532,7 +532,7 @@ impl InnerField {
                     }
                 }
             } else {
-                Poll::Ready(Some(Ok(payload.buf.take_bytes())))
+                Poll::Ready(Some(Ok(payload.buf.take())))
             };
         }
     }
@@ -692,13 +692,13 @@ impl PayloadBuffer {
     /// Read exact number of bytes
     #[cfg(test)]
     fn read_exact(&mut self, size: usize) -> Option<Bytes> {
-        if size <= self.buf.len() { Some(self.buf.split_to_bytes(size)) } else { None }
+        if size <= self.buf.len() { Some(self.buf.split_to(size)) } else { None }
     }
 
     fn read_max(&mut self, size: u64) -> Result<Option<Bytes>, MultipartError> {
         if !self.buf.is_empty() {
             let size = std::cmp::min(self.buf.len() as u64, size) as usize;
-            Ok(Some(self.buf.split_to_bytes(size)))
+            Ok(Some(self.buf.split_to(size)))
         } else if self.eof {
             Err(MultipartError::Incomplete)
         } else {
@@ -709,7 +709,7 @@ impl PayloadBuffer {
     /// Read until specified ending
     pub fn read_until(&mut self, line: &[u8]) -> Result<Option<Bytes>, MultipartError> {
         let res = twoway::find_bytes(&self.buf, line)
-            .map(|idx| self.buf.split_to_bytes(idx + line.len()));
+            .map(|idx| self.buf.split_to(idx + line.len()));
 
         if res.is_none() && self.eof { Err(MultipartError::Incomplete) } else { Ok(res) }
     }
@@ -722,7 +722,7 @@ impl PayloadBuffer {
     /// Read bytes until new line delimiter or eof
     pub fn readline_or_eof(&mut self) -> Result<Option<Bytes>, MultipartError> {
         match self.readline() {
-            Err(MultipartError::Incomplete) if self.eof => Ok(Some(self.buf.take_bytes())),
+            Err(MultipartError::Incomplete) if self.eof => Ok(Some(self.buf.take())),
             line => line,
         }
     }
