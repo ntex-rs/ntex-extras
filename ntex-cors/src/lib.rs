@@ -577,14 +577,14 @@ impl Inner {
 
     fn validate_allowed_method(&self, req: &RequestHead) -> Result<(), CorsError> {
         if let Some(hdr) = req.headers().get(&header::ACCESS_CONTROL_REQUEST_METHOD) {
-            if let Ok(meth) = hdr.to_str() {
-                if let Ok(method) = Method::try_from(meth) {
-                    return self
-                        .methods
-                        .get(&method)
-                        .map(|_| ())
-                        .ok_or(CorsError::MethodNotAllowed);
-                }
+            if let Ok(meth) = hdr.to_str()
+                && let Ok(method) = Method::try_from(meth)
+            {
+                return self
+                    .methods
+                    .get(&method)
+                    .map(|_| ())
+                    .ok_or(CorsError::MethodNotAllowed);
             }
             Err(CorsError::BadRequestMethod)
         } else {

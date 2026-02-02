@@ -132,10 +132,10 @@ impl Directory {
     /// Is this entry visible from this directory?
     pub fn is_visible(&self, entry: &io::Result<DirEntry>) -> bool {
         if let Ok(ref entry) = *entry {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with('.') {
-                    return false;
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && name.starts_with('.')
+            {
+                return false;
             }
             if let Ok(ref md) = entry.metadata() {
                 let ft = md.file_type();

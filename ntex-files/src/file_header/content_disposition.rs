@@ -157,12 +157,11 @@ impl fmt::Display for ContentDisposition {
             match *param {
                 DispositionParam::Filename(ref charset, ref opt_lang, ref bytes) => {
                     let mut use_simple_format: bool = false;
-                    if opt_lang.is_none() {
-                        if let Charset::Ext(ref ext) = *charset {
-                            if unicase::eq_ascii(&**ext, "utf-8") {
-                                use_simple_format = true;
-                            }
-                        }
+                    if opt_lang.is_none()
+                        && let Charset::Ext(ref ext) = *charset
+                        && unicase::eq_ascii(&**ext, "utf-8")
+                    {
+                        use_simple_format = true;
                     }
                     if use_simple_format {
                         write!(

@@ -309,12 +309,11 @@ impl InnerMultipart {
 
             // content type
             let mut mt = mime::APPLICATION_OCTET_STREAM;
-            if let Some(content_type) = headers.get(&header::CONTENT_TYPE) {
-                if let Ok(content_type) = content_type.to_str() {
-                    if let Ok(ct) = content_type.parse::<mime::Mime>() {
-                        mt = ct;
-                    }
-                }
+            if let Some(content_type) = headers.get(&header::CONTENT_TYPE)
+                && let Ok(content_type) = content_type.to_str()
+                && let Ok(ct) = content_type.parse::<mime::Mime>()
+            {
+                mt = ct;
             }
 
             self.state = InnerState::Boundary;
@@ -708,8 +707,8 @@ impl PayloadBuffer {
 
     /// Read until specified ending
     pub fn read_until(&mut self, line: &[u8]) -> Result<Option<Bytes>, MultipartError> {
-        let res = twoway::find_bytes(&self.buf, line)
-            .map(|idx| self.buf.split_to(idx + line.len()));
+        let res =
+            twoway::find_bytes(&self.buf, line).map(|idx| self.buf.split_to(idx + line.len()));
 
         if res.is_none() && self.eof { Err(MultipartError::Incomplete) } else { Ok(res) }
     }
