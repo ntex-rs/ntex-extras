@@ -1,6 +1,6 @@
 [package]
 name = "ntex-session"
-version = "3.2.0"
+version = "3.3.0"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Session for ntex web framework."
 readme = "README.md"
@@ -10,7 +10,7 @@ repository = "https://github.com/ntex-rs/ntex-extras.git"
 documentation = "https://docs.rs/ntex-session/"
 license = "MIT OR Apache-2.0"
 edition = "2024"
-rust-version = "1.86"
+rust-version = "1.88"
 
 [lib]
 name = "ntex_session"
@@ -23,7 +23,7 @@ default = ["cookie-session"]
 cookie-session = ["cookie/secure", "ntex/cookie"]
 
 [dependencies]
-ntex = "3.0.0-pre.10"
+ntex = "3.0"
 cookie = "0.18"
 derive_more = { version = "2", features = ["from", "display"] }
 futures = "0.3"
@@ -32,4 +32,4 @@ serde_json = "1.0"
 time = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-ntex = { version = "3.0.0-pre.9", features=["neon"] }
+ntex = { version = "3.0", features=["neon"] }

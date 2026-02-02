@@ -12,10 +12,10 @@ where
     R: RawLike<'a>,
     T: str::FromStr,
 {
-    if let Some(line) = raw.one() {
-        if !line.is_empty() {
-            return from_raw_str(line);
-        }
+    if let Some(line) = raw.one()
+        && !line.is_empty()
+    {
+        return from_raw_str(line);
     }
     Err(error::Error::Header)
 }

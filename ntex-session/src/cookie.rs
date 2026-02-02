@@ -150,10 +150,10 @@ impl CookieSessionInner {
                         CookieSecurity::Signed => jar.signed(&self.key).get(&self.name),
                         CookieSecurity::Private => jar.private(&self.key).get(&self.name),
                     };
-                    if let Some(cookie) = cookie_opt {
-                        if let Ok(val) = serde_json::from_str(cookie.value()) {
-                            return (false, val);
-                        }
+                    if let Some(cookie) = cookie_opt
+                        && let Ok(val) = serde_json::from_str(cookie.value())
+                    {
+                        return (false, val);
                     }
                 }
             }

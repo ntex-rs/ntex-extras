@@ -380,15 +380,15 @@ impl CookieIdentityInner {
     fn parse(&self, cookie: Cookie) -> Option<CookieValue> {
         let value: CookieValue = serde_json::from_str(cookie.value()).ok()?;
         let now = SystemTime::now();
-        if let Some(visit_deadline) = self.visit_deadline {
-            if now.duration_since(value.visit_timestamp?).ok()? > visit_deadline {
-                return None;
-            }
+        if let Some(visit_deadline) = self.visit_deadline
+            && now.duration_since(value.visit_timestamp?).ok()? > visit_deadline
+        {
+            return None;
         }
-        if let Some(login_deadline) = self.login_deadline {
-            if now.duration_since(value.login_timestamp?).ok()? > login_deadline {
-                return None;
-            }
+        if let Some(login_deadline) = self.login_deadline
+            && now.duration_since(value.login_timestamp?).ok()? > login_deadline
+        {
+            return None;
         }
         Some(value)
     }
