@@ -1,6 +1,6 @@
 [package]
 name = "ntex-cors"
-version = "3.2.0"
+version = "3.2.1"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Cross-origin resource sharing (CORS) for ntex applications."
 readme = "README.md"
@@ -17,9 +17,9 @@ name = "ntex_cors"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "3.0.0"
+ntex = "3.0.1"
 derive_more = { version = "2", features = ["from", "display"] }
 futures = "0.3"
 
 [dev-dependencies]
-ntex = { version = "3.0.0", features=["neon"] }
+ntex = { version = "3.0", features=["neon"] }

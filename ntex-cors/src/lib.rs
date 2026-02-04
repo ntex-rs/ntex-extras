@@ -775,7 +775,7 @@ where
                 }
                 Ok(res)
             }
-            Err(e) => Ok(req.render_error(e)),
+            Err(e) => Ok(req.render_error(&e)),
         }
     }
 }
