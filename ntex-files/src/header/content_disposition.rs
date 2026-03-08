@@ -277,10 +277,8 @@ impl Header for ContentDisposition {
                 None => return Err(error::Error::Header),
             };
 
-            let mut cd = ContentDisposition {
-                disposition: disposition.into(),
-                parameters: Vec::new(),
-            };
+            let mut cd =
+                ContentDisposition { disposition: disposition.into(), parameters: Vec::new() };
 
             for section in sections {
                 let mut parts = section.splitn(2, '=');

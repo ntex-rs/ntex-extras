@@ -329,7 +329,9 @@ impl InnerMultipart {
 
             let field_content_disposition = if let Some(hv) =
                 headers.get(&header::CONTENT_DISPOSITION)
-                && let Ok(cd) = ContentDisposition::parse_header(&ntex_files::header::Raw::from(hv.as_bytes()))
+                && let Ok(cd) = ContentDisposition::parse_header(
+                    &ntex_files::header::Raw::from(hv.as_bytes()),
+                )
                 && cd.disposition == DispositionType::FormData
             {
                 Some(cd)
@@ -343,7 +345,9 @@ impl InnerMultipart {
                 };
 
                 let Some(field_name) = cd.get_name() else {
-                    return Poll::Ready(Some(Err(MultipartError::ContentDispositionNameMissing)));
+                    return Poll::Ready(Some(Err(
+                        MultipartError::ContentDispositionNameMissing,
+                    )));
                 };
 
                 Some(field_name.to_owned())
