@@ -44,7 +44,8 @@ struct ParsedField<'t> {
 /// Each field type should implement the `FieldReader` trait:
 ///
 /// ```
-/// use ntex_multipart::form::{tempfile::TempFile, text::Text, MultipartForm};
+/// use ntex_multipart::MultipartForm;
+/// use ntex_multipart::form::{temp_file::TempFile, text::Text};
 ///
 /// #[derive(MultipartForm)]
 /// struct ImageUpload {
@@ -62,7 +63,8 @@ struct ParsedField<'t> {
 /// name](https://www.rfc-editor.org/rfc/rfc7578#section-4.3).
 ///
 /// ```
-/// use ntex_multipart::form::{tempfile::TempFile, text::Text, MultipartForm};
+/// use ntex_multipart::MultipartForm;
+/// use ntex_multipart::form::{temp_file::TempFile, text::Text};
 ///
 /// #[derive(MultipartForm)]
 /// struct Form {
@@ -76,7 +78,8 @@ struct ParsedField<'t> {
 /// You can use the `#[multipart(rename = "foo")]` attribute to receive a field by a different name.
 ///
 /// ```
-/// use ntex_multipart::form::{tempfile::TempFile, MultipartForm};
+/// use ntex_multipart::MultipartForm;
+/// use ntex_multipart::form::temp_file::TempFile;
 ///
 /// #[derive(MultipartForm)]
 /// struct Form {
@@ -93,7 +96,8 @@ struct ParsedField<'t> {
 /// Note: the form is also subject to the global limits configured using `MultipartFormConfig`.
 ///
 /// ```
-/// use ntex_multipart::form::{tempfile::TempFile, text::Text, MultipartForm};
+/// use ntex_multipart::MultipartForm;
+/// use ntex_multipart::form::{temp_file::TempFile, text::Text};
 ///
 /// #[derive(MultipartForm)]
 /// struct Form {
@@ -111,7 +115,8 @@ struct ParsedField<'t> {
 /// `#[multipart(deny_unknown_fields)]` attribute:
 ///
 /// ```
-/// # use ntex_multipart::form::MultipartForm;
+/// use ntex_multipart::MultipartForm;
+///
 /// #[derive(MultipartForm)]
 /// #[multipart(deny_unknown_fields)]
 /// struct Form { }
@@ -129,7 +134,8 @@ struct ParsedField<'t> {
 /// Note that `Vec` fields will ignore this option.
 ///
 /// ```
-/// # use ntex_multipart::form::MultipartForm;
+/// use ntex_multipart::MultipartForm;
+///
 /// #[derive(MultipartForm)]
 /// #[multipart(duplicate_field = "deny")]
 /// struct Form { }

@@ -19,10 +19,11 @@ proc-macro = true
 
 [dependencies]
 bytesize = "2"
-darling = "0.20"
+darling = "0.23"
 proc-macro2 = "1"
 quote = "1"
 syn = "2"
 
 [dev-dependencies]
-ntex-multipart = "3.1.0"
+ntex = "3"
+ntex-multipart = { version = "3.1.0", features = ["form"] }
