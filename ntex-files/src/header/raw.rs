@@ -11,6 +11,11 @@ pub trait RawLike<'a> {
     /// Return the number of values (lines) in the headers.
     fn len(&'a self) -> usize;
 
+    /// Return the bool if there are no values (lines) in the headers.
+    fn is_empty(&'a self) -> bool {
+        self.len() == 0
+    }
+
     /// Return the single value (line), if and only if there is exactly
     /// one. Otherwise return `None`.
     fn one(&'a self) -> Option<&'a [u8]>;

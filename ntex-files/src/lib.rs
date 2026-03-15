@@ -17,7 +17,7 @@ use futures::future::{FutureExt, LocalBoxFuture};
 use futures::{Future, Stream};
 use mime_guess::from_ext;
 use ntex::http::error::BlockingError;
-use ntex::http::{Method, Payload, Uri, header};
+use ntex::http::{Method, Payload, Uri};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex::service::{IntoServiceFactory, Service, ServiceCtx, ServiceFactory};
@@ -30,7 +30,7 @@ use percent_encoding::{CONTROLS, utf8_percent_encode};
 use v_htmlescape::escape as escape_html_entity;
 
 mod error;
-mod file_header;
+pub mod header;
 mod named;
 mod range;
 
@@ -212,7 +212,7 @@ fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<WebResponse, 
     ))
 }
 
-type MimeOverride = dyn Fn(&mime::Name) -> file_header::DispositionType;
+type MimeOverride = dyn Fn(&mime::Name) -> header::DispositionType;
 
 /// Static files handling
 ///
@@ -314,7 +314,7 @@ impl<Err: ErrorRenderer> Files<Err> {
     /// Specifies mime override callback
     pub fn mime_override<F>(mut self, f: F) -> Self
     where
-        F: Fn(&mime::Name) -> file_header::DispositionType + 'static,
+        F: Fn(&mime::Name) -> header::DispositionType + 'static,
     {
         self.mime_override = Some(Rc::new(f));
         self
@@ -514,7 +514,7 @@ where
                     let redirect_to = format!("{}/", req.path());
                     return Ok(req.into_response(
                         HttpResponse::Found()
-                            .header(header::LOCATION, redirect_to)
+                            .header(http::header::LOCATION, redirect_to)
                             .body("")
                             .into_body(),
                     ));
@@ -633,7 +633,7 @@ mod tests {
     #[ntex::test]
     async fn test_if_modified_since_without_if_none_match() {
         let file = NamedFile::open("Cargo.toml").unwrap();
-        let since = file_header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
+        let since = header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
 
         let req = TestRequest::default()
             .header(http::header::IF_MODIFIED_SINCE, since.to_string())
@@ -645,7 +645,7 @@ mod tests {
     #[ntex::test]
     async fn test_if_modified_since_with_if_none_match() {
         let file = NamedFile::open("Cargo.toml").unwrap();
-        let since = file_header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
+        let since = header::HttpDate::from(SystemTime::now().add(Duration::from_secs(60)));
 
         let req = TestRequest::default()
             .header(http::header::IF_NONE_MATCH, "miss_etag")
@@ -770,17 +770,11 @@ mod tests {
 
     #[ntex::test]
     async fn test_named_file_image_attachment() {
-        use crate::file_header::{
-            Charset, ContentDisposition, DispositionParam, DispositionType,
-        };
+        use crate::header::{ContentDisposition, DispositionParam, DispositionType};
 
         let cd = ContentDisposition {
             disposition: DispositionType::Attachment,
-            parameters: vec![DispositionParam::Filename(
-                Charset::Ext(String::from("UTF-8")),
-                None,
-                "test.png".to_string().into_bytes(),
-            )],
+            parameters: vec![DispositionParam::Filename(String::from("test.png"))],
         };
         let mut file = NamedFile::open("tests/test.png").unwrap().set_content_disposition(cd);
         {
@@ -847,8 +841,8 @@ mod tests {
 
     #[ntex::test]
     async fn test_mime_override() {
-        fn all_attachment(_: &mime::Name) -> file_header::DispositionType {
-            file_header::DispositionType::Attachment
+        fn all_attachment(_: &mime::Name) -> header::DispositionType {
+            header::DispositionType::Attachment
         }
 
         let srv = test::init_service(App::new().service(

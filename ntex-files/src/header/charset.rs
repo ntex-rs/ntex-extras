@@ -11,7 +11,7 @@ use super::error;
 /// See [http://www.iana.org/assignments/character-sets/character-sets.xhtml][url].
 ///
 /// [url]: http://www.iana.org/assignments/character-sets/character-sets.xhtml
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 pub enum Charset {
     /// US ASCII

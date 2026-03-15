@@ -32,6 +32,7 @@ v_htmlescape = "0.15"
 unicase = "2.6"
 language-tags = "0.3"
 httpdate = "1.0"
+regex = "1.12.3"
 
 [dev-dependencies]
 ntex = { version = "3.2.0", features = ["neon", "openssl", "compress"] }

@@ -4,6 +4,7 @@ members = [
   "ntex-files",
   "ntex-identity",
   "ntex-multipart",
+  "ntex-multipart-derive",
   "ntex-session",
 ]
 resolver = "3"
@@ -12,3 +13,11 @@ resolver = "3"
 license = "MIT OR Apache-2.0"
 edition = "2024"
 rust-version = "1.88"
+
+[patch.crates-io]
+ntex-cors = { path = "ntex-cors" }
+ntex-files = { path = "ntex-files" }
+ntex-identity = { path = "ntex-identity" }
+ntex-multipart = { path = "ntex-multipart" }
+ntex-multipart-derive = { path = "ntex-multipart-derive" }
+ntex-session = { path = "ntex-session" }

@@ -10,7 +10,7 @@ use super::{Charset, RawLike};
 pub fn from_one_raw_str<'a, R, T>(raw: &'a R) -> error::Result<T>
 where
     R: RawLike<'a>,
-    T: str::FromStr,
+    T: FromStr,
 {
     if let Some(line) = raw.one()
         && !line.is_empty()
@@ -21,7 +21,7 @@ where
 }
 
 /// Reads a raw string into a value.
-pub fn from_raw_str<T: str::FromStr>(raw: &[u8]) -> error::Result<T> {
+pub fn from_raw_str<T: FromStr>(raw: &[u8]) -> error::Result<T> {
     let s = str::from_utf8(raw)?.trim();
     T::from_str(s).or(Err(error::Error::Header))
 }
@@ -31,7 +31,7 @@ pub fn from_raw_str<T: str::FromStr>(raw: &[u8]) -> error::Result<T> {
 pub fn from_comma_delimited<'a, R, T>(raw: &'a R) -> error::Result<Vec<T>>
 where
     R: RawLike<'a>,
-    T: str::FromStr,
+    T: FromStr,
 {
     let mut result = Vec::new();
     for s in raw.iter() {
@@ -63,7 +63,7 @@ pub fn fmt_comma_delimited<T: Display>(f: &mut fmt::Formatter, parts: &[T]) -> f
 
 /// An extended header parameter value (i.e., tagged with a character set and optionally,
 /// a language), as defined in [RFC 5987](https://tools.ietf.org/html/rfc5987#section-3.2).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtendedValue {
     /// The character set that is used to encode the `value` to a string.
     pub charset: Charset,
@@ -141,7 +141,7 @@ impl Display for ExtendedValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let encoded_value = percent_encoding::percent_encode(
             &self.value[..],
-            self::percent_encoding_http::HTTP_VALUE,
+            percent_encoding_http::HTTP_VALUE,
         );
         if let Some(ref lang) = self.language_tag {
             write!(f, "{}'{}'{}", self.charset, lang, encoded_value)
@@ -156,9 +156,8 @@ impl Display for ExtendedValue {
 ///
 /// [url]: https://tools.ietf.org/html/rfc5987#section-3.2
 pub fn http_percent_encode(f: &mut fmt::Formatter, bytes: &[u8]) -> fmt::Result {
-    let encoded =
-        percent_encoding::percent_encode(bytes, self::percent_encoding_http::HTTP_VALUE);
-    fmt::Display::fmt(&encoded, f)
+    let encoded = percent_encoding::percent_encode(bytes, percent_encoding_http::HTTP_VALUE);
+    Display::fmt(&encoded, f)
 }
 
 mod percent_encoding_http {

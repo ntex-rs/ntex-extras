@@ -178,7 +178,7 @@ impl From<Method> for http::Method {
 mod tests {
     use super::Method;
     use super::Method::{Extension, Get, Post, Put};
-    use crate::file_header::error::Error;
+    use crate::header::error::Error;
     use std::collections::HashMap;
     use std::convert::TryFrom;
     use std::str::FromStr;
