@@ -1,6 +1,6 @@
 [package]
 name = "ntex-multipart-derive"
-version = "3.1.0"
+version = "3.0.0"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Multipart Derive support for ntex web framework."
 readme = "README.md"
@@ -26,4 +26,4 @@ syn = "2"
 
 [dev-dependencies]
 ntex = "3"
-ntex-multipart = { version = "3.1.0", features = ["form"] }
+ntex-multipart = { version = "3.2.0", features = ["form"] }
