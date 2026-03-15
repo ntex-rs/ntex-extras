@@ -1,5 +1,9 @@
 # Changes
 
+## [3.2.0] - 2026-03-15
+
+* Add support for multipart/form-data parsing #26
+
 ## [3.0.0] - 2025-11-27
 
 * Update the `ntex` to 3.0
