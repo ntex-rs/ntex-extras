@@ -36,5 +36,5 @@ serde_plain = { version = "1", optional = true }
 tempfile = "3.4"
 
 [dev-dependencies]
-ntex = { version = "3.6", features=["neon"] }
+ntex = { version = "3.6", features=["tokio"] }
 futures-test = "0.3"
