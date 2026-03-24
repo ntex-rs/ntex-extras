@@ -1,14 +1,12 @@
 //! Deserializes a field as JSON.
 
-use crate::{
-    Field, MultipartError,
-    form::{FieldReader, Limits, bytes::Bytes},
-};
 use derive_more::{Deref, DerefMut, Display};
-use futures::future::LocalBoxFuture;
 use ntex::http::StatusCode;
 use ntex::web::{DefaultError, HttpRequest, WebResponseError};
 use serde::de::DeserializeOwned;
+
+use crate::form::{FieldReader, Limits, bytes::Bytes};
+use crate::{Field, MultipartError};
 
 /// Deserialize from JSON.
 #[derive(Debug, Deref, DerefMut)]
@@ -20,42 +18,42 @@ impl<T: DeserializeOwned> Json<T> {
     }
 }
 
-impl<'t, T> FieldReader<'t> for Json<T>
+impl<T> FieldReader for Json<T>
 where
     T: DeserializeOwned + 'static,
 {
-    type Future = LocalBoxFuture<'t, Result<Self, MultipartError>>;
+    async fn read_field(
+        req: &HttpRequest,
+        field: Field,
+        limits: &mut Limits,
+    ) -> Result<Self, MultipartError> {
+        let config = req.app_state::<JsonConfig>().unwrap_or(&DEFAULT_CONFIG);
 
-    fn read_field(req: &'t HttpRequest, field: Field, limits: &'t mut Limits) -> Self::Future {
-        Box::pin(async move {
-            let config = req.app_state::<JsonConfig>().unwrap_or(&DEFAULT_CONFIG);
+        if config.validate_content_type {
+            let valid = if let Some(mime) = field.content_type() {
+                mime.subtype() == mime::JSON || mime.suffix() == Some(mime::JSON)
+            } else {
+                false
+            };
 
-            if config.validate_content_type {
-                let valid = if let Some(mime) = field.content_type() {
-                    mime.subtype() == mime::JSON || mime.suffix() == Some(mime::JSON)
-                } else {
-                    false
-                };
-
-                if !valid {
-                    return Err(MultipartError::Field {
-                        name: field.form_field_name,
-                        source: JsonFieldError::ContentType.into(),
-                    });
-                }
+            if !valid {
+                return Err(MultipartError::Field {
+                    name: field.form_field_name,
+                    source: JsonFieldError::ContentType.into(),
+                });
             }
+        }
 
-            let form_field_name = field.form_field_name.clone();
+        let form_field_name = field.form_field_name.clone();
 
-            let bytes = Bytes::read_field(req, field, limits).await?;
+        let bytes = Bytes::read_field(req, field, limits).await?;
 
-            Ok(Json(serde_json::from_slice(bytes.data.as_ref()).map_err(|err| {
-                MultipartError::Field {
-                    name: form_field_name,
-                    source: JsonFieldError::Deserialize(err).into(),
-                }
-            })?))
-        })
+        Ok(Json(serde_json::from_slice(bytes.data.as_ref()).map_err(|err| {
+            MultipartError::Field {
+                name: form_field_name,
+                source: JsonFieldError::Deserialize(err).into(),
+            }
+        })?))
     }
 }
 

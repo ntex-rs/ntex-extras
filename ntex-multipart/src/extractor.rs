@@ -98,7 +98,7 @@ where
 
             limits.field_limit_remaining.clone_from(entry);
 
-            T::handle_field(&req, field, &mut limits, &mut state).await?;
+            T::handle_field(req, field, &mut limits, &mut state).await?;
 
             // Update the stored limit
             *entry = limits.field_limit_remaining;

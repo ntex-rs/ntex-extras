@@ -1,21 +1,14 @@
 //! Writes a field to a temporary file on disk.
+use std::{io, io::Write, path::Path, path::PathBuf};
 
-use crate::{
-    Field, MultipartError,
-    form::{FieldReader, Limits},
-};
 use derive_more::Display;
 use futures::TryStreamExt;
-use futures::future::LocalBoxFuture;
 use mime::Mime;
-use ntex::http::StatusCode;
 use ntex::web::{DefaultError, HttpRequest, WebResponseError};
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use ntex::{http::StatusCode, rt::spawn_blocking};
 use tempfile::NamedTempFile;
-use tokio::io::AsyncWriteExt;
+
+use crate::{Field, MultipartError, form::FieldReader, form::Limits};
 
 /// Write the field to a temporary file on disk.
 #[derive(Debug)]
@@ -33,56 +26,52 @@ pub struct TempFile {
     pub size: usize,
 }
 
-impl<'t> FieldReader<'t> for TempFile {
-    type Future = LocalBoxFuture<'t, Result<Self, MultipartError>>;
-
-    fn read_field(
-        req: &'t HttpRequest,
+impl FieldReader for TempFile {
+    async fn read_field(
+        req: &HttpRequest,
         mut field: Field,
-        limits: &'t mut Limits,
-    ) -> Self::Future {
-        Box::pin(async move {
-            let config = req.app_state::<TempFileConfig>().unwrap_or(&DEFAULT_CONFIG);
-            let mut size = 0;
+        limits: &mut Limits,
+    ) -> Result<Self, MultipartError> {
+        let config = req.app_state::<TempFileConfig>().unwrap_or(&DEFAULT_CONFIG);
+        let mut size = 0;
 
-            let file = config.create_tempfile().map_err(|err| MultipartError::Field {
+        let file = config.create_tempfile().map_err(|err| MultipartError::Field {
+            name: field.form_field_name.to_owned(),
+            source: TempFileError::FileIo(err).into(),
+        })?;
+
+        let (file, mut f) = spawn_blocking(move || file.reopen().map(move |f| (file, f)))
+            .await?
+            .map_err(|err| MultipartError::Field {
                 name: field.form_field_name.to_owned(),
                 source: TempFileError::FileIo(err).into(),
             })?;
 
-            let mut file_async = tokio::fs::File::from_std(file.reopen().map_err(|err| {
-                MultipartError::Field {
+        while let Some(chunk) = field.try_next().await? {
+            limits.try_consume_limits(chunk.len(), false)?;
+            size += chunk.len();
+            f = spawn_blocking(move || f.write_all(chunk.as_ref()).map(move |_| f))
+                .await?
+                .map_err(|err| MultipartError::Field {
                     name: field.form_field_name.to_owned(),
                     source: TempFileError::FileIo(err).into(),
-                }
-            })?);
-
-            while let Some(chunk) = field.try_next().await? {
-                limits.try_consume_limits(chunk.len(), false)?;
-                size += chunk.len();
-                file_async.write_all(chunk.as_ref()).await.map_err(|err| {
-                    MultipartError::Field {
-                        name: field.form_field_name.to_owned(),
-                        source: TempFileError::FileIo(err).into(),
-                    }
                 })?;
-            }
+        }
 
-            file_async.flush().await.map_err(|err| MultipartError::Field {
-                name: field.form_field_name.to_owned(),
-                source: TempFileError::FileIo(err).into(),
-            })?;
+        spawn_blocking(move || f.flush()).await?.map_err(|err| MultipartError::Field {
+            name: field.form_field_name.to_owned(),
+            source: TempFileError::FileIo(err).into(),
+        })?;
 
-            Ok(TempFile {
-                file,
-                content_type: field.content_type().map(ToOwned::to_owned),
-                file_name: field
-                    .content_disposition()
-                    .expect("multipart form fields should have a content-disposition header")
-                    .get_filename()
-                    .map(ToOwned::to_owned),
-                size,
-            })
+        Ok(TempFile {
+            file,
+            content_type: field.content_type().map(ToOwned::to_owned),
+            file_name: field
+                .content_disposition()
+                .expect("multipart form fields should have a content-disposition header")
+                .get_filename()
+                .map(ToOwned::to_owned),
+            size,
         })
     }
 }
