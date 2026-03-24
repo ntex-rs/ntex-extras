@@ -316,7 +316,7 @@ impl Header for ContentDisposition {
                         let mut quoted_string = vec![];
 
                         // search for closing quote
-                        for (_, &c) in val.as_bytes().iter().skip(1).enumerate() {
+                        for &c in val.as_bytes().iter().skip(1) {
                             if escaping {
                                 escaping = false;
                                 quoted_string.push(c);

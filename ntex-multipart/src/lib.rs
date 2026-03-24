@@ -1,4 +1,4 @@
-#![allow(dead_code, clippy::borrow_interior_mutable_const)]
+#![allow(dead_code, async_fn_in_trait, clippy::borrow_interior_mutable_const)]
 
 mod error;
 mod extractor;

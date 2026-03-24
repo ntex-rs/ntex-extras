@@ -2,6 +2,7 @@
 use derive_more::{Display, Error, From};
 use ntex::http::StatusCode;
 use ntex::http::error::{DecodeError, PayloadError};
+use ntex::rt::BlockingError;
 use ntex::web::error::{DefaultError, WebResponseError};
 
 /// A set of errors that can occur during parsing multipart streams
@@ -70,6 +71,13 @@ pub enum MultipartError {
     #[display("Unknown field: {}", _0)]
     #[from(ignore)]
     UnknownField(#[error(not(source))] String),
+
+    /// Blocking error
+    Blocking(
+        #[error]
+        #[from]
+        BlockingError,
+    ),
 }
 
 /// Return `BadRequest` for `MultipartError`

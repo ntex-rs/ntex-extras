@@ -1,18 +1,14 @@
-use crate::{
-    Field, MultipartError,
-    form::{FieldReader, Limits},
-};
 use futures::TryStreamExt;
-use futures::future::LocalBoxFuture;
 use mime::Mime;
-use ntex::util::BytesMut;
-use ntex::web::HttpRequest;
+use ntex::{util, util::BytesMut, web::HttpRequest};
+
+use crate::{Field, MultipartError, form::FieldReader, form::Limits};
 
 /// Read the field into memory.
 #[derive(Debug)]
 pub struct Bytes {
     /// The data.
-    pub data: ntex::util::Bytes,
+    pub data: util::Bytes,
 
     /// The value of the `Content-Type` header.
     pub content_type: Option<Mime>,
@@ -21,31 +17,27 @@ pub struct Bytes {
     pub file_name: Option<String>,
 }
 
-impl<'t> FieldReader<'t> for Bytes {
-    type Future = LocalBoxFuture<'t, Result<Self, MultipartError>>;
-
-    fn read_field(
-        _: &'t HttpRequest,
+impl FieldReader for Bytes {
+    async fn read_field(
+        _: &HttpRequest,
         mut field: Field,
-        limits: &'t mut Limits,
-    ) -> Self::Future {
-        Box::pin(async move {
-            let mut buf = BytesMut::with_capacity(131_072);
+        limits: &mut Limits,
+    ) -> Result<Self, MultipartError> {
+        let mut buf = BytesMut::with_capacity(131_072);
 
-            while let Some(chunk) = field.try_next().await? {
-                limits.try_consume_limits(chunk.len(), true)?;
-                buf.extend(chunk);
-            }
+        while let Some(chunk) = field.try_next().await? {
+            limits.try_consume_limits(chunk.len(), true)?;
+            buf.extend(chunk);
+        }
 
-            Ok(Bytes {
-                data: buf.freeze(),
-                content_type: field.content_type().map(ToOwned::to_owned),
-                file_name: field
-                    .content_disposition()
-                    .expect("multipart form fields should have a content-disposition header")
-                    .get_filename()
-                    .map(ToOwned::to_owned),
-            })
+        Ok(Bytes {
+            data: buf.freeze(),
+            content_type: field.content_type().map(ToOwned::to_owned),
+            file_name: field
+                .content_disposition()
+                .expect("multipart form fields should have a content-disposition header")
+                .get_filename()
+                .map(ToOwned::to_owned),
         })
     }
 }
