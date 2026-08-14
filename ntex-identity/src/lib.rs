@@ -243,6 +243,7 @@ where
 {
     type Response = WebResponse;
     type Error = S::Error;
+    type Data = S::Data;
 
     ntex::forward_ready!(service);
     ntex::forward_shutdown!(service);
@@ -250,6 +251,7 @@ where
     async fn call(
         &self,
         mut req: WebRequest<Err>,
+        data: &Self::Data,
         ctx: ServiceCtx<'_, Self>,
     ) -> Result<Self::Response, Self::Error> {
         match self.backend.from_request(&mut req).await {
@@ -257,7 +259,7 @@ where
                 req.extensions_mut().insert(IdentityItem { id, changed: false });
 
                 // https://github.com/actix/actix-web/issues/1263
-                let mut res = ctx.call(&self.service, req).await?;
+                let mut res = ctx.call(&self.service, req, data).await?;
                 let id = res.request().extensions_mut().remove::<IdentityItem>();
 
                 if let Some(id) = id {
@@ -687,7 +689,13 @@ mod tests {
     >(
         f: F,
     ) -> Pipeline<
-        impl ntex::service::Service<ntex::http::Request, Response = WebResponse, Error = Error>,
+        impl ntex::service::Service<
+            ntex::http::Request,
+            Response = WebResponse,
+            Error = Error,
+            Data = (),
+        >,
+        (),
     > {
         test::init_service(
             App::new()
@@ -995,7 +1003,7 @@ mod tests {
             }
         }
 
-        let srv: Pipeline<_> = IdentityServiceMiddleware {
+        let srv: Pipeline<_, ()> = IdentityServiceMiddleware {
             backend: Rc::new(Ident),
             service: fn_service(|_: WebRequest<DefaultError>| async move {
                 time::sleep(time::Seconds(100)).await;

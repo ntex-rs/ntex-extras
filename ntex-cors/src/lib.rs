@@ -752,6 +752,7 @@ where
 {
     type Response = WebResponse;
     type Error = S::Error;
+    type Data = S::Data;
 
     ntex::forward_ready!(service);
     ntex::forward_shutdown!(service);
@@ -759,6 +760,7 @@ where
     async fn call(
         &self,
         req: WebRequest<Err>,
+        data: &Self::Data,
         ctx: ServiceCtx<'_, Self>,
     ) -> Result<Self::Response, S::Error> {
         match self.inner.preflight_check(req.head()) {
@@ -768,7 +770,7 @@ where
                 let has_origin = req.headers().contains_key(&header::ORIGIN);
                 let allowed_origin = inner.access_control_allow_origin(req.headers());
 
-                let mut res = ctx.call(&self.service, req).await?;
+                let mut res = ctx.call(&self.service, req, data).await?;
 
                 if has_origin {
                     inner.handle_response(res.headers_mut(), allowed_origin);
@@ -782,10 +784,37 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+
     use ntex::service::{Pipeline, fn_service};
     use ntex::web::{self, test, test::TestRequest};
 
     use super::*;
+
+    fn ok_service<Err: ErrorRenderer>()
+    -> impl Service<WebRequest<Err>, Response = WebResponse, Error = Infallible, Data = ()>
+    {
+        fn_service(|req: WebRequest<Err>| async move {
+            Ok::<_, Infallible>(req.into_response(HttpResponse::Ok().finish()))
+        })
+    }
+
+    struct DataService;
+
+    impl Service<WebRequest<DefaultError>> for DataService {
+        type Response = WebResponse;
+        type Error = Infallible;
+        type Data = StatusCode;
+
+        async fn call(
+            &self,
+            req: WebRequest<DefaultError>,
+            data: &Self::Data,
+            _: ServiceCtx<'_, Self>,
+        ) -> Result<Self::Response, Self::Error> {
+            Ok(req.into_response(HttpResponse::build(*data).finish()))
+        }
+    }
 
     #[ntex::test]
     #[should_panic(expected = "Credentials are allowed, but the Origin is set to")]
@@ -796,7 +825,7 @@ mod tests {
 
     #[ntex::test]
     async fn validate_origin_allows_all_origins() {
-        let cors = Cors::new().finish().create(test::ok_service(), ()).into();
+        let cors = Cors::new().finish().create(ok_service(), ()).into();
         let req =
             TestRequest::with_header("Origin", "https://www.example.com").to_srv_request();
 
@@ -806,7 +835,7 @@ mod tests {
 
     #[ntex::test]
     async fn default() {
-        let cors = Cors::default().create(test::ok_service(), ()).into();
+        let cors = Cors::default().create(ok_service(), ()).into();
         let req =
             TestRequest::with_header("Origin", "https://www.example.com").to_srv_request();
 
@@ -815,15 +844,24 @@ mod tests {
     }
 
     #[ntex::test]
+    async fn service_data() {
+        let cors =
+            Pipeline::new(Cors::new().finish().create(DataService, ()), StatusCode::CREATED);
+
+        let resp = test::call_service(&cors, TestRequest::default().to_srv_request()).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[ntex::test]
     async fn test_preflight() {
-        let cors: Pipeline<_> = Cors::new()
+        let cors: Pipeline<_, ()> = Cors::new()
             .send_wildcard()
             .max_age(3600)
             .allowed_methods(vec![Method::GET, Method::OPTIONS, Method::POST])
             .allowed_headers(vec![header::AUTHORIZATION, header::ACCEPT])
             .allowed_header(header::CONTENT_TYPE)
             .finish()
-            .create(test::ok_service(), ())
+            .create(ok_service(), ())
             .into();
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
@@ -900,10 +938,10 @@ mod tests {
     #[ntex::test]
     #[should_panic(expected = "OriginNotAllowed")]
     async fn test_validate_not_allowed_origin() {
-        let cors: Pipeline<_> = Cors::new()
+        let cors: Pipeline<_, ()> = Cors::new()
             .allowed_origin("https://www.example.com")
             .finish()
-            .create(test::ok_service::<web::DefaultError>(), ())
+            .create(ok_service::<web::DefaultError>(), ())
             .into();
 
         let req = TestRequest::with_header("Origin", "https://www.unknown.com")
@@ -919,7 +957,7 @@ mod tests {
         let cors = Cors::new()
             .allowed_origin("https://www.example.com")
             .finish()
-            .create(test::ok_service(), ())
+            .create(ok_service(), ())
             .into();
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
@@ -932,8 +970,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_no_origin_response() {
-        let cors =
-            Cors::new().disable_preflight().finish().create(test::ok_service(), ()).into();
+        let cors = Cors::new().disable_preflight().finish().create(ok_service(), ()).into();
 
         let req = TestRequest::default().method(Method::GET).to_srv_request();
         let resp = test::call_service(&cors, req).await;
@@ -961,7 +998,7 @@ mod tests {
             .expose_headers(exposed_headers.clone())
             .allowed_header(header::CONTENT_TYPE)
             .finish()
-            .create(test::ok_service(), ())
+            .create(ok_service(), ())
             .into();
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
@@ -1024,7 +1061,7 @@ mod tests {
             .allowed_origin("https://www.example.com")
             .allowed_origin("https://www.google.com")
             .finish()
-            .create(test::ok_service(), ())
+            .create(ok_service(), ())
             .into();
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
@@ -1046,7 +1083,7 @@ mod tests {
             .allowed_origin("https://example.org")
             .allowed_methods(vec![Method::GET])
             .finish()
-            .create(test::ok_service(), ())
+            .create(ok_service(), ())
             .into();
 
         let req = TestRequest::with_header("Origin", "https://example.com")
@@ -1077,7 +1114,7 @@ mod tests {
             .allowed_origin("https://example.org")
             .allowed_methods(vec![Method::GET])
             .finish()
-            .create(test::ok_service(), ())
+            .create(ok_service(), ())
             .into();
 
         let req = TestRequest::with_header("Origin", "https://example.com")
@@ -1105,8 +1142,7 @@ mod tests {
 
     #[ntex::test]
     async fn test_set_allowed_origin_to_all() {
-        let cors =
-            Cors::new().allowed_origin("*").finish().create(test::ok_service(), ()).into();
+        let cors = Cors::new().allowed_origin("*").finish().create(ok_service(), ()).into();
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::GET)

@@ -372,9 +372,12 @@ impl<Err: ErrorRenderer> Files<Err> {
         U: ServiceFactory<
                 WebRequest<Err>,
                 SharedCfg,
+                Data = (),
                 Response = WebResponse,
                 Error = Err::Container,
             > + 'static,
+        U::Service:
+            Service<WebRequest<Err>, Response = WebResponse, Error = Err::Container, Data = ()>,
     {
         // create and configure default resource
         self.default = Some(Rc::new(boxed::factory(f.into_factory().map_init_err(|_| ()))));
@@ -410,6 +413,7 @@ where
     type Error = Err::Container;
     type Service = FilesService<Err>;
     type InitError = ();
+    type Data = ();
 
     async fn create(&self, cfg: SharedCfg) -> Result<Self::Service, Self::InitError> {
         let mut srv = FilesService {
@@ -439,6 +443,13 @@ where
             Ok(srv)
         }
     }
+
+    async fn map_data(&self, cfg: &SharedCfg, _: &Self::Data) -> Result<(), Self::InitError> {
+        if let Some(default) = self.default.as_ref() {
+            default.map_data(cfg, &()).await?;
+        }
+        Ok(())
+    }
 }
 
 pub struct FilesService<Err: ErrorRenderer> {
@@ -461,11 +472,12 @@ where
         &self,
         e: io::Error,
         req: WebRequest<Err>,
+        data: &(),
         ctx: ServiceCtx<'_, Self>,
     ) -> Result<WebResponse, Err::Container> {
         log::debug!("Files: Failed to handle {}: {}", req.path(), e);
         if let Some(ref default) = self.default {
-            ctx.call(default, req).await
+            ctx.call(default, req, data).await
         } else {
             Ok(req.error_response(FilesError::from(e)))
         }
@@ -479,10 +491,12 @@ where
 {
     type Response = WebResponse;
     type Error = Err::Container;
+    type Data = ();
 
     async fn call(
         &self,
         req: WebRequest<Err>,
+        data: &Self::Data,
         ctx: ServiceCtx<'_, Self>,
     ) -> Result<Self::Response, Self::Error> {
         let is_method_valid = if let Some(guard) = &self.guards {
@@ -505,7 +519,7 @@ where
         // full filepath
         let path = match self.directory.join(real_path.0).canonicalize() {
             Ok(path) => path,
-            Err(e) => return self.handle_io_error(e, req, ctx).await,
+            Err(e) => return self.handle_io_error(e, req, data, ctx).await,
         };
 
         if path.is_dir() {
@@ -534,7 +548,7 @@ where
                         let (req, _) = req.into_parts();
                         Ok(WebResponse::new(named_file.into_response(&req), req))
                     }
-                    Err(e) => self.handle_io_error(e, req, ctx).await,
+                    Err(e) => self.handle_io_error(e, req, data, ctx).await,
                 }
             } else if self.show_index {
                 let dir = Directory::new(self.directory.clone(), path);
@@ -559,7 +573,7 @@ where
                     let (req, _) = req.into_parts();
                     Ok(WebResponse::new(named_file.into_response(&req), req))
                 }
-                Err(e) => self.handle_io_error(e, req, ctx).await,
+                Err(e) => self.handle_io_error(e, req, data, ctx).await,
             }
         }
     }

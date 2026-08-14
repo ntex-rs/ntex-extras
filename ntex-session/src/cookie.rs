@@ -304,6 +304,7 @@ where
 {
     type Response = WebResponse;
     type Error = S::Error;
+    type Data = S::Data;
 
     ntex::forward_ready!(service);
     ntex::forward_shutdown!(service);
@@ -316,6 +317,7 @@ where
     async fn call(
         &self,
         req: WebRequest<Err>,
+        data: &Self::Data,
         ctx: ServiceCtx<'_, Self>,
     ) -> Result<Self::Response, Self::Error> {
         let inner = self.inner.clone();
@@ -323,7 +325,7 @@ where
         let prolong_expiration = self.inner.expires_in.is_some();
         Session::set_session(state.into_iter(), &req);
 
-        ctx.call(&self.service, req).await.map(|mut res| {
+        ctx.call(&self.service, req, data).await.map(|mut res| {
             match Session::get_changes(&mut res) {
                 (SessionStatus::Changed, Some(state))
                 | (SessionStatus::Renewed, Some(state)) => {
