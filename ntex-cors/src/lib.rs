@@ -52,14 +52,14 @@ use std::{
 use derive_more::Display;
 use ntex::http::header::{self, HeaderName, HeaderValue};
 use ntex::http::{HeaderMap, Method, RequestHead, StatusCode, Uri, error::HttpError};
-use ntex::service::{Middleware, Service, ServiceCtx};
+use ntex::service::{Ctx, Middleware, Service};
 use ntex::util::{ByteString, Either};
 use ntex::web::{
-    DefaultError, ErrorRenderer, HttpResponse, WebRequest, WebResponse, WebResponseError,
+    AppState, HttpRequest, HttpResponse, WebError, WebRequest, WebResponse, WebResponseError,
 };
 
 /// A set of errors that can occur during processing CORS
-#[derive(Debug, Display)]
+#[derive(Debug, Display, thiserror::Error)]
 pub enum CorsError {
     /// The HTTP request header `Origin` is required but was not provided
     #[display("The HTTP request header `Origin` is required but was not provided")]
@@ -90,9 +90,9 @@ pub enum CorsError {
 }
 
 /// DefaultError renderer support
-impl WebResponseError<DefaultError> for CorsError {
-    fn status_code(&self) -> StatusCode {
-        StatusCode::BAD_REQUEST
+impl WebResponseError<WebError> for CorsError {
+    fn error_response(&mut self, _: &HttpRequest) -> HttpResponse {
+        self.error_response_with_status(StatusCode::BAD_REQUEST)
     }
 }
 
@@ -186,7 +186,7 @@ impl Cors {
 
     #[allow(clippy::should_implement_trait)]
     /// Build a new CORS default middleware
-    pub fn default<Err>() -> CorsFactory<Err> {
+    pub fn default<St>() -> CorsMiddleware<St> {
         let inner = Inner {
             origins: AllOrSome::default(),
             origins_str: None,
@@ -207,7 +207,7 @@ impl Cors {
             supports_credentials: false,
             vary_header: true,
         };
-        CorsFactory { inner: Rc::new(inner), _t: PhantomData }
+        CorsMiddleware { inner: Rc::new(inner), st: PhantomData }
     }
 
     /// Add an origin that are allowed to make requests.
@@ -465,7 +465,7 @@ impl Cors {
     }
 
     /// Construct cors middleware
-    pub fn finish<Err>(self) -> CorsFactory<Err> {
+    pub fn finish<St>(self) -> CorsMiddleware<St> {
         let mut slf = if !self.methods {
             self.allowed_methods(vec![
                 Method::GET,
@@ -506,7 +506,7 @@ impl Cors {
             );
         }
 
-        CorsFactory { inner: Rc::new(cors), _t: PhantomData }
+        CorsMiddleware { inner: Rc::new(cors), st: PhantomData }
     }
 }
 
@@ -717,19 +717,19 @@ impl Inner {
 ///
 /// The Cors struct contains the settings for CORS requests to be validated and
 /// for responses to be generated.
-pub struct CorsFactory<Err> {
+pub struct CorsMiddleware<St> {
     inner: Rc<Inner>,
-    _t: PhantomData<Err>,
+    st: PhantomData<St>,
 }
 
-impl<S, C, Err> Middleware<S, C> for CorsFactory<Err>
+impl<S, St, C> Middleware<S, St, C> for CorsMiddleware<St>
 where
-    S: Service<WebRequest<Err>, Response = WebResponse>,
+    S: Service<St, WebRequest, Res = WebResponse>,
 {
-    type Service = CorsMiddleware<S>;
+    type Service = CorsService<S>;
 
-    fn create(&self, service: S, _: C) -> Self::Service {
-        CorsMiddleware { service, inner: self.inner.clone() }
+    fn create(&self, service: S, _: &C) -> Self::Service {
+        CorsService { service, inner: self.inner.clone() }
     }
 }
 
@@ -738,29 +738,24 @@ where
 /// The Cors struct contains the settings for CORS requests to be validated and
 /// for responses to be generated.
 #[derive(Clone)]
-pub struct CorsMiddleware<S> {
+pub struct CorsService<S> {
     service: S,
     inner: Rc<Inner>,
 }
 
-impl<S, Err> Service<WebRequest<Err>> for CorsMiddleware<S>
+impl<S, St: AppState> Service<St, WebRequest> for CorsService<S>
 where
-    S: Service<WebRequest<Err>, Response = WebResponse>,
-    Err: ErrorRenderer,
-    Err::Container: From<S::Error>,
-    CorsError: WebResponseError<Err>,
+    S: Service<St, WebRequest, Res = WebResponse>,
+    CorsError: WebResponseError<St::Error>,
 {
-    type Response = WebResponse;
+    type Res = WebResponse;
     type Error = S::Error;
-
-    ntex::forward_ready!(service);
-    ntex::forward_shutdown!(service);
 
     async fn call(
         &self,
-        req: WebRequest<Err>,
-        ctx: ServiceCtx<'_, Self>,
-    ) -> Result<Self::Response, S::Error> {
+        req: WebRequest,
+        ctx: Ctx<'_, Self, St>,
+    ) -> Result<Self::Res, S::Error> {
         match self.inner.preflight_check(req.head()) {
             Ok(Either::Left(res)) => Ok(req.into_response(res)),
             Ok(Either::Right(_)) => {
@@ -775,9 +770,12 @@ where
                 }
                 Ok(res)
             }
-            Err(e) => Ok(req.render_error(&e)),
+            Err(e) => Ok(req.error_response(e)),
         }
     }
+
+    ntex::forward_ready!(St, service);
+    ntex::forward_shutdown!(St, service);
 }
 
 #[cfg(test)]

@@ -44,21 +44,19 @@
 //!     .service(web::resource("/login.html").to(login))
 //!     .service(web::resource("/logout.html").to(logout));
 //! ```
-use std::{convert::Infallible, future::Future, rc::Rc, time::SystemTime};
+use std::{convert::Infallible, rc::Rc, time::SystemTime};
 
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
-use futures::future::{Ready, ok};
 use serde::{Deserialize, Serialize};
 use time::Duration;
 
 use ntex::http::header::{self, HeaderValue};
 use ntex::http::{HttpMessage, Payload, error::HttpError};
-use ntex::service::{Middleware, Service, ServiceCtx};
+use ntex::service::{Ctx, Middleware, Service};
 use ntex::util::Extensions;
 use ntex::web::{
-    DefaultError, ErrorRenderer, FromRequest, HttpRequest, WebRequest, WebResponse,
-    WebResponseError,
+    AppState, FromRequest, HttpRequest, WebError, WebRequest, WebResponse, WebResponseError,
 };
 
 /// The extractor type to obtain your identity from a request.
@@ -156,37 +154,38 @@ where
 /// }
 /// # fn main() {}
 /// ```
-impl<Err: ErrorRenderer> FromRequest<Err> for Identity {
+impl<St: AppState> FromRequest<St> for Identity {
     type Error = Infallible;
 
     #[inline]
-    async fn from_request(req: &HttpRequest, _: &mut Payload) -> Result<Identity, Infallible> {
+    async fn from_request(
+        _: &St,
+        req: &HttpRequest,
+        _: &mut Payload,
+    ) -> Result<Identity, Infallible> {
         Ok(Identity(req.clone()))
     }
 }
 
 #[allow(clippy::wrong_self_convention)]
 /// Identity policy definition.
-pub trait IdentityPolicy<Err>: Sized + 'static {
-    /// The return type of the middleware
-    type Future: Future<Output = Result<Option<String>, Self::Error>>;
-
-    /// The return type of the middleware
-    type ResponseFuture: Future<Output = Result<(), Self::Error>>;
-
+pub trait IdentityPolicy: Sized + 'static {
     /// The error type of the policy
     type Error;
 
     /// Parse the session from request and load data from a service identity.
-    fn from_request(&self, request: &mut WebRequest<Err>) -> Self::Future;
+    async fn from_request(
+        &self,
+        request: &mut WebRequest,
+    ) -> Result<Option<String>, Self::Error>;
 
     /// Write changes to response
-    fn to_response(
+    async fn to_response(
         &self,
         identity: Option<String>,
         changed: bool,
         response: &mut WebResponse,
-    ) -> Self::ResponseFuture;
+    ) -> Result<(), Self::Error>;
 }
 
 /// Request identity middleware
@@ -213,10 +212,10 @@ impl<T> IdentityService<T> {
     }
 }
 
-impl<S, C, T> Middleware<S, C> for IdentityService<T> {
+impl<S, St, C, T> Middleware<S, St, C> for IdentityService<T> {
     type Service = IdentityServiceMiddleware<S, T>;
 
-    fn create(&self, service: S, _: C) -> Self::Service {
+    fn create(&self, service: S, _: &C) -> Self::Service {
         IdentityServiceMiddleware { service, backend: self.backend.clone() }
     }
 }
@@ -233,25 +232,25 @@ impl<S: Clone, T> Clone for IdentityServiceMiddleware<S, T> {
     }
 }
 
-impl<S, T, Err> Service<WebRequest<Err>> for IdentityServiceMiddleware<S, T>
+impl<S, St, T> Service<St, WebRequest> for IdentityServiceMiddleware<S, T>
 where
-    S: Service<WebRequest<Err>, Response = WebResponse> + 'static,
-    T: IdentityPolicy<Err>,
-    Err: ErrorRenderer,
-    Err::Container: From<S::Error>,
-    Err::Container: From<T::Error>,
+    S: Service<St, WebRequest, Res = WebResponse> + 'static,
+    St: AppState,
+    T: IdentityPolicy,
+    St::Error: From<S::Error>,
+    St::Error: From<T::Error>,
 {
-    type Response = WebResponse;
-    type Error = S::Error;
+    type Res = WebResponse;
+    type Error = St::Error;
 
-    ntex::forward_ready!(service);
-    ntex::forward_shutdown!(service);
+    ntex::forward_ready!(St, service);
+    ntex::forward_shutdown!(St, service);
 
     async fn call(
         &self,
-        mut req: WebRequest<Err>,
-        ctx: ServiceCtx<'_, Self>,
-    ) -> Result<Self::Response, Self::Error> {
+        mut req: WebRequest,
+        ctx: Ctx<'_, Self, St>,
+    ) -> Result<Self::Res, Self::Error> {
         match self.backend.from_request(&mut req).await {
             Ok(id) => {
                 req.extensions_mut().insert(IdentityItem { id, changed: false });
@@ -361,7 +360,7 @@ impl CookieIdentityInner {
         Ok(())
     }
 
-    fn load<Err>(&self, req: &WebRequest<Err>) -> Option<CookieValue> {
+    fn load<Err>(&self, req: &WebRequest) -> Option<CookieValue> {
         let cookie = req.cookie(&self.name)?;
         let mut jar = CookieJar::new();
         jar.add_original(cookie.clone());
@@ -436,7 +435,7 @@ pub enum CookieIdentityPolicyError {
     Json(serde_json::error::Error),
 }
 
-impl WebResponseError<DefaultError> for CookieIdentityPolicyError {}
+impl WebResponseError<WebError> for CookieIdentityPolicyError {}
 
 impl CookieIdentityPolicy {
     /// Construct new `CookieIdentityPolicy` instance.
@@ -507,13 +506,11 @@ impl CookieIdentityPolicy {
     }
 }
 
-impl<Err: ErrorRenderer> IdentityPolicy<Err> for CookieIdentityPolicy {
+impl IdentityPolicy for CookieIdentityPolicy {
     type Error = CookieIdentityPolicyError;
-    type Future = Ready<Result<Option<String>, CookieIdentityPolicyError>>;
-    type ResponseFuture = Ready<Result<(), CookieIdentityPolicyError>>;
 
-    fn from_request(&self, req: &mut WebRequest<Err>) -> Self::Future {
-        ok(self.0.load(req).map(|CookieValue { identity, login_timestamp, .. }| {
+    async fn from_request(&self, req: &mut WebRequest) -> Result<Option<String>, Self::Error> {
+        Ok(self.0.load(req).map(|CookieValue { identity, login_timestamp, .. }| {
             if self.0.requires_oob_data() {
                 req.extensions_mut().insert(CookieIdentityExtention { login_timestamp });
             }
@@ -521,12 +518,12 @@ impl<Err: ErrorRenderer> IdentityPolicy<Err> for CookieIdentityPolicy {
         }))
     }
 
-    fn to_response(
+    async fn to_response(
         &self,
         id: Option<String>,
         changed: bool,
         res: &mut WebResponse,
-    ) -> Self::ResponseFuture {
+    ) -> Result<(), Self::Error> {
         let _ = if changed {
             let login_timestamp = SystemTime::now();
             self.0.set_cookie(
@@ -557,7 +554,7 @@ impl<Err: ErrorRenderer> IdentityPolicy<Err> for CookieIdentityPolicy {
         } else {
             Ok(())
         };
-        ok(())
+        Ok(())
     }
 }
 

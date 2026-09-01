@@ -12,7 +12,14 @@ resolver = "3"
 [workspace.package]
 license = "MIT OR Apache-2.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
+
+[workspace.dependencies]
+ntex = "4.0.0-beta.2"
+
+derive_more = "2.0.1"
+futures = "0.3.33"
+thiserror = "2"
 
 [patch.crates-io]
 ntex-cors = { path = "ntex-cors" }
