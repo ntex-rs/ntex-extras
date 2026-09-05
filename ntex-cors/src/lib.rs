@@ -722,13 +722,13 @@ pub struct CorsMiddleware<St> {
     st: PhantomData<St>,
 }
 
-impl<S, St, C> Middleware<S, St, C> for CorsMiddleware<St>
+impl<S, St> Middleware<S, St> for CorsMiddleware<St>
 where
     S: Service<St, WebRequest, Res = WebResponse>,
 {
     type Service = CorsService<S>;
 
-    fn create(&self, service: S, _: &C) -> Self::Service {
+    fn create(&self, _: &St, service: S) -> Self::Service {
         CorsService { service, inner: self.inner.clone() }
     }
 }
