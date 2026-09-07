@@ -193,7 +193,12 @@ pub fn impl_multipart_form(input: TokenStream) -> TokenStream {
                 limit => limit.map(Result::unwrap),
             };
 
-            Ok(ParsedField { serialization_name, rust_name, limit, ty: &field.ty })
+            Ok(ParsedField {
+                serialization_name,
+                rust_name,
+                limit,
+                ty: &field.ty,
+            })
         })
         .collect::<Result<Vec<_>, TokenStream>>()
     {
@@ -214,9 +219,9 @@ pub fn impl_multipart_form(input: TokenStream) -> TokenStream {
 
     // Return value when a field name is not supported by the form
     let unknown_field_result = if attrs.deny_unknown_fields {
-        quote!(::std::result::Result::Err(::ntex_multipart::MultipartError::UnknownField(
-            field.name().unwrap().to_string()
-        )))
+        quote!(::std::result::Result::Err(
+            ::ntex_multipart::MultipartError::UnknownField(field.name().unwrap().to_string())
+        ))
     } else {
         quote!(::std::result::Result::Ok(()))
     };

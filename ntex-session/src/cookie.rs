@@ -20,15 +20,15 @@ use std::{collections::HashMap, convert::Infallible, rc::Rc};
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
 use ntex::http::{HttpMessage, header::HeaderValue, header::SET_COOKIE};
-use ntex::service::{Middleware, Service, ServiceCtx};
-use ntex::web::{DefaultError, ErrorRenderer, WebRequest, WebResponse, WebResponseError};
+use ntex::service::{Ctx, Middleware, Service};
+use ntex::web::{AppState, WebError, WebRequest, WebResponse, WebResponseError};
 use serde_json::error::Error as JsonError;
 use time::{Duration, OffsetDateTime};
 
 use crate::{Session, SessionStatus};
 
 /// Errors that can occur during handling cookie session
-#[derive(Debug, From, Display)]
+#[derive(Debug, From, Display, thiserror::Error)]
 pub enum CookieSessionError {
     /// Size of the serialized session is greater than 4000 bytes.
     #[display("Size of the serialized session is greater than 4000 bytes.")]
@@ -38,7 +38,7 @@ pub enum CookieSessionError {
     Serialize(JsonError),
 }
 
-impl WebResponseError<DefaultError> for CookieSessionError {}
+impl WebResponseError<WebError> for CookieSessionError {}
 
 enum CookieSecurity {
     Signed,
@@ -139,7 +139,7 @@ impl CookieSessionInner {
         Ok(())
     }
 
-    fn load<Err>(&self, req: &WebRequest<Err>) -> (bool, HashMap<String, String>) {
+    fn load<Err>(&self, req: &WebRequest) -> (bool, HashMap<String, String>) {
         if let Ok(cookies) = req.cookies() {
             for cookie in cookies.iter() {
                 if cookie.name() == self.name {
@@ -209,14 +209,20 @@ impl CookieSession {
     ///
     /// Panics if key length is less than 32 bytes.
     pub fn signed(key: &[u8]) -> Self {
-        CookieSession(Rc::new(CookieSessionInner::new(key, CookieSecurity::Signed)))
+        CookieSession(Rc::new(CookieSessionInner::new(
+            key,
+            CookieSecurity::Signed,
+        )))
     }
 
     /// Construct new *private* `CookieSessionBackend` instance.
     ///
     /// Panics if key length is less than 32 bytes.
     pub fn private(key: &[u8]) -> Self {
-        CookieSession(Rc::new(CookieSessionInner::new(key, CookieSecurity::Private)))
+        CookieSession(Rc::new(CookieSessionInner::new(
+            key,
+            CookieSecurity::Private,
+        )))
     }
 
     /// Sets the `path` field in the session cookie being built.
@@ -281,11 +287,14 @@ impl CookieSession {
     }
 }
 
-impl<S, C> Middleware<S, C> for CookieSession {
+impl<S, St> Middleware<S, St> for CookieSession {
     type Service = CookieSessionMiddleware<S>;
 
-    fn create(&self, service: S, _: C) -> Self::Service {
-        CookieSessionMiddleware { service, inner: self.0.clone() }
+    fn create(&self, _: &St, service: S) -> Self::Service {
+        CookieSessionMiddleware {
+            service,
+            inner: self.0.clone(),
+        }
     }
 }
 
@@ -295,18 +304,16 @@ pub struct CookieSessionMiddleware<S> {
     inner: Rc<CookieSessionInner>,
 }
 
-impl<S, Err> Service<WebRequest<Err>> for CookieSessionMiddleware<S>
+impl<S, St: AppState> Service<St, WebRequest> for CookieSessionMiddleware<S>
 where
-    S: Service<WebRequest<Err>, Response = WebResponse>,
+    S: Service<St, WebRequest, Res = WebResponse>,
     S::Error: 'static,
-    Err: ErrorRenderer,
-    Err::Container: From<CookieSessionError>,
 {
-    type Response = WebResponse;
+    type Res = WebResponse;
     type Error = S::Error;
 
-    ntex::forward_ready!(service);
-    ntex::forward_shutdown!(service);
+    ntex::forward_ready!(St, service);
+    ntex::forward_shutdown!(St, service);
 
     /// On first request, a new session cookie is returned in response, regardless
     /// of whether any session state is set.  With subsequent requests, if the
@@ -315,9 +322,9 @@ where
     /// and this will trigger removal of the session cookie in the response.
     async fn call(
         &self,
-        req: WebRequest<Err>,
-        ctx: ServiceCtx<'_, Self>,
-    ) -> Result<Self::Response, Self::Error> {
+        req: WebRequest,
+        ctx: Ctx<'_, Self, St>,
+    ) -> Result<Self::Res, Self::Error> {
         let inner = self.inner.clone();
         let (is_new, state) = self.inner.load(&req);
         let prolong_expiration = self.inner.expires_in.is_some();
@@ -325,21 +332,18 @@ where
 
         ctx.call(&self.service, req).await.map(|mut res| {
             match Session::get_changes(&mut res) {
-                (SessionStatus::Changed, Some(state))
-                | (SessionStatus::Renewed, Some(state)) => {
-                    res.checked_expr::<Err, _, _>(|res| inner.set_cookie(res, state))
+                (SessionStatus::Changed, Some(state)) | (SessionStatus::Renewed, Some(state)) => {
+                    res.checked_expr(|res| inner.set_cookie(res, state))
                 }
                 (SessionStatus::Unchanged, Some(state)) if prolong_expiration => {
-                    res.checked_expr::<Err, _, _>(|res| inner.set_cookie(res, state))
+                    res.checked_expr(|res| inner.set_cookie(res, state))
                 }
                 (SessionStatus::Unchanged, _) =>
                 // set a new session cookie upon first request (new client)
                 {
                     if is_new {
                         let state: HashMap<String, String> = HashMap::new();
-                        res.checked_expr::<Err, _, _>(|res| {
-                            inner.set_cookie(res, state.into_iter())
-                        })
+                        res.checked_expr(|res| inner.set_cookie(res, state.into_iter()))
                     } else {
                         res
                     }
@@ -363,52 +367,67 @@ mod tests {
     #[ntex::test]
     async fn cookie_session() {
         let app = test::init_service(
-            App::new().middleware(CookieSession::signed(&[0; 32]).secure(false)).service(
-                web::resource("/").to(|ses: Session| async move {
+            App::new()
+                .middleware(CookieSession::signed(&[0; 32]).secure(false))
+                .service(web::resource("/").to(|ses: Session| async move {
                     let _ = ses.set("counter", 100);
                     "test"
-                }),
-            ),
+                })),
         )
         .await;
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(response.response().cookies().any(|c| c.name() == "ntex-session"));
+        assert!(
+            response
+                .response()
+                .cookies()
+                .any(|c| c.name() == "ntex-session")
+        );
     }
 
     #[ntex::test]
     async fn private_cookie() {
         let app = test::init_service(
-            App::new().middleware(CookieSession::private(&[0; 32]).secure(false)).service(
-                web::resource("/").to(|ses: Session| async move {
+            App::new()
+                .middleware(CookieSession::private(&[0; 32]).secure(false))
+                .service(web::resource("/").to(|ses: Session| async move {
                     let _ = ses.set("counter", 100);
                     "test"
-                }),
-            ),
+                })),
         )
         .await;
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(response.response().cookies().any(|c| c.name() == "ntex-session"));
+        assert!(
+            response
+                .response()
+                .cookies()
+                .any(|c| c.name() == "ntex-session")
+        );
     }
 
     #[ntex::test]
     async fn cookie_session_extractor() {
         let app = test::init_service(
-            App::new().middleware(CookieSession::signed(&[0; 32]).secure(false)).service(
-                web::resource("/").to(|ses: Session| async move {
+            App::new()
+                .middleware(CookieSession::signed(&[0; 32]).secure(false))
+                .service(web::resource("/").to(|ses: Session| async move {
                     let _ = ses.set("counter", 100);
                     "test"
-                }),
-            ),
+                })),
         )
         .await;
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(response.response().cookies().any(|c| c.name() == "ntex-session"));
+        assert!(
+            response
+                .response()
+                .cookies()
+                .any(|c| c.name() == "ntex-session")
+        );
     }
 
     #[ntex::test]
@@ -445,7 +464,9 @@ mod tests {
             .into_owned();
         assert_eq!(cookie.path().unwrap(), "/test/");
 
-        let request = test::TestRequest::with_uri("/test/").cookie(cookie).to_request();
+        let request = test::TestRequest::with_uri("/test/")
+            .cookie(cookie)
+            .to_request();
         let body = test::read_response(&app, request).await;
         assert_eq!(body, Bytes::from_static(b"counter: 100"));
     }
@@ -486,8 +507,7 @@ mod tests {
             .expect("Expiration is set");
 
         assert!(
-            expires_2.datetime().unwrap() - expires_1.datetime().unwrap()
-                >= Duration::seconds(1)
+            expires_2.datetime().unwrap() - expires_1.datetime().unwrap() >= Duration::seconds(1)
         );
     }
 }

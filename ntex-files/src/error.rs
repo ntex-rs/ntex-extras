@@ -1,59 +1,60 @@
-use derive_more::{Display, From};
 use ntex::http::StatusCode;
-use ntex::web::error::{DefaultError, WebResponseError};
+use ntex::web::{HttpRequest, HttpResponse, error::WebError, error::WebResponseError};
 
 /// Errors which can occur when serving static files.
-#[derive(Display, Debug, From)]
+#[derive(Debug, thiserror::Error)]
 pub enum FilesError {
     /// Path is not a directory
     #[allow(dead_code)]
-    #[display("Path is not a directory. Unable to serve static files.")]
+    #[error("Path is not a directory. Unable to serve static files.")]
     IsNotDirectory,
 
     /// Cannot render directory
-    #[display("Unable to render directory without index file.")]
+    #[error("Unable to render directory without index file.")]
     IsDirectory,
 
     /// Only GET and HEAD methods are allowed
-    #[display("Request did not meet this resource's requirements.")]
+    #[error("Request did not meet this resource's requirements.")]
     MethodNotAllowed,
 
     /// Uri segments parsing error
-    #[display("{}", _0)]
-    Uri(UriSegmentError),
+    #[error("{}", _0)]
+    Uri(#[from] UriSegmentError),
 
     /// IO Error
-    #[display("Error reading: {}", _0)]
-    Io(std::io::Error),
+    #[error("Error reading: {}", _0)]
+    Io(#[from] std::io::Error),
 }
 
 /// Return `NotFound` for `FilesError`
-impl WebResponseError<DefaultError> for FilesError {
-    fn status_code(&self) -> StatusCode {
+impl WebResponseError<WebError> for FilesError {
+    fn error_response(&mut self, _: &HttpRequest) -> HttpResponse {
         match self {
-            FilesError::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
-            FilesError::Uri(_) => StatusCode::BAD_REQUEST,
-            _ => StatusCode::NOT_FOUND,
+            FilesError::Uri(_) => self.error_response_with_status(StatusCode::BAD_REQUEST),
+            FilesError::MethodNotAllowed => {
+                self.error_response_with_status(StatusCode::METHOD_NOT_ALLOWED)
+            }
+            _ => self.error_response_with_status(StatusCode::NOT_FOUND),
         }
     }
 }
 
-#[derive(Display, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum UriSegmentError {
     /// The segment started with the wrapped invalid character.
-    #[display("The segment started with the wrapped invalid character")]
+    #[error("The segment started with the wrapped invalid character")]
     BadStart(char),
     /// The segment contained the wrapped invalid character.
-    #[display("The segment contained the wrapped invalid character")]
+    #[error("The segment contained the wrapped invalid character")]
     BadChar(char),
     /// The segment ended with the wrapped invalid character.
-    #[display("The segment ended with the wrapped invalid character")]
+    #[error("The segment ended with the wrapped invalid character")]
     BadEnd(char),
 }
 
 /// Return `BadRequest` for `UriSegmentError`
-impl WebResponseError<DefaultError> for UriSegmentError {
-    fn status_code(&self) -> StatusCode {
-        StatusCode::BAD_REQUEST
+impl WebResponseError<WebError> for UriSegmentError {
+    fn error_response(&mut self, _: &HttpRequest) -> HttpResponse {
+        self.error_response_with_status(StatusCode::BAD_REQUEST)
     }
 }

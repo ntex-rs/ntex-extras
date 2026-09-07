@@ -60,9 +60,11 @@ where
             source: TextError::Utf8Error(err).into(),
         })?;
 
-        Ok(Text(serde_plain::from_str(text).map_err(|err| MultipartError::Field {
-            name: form_field_name,
-            source: TextError::Deserialize(err).into(),
+        Ok(Text(serde_plain::from_str(text).map_err(|err| {
+            MultipartError::Field {
+                name: form_field_name,
+                source: TextError::Deserialize(err).into(),
+            }
         })?))
     }
 }
@@ -107,7 +109,9 @@ impl TextConfig {
     }
 }
 
-const DEFAULT_CONFIG: TextConfig = TextConfig { validate_content_type: true };
+const DEFAULT_CONFIG: TextConfig = TextConfig {
+    validate_content_type: true,
+};
 
 impl Default for TextConfig {
     fn default() -> Self {

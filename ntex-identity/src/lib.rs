@@ -113,7 +113,11 @@ impl Identity {
     }
 
     fn get_identity(extensions: &Extensions) -> Option<String> {
-        if let Some(id) = extensions.get::<IdentityItem>() { id.id.clone() } else { None }
+        if let Some(id) = extensions.get::<IdentityItem>() {
+            id.id.clone()
+        } else {
+            None
+        }
     }
 }
 
@@ -174,10 +178,7 @@ pub trait IdentityPolicy: Sized + 'static {
     type Error;
 
     /// Parse the session from request and load data from a service identity.
-    async fn from_request(
-        &self,
-        request: &mut WebRequest,
-    ) -> Result<Option<String>, Self::Error>;
+    async fn from_request(&self, request: &mut WebRequest) -> Result<Option<String>, Self::Error>;
 
     /// Write changes to response
     async fn to_response(
@@ -208,7 +209,9 @@ pub struct IdentityService<T> {
 impl<T> IdentityService<T> {
     /// Create new identity service with specified backend.
     pub fn new(backend: T) -> Self {
-        IdentityService { backend: Rc::new(backend) }
+        IdentityService {
+            backend: Rc::new(backend),
+        }
     }
 }
 
@@ -216,7 +219,10 @@ impl<S, St, C, T> Middleware<S, St, C> for IdentityService<T> {
     type Service = IdentityServiceMiddleware<S, T>;
 
     fn create(&self, service: S, _: &C) -> Self::Service {
-        IdentityServiceMiddleware { service, backend: self.backend.clone() }
+        IdentityServiceMiddleware {
+            service,
+            backend: self.backend.clone(),
+        }
     }
 }
 
@@ -228,7 +234,10 @@ pub struct IdentityServiceMiddleware<S, T> {
 
 impl<S: Clone, T> Clone for IdentityServiceMiddleware<S, T> {
     fn clone(&self) -> Self {
-        Self { backend: self.backend.clone(), service: self.service.clone() }
+        Self {
+            backend: self.backend.clone(),
+            service: self.service.clone(),
+        }
     }
 }
 
@@ -253,7 +262,8 @@ where
     ) -> Result<Self::Res, Self::Error> {
         match self.backend.from_request(&mut req).await {
             Ok(id) => {
-                req.extensions_mut().insert(IdentityItem { id, changed: false });
+                req.extensions_mut()
+                    .insert(IdentityItem { id, changed: false });
 
                 // https://github.com/actix/actix-web/issues/1263
                 let mut res = ctx.call(&self.service, req).await?;
@@ -330,8 +340,7 @@ impl CookieIdentityInner {
                 Ok(val.identity)
             }
         });
-        let mut cookie =
-            Cookie::new(self.name.clone(), val.unwrap_or_else(|| Ok(String::new()))?);
+        let mut cookie = Cookie::new(self.name.clone(), val.unwrap_or_else(|| Ok(String::new()))?);
         cookie.set_path(self.path.clone());
         cookie.set_secure(self.secure);
         cookie.set_http_only(true);
@@ -346,7 +355,11 @@ impl CookieIdentityInner {
         }
 
         let mut jar = CookieJar::new();
-        let key = if self.legacy_supported() { &self.key } else { &self.key_v2 };
+        let key = if self.legacy_supported() {
+            &self.key
+        } else {
+            &self.key_v2
+        };
         if add_cookie {
             jar.private_mut(key).add(cookie);
         } else {
@@ -373,7 +386,11 @@ impl CookieIdentityInner {
         } else {
             None
         };
-        res.or_else(|| jar.private(&self.key_v2).get(&self.name).and_then(|c| self.parse(c)))
+        res.or_else(|| {
+            jar.private(&self.key_v2)
+                .get(&self.name)
+                .and_then(|c| self.parse(c))
+        })
     }
 
     fn parse(&self, cookie: Cookie) -> Option<CookieValue> {
@@ -510,12 +527,19 @@ impl IdentityPolicy for CookieIdentityPolicy {
     type Error = CookieIdentityPolicyError;
 
     async fn from_request(&self, req: &mut WebRequest) -> Result<Option<String>, Self::Error> {
-        Ok(self.0.load(req).map(|CookieValue { identity, login_timestamp, .. }| {
-            if self.0.requires_oob_data() {
-                req.extensions_mut().insert(CookieIdentityExtention { login_timestamp });
-            }
-            identity
-        }))
+        Ok(self.0.load(req).map(
+            |CookieValue {
+                 identity,
+                 login_timestamp,
+                 ..
+             }| {
+                if self.0.requires_oob_data() {
+                    req.extensions_mut()
+                        .insert(CookieIdentityExtention { login_timestamp });
+                }
+                identity
+            },
+        ))
     }
 
     async fn to_response(
@@ -537,8 +561,9 @@ impl IdentityPolicy for CookieIdentityPolicy {
         } else if self.0.always_update_cookie() && id.is_some() {
             let visit_timestamp = SystemTime::now();
             let login_timestamp = if self.0.requires_oob_data() {
-                let CookieIdentityExtention { login_timestamp: lt } =
-                    res.request().extensions_mut().remove().unwrap();
+                let CookieIdentityExtention {
+                    login_timestamp: lt,
+                } = res.request().extensions_mut().remove().unwrap();
                 lt
             } else {
                 None
@@ -613,14 +638,18 @@ mod tests {
 
         let resp = test::call_service(
             &srv,
-            TestRequest::with_uri("/index").cookie(c.clone()).to_request(),
+            TestRequest::with_uri("/index")
+                .cookie(c.clone())
+                .to_request(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::CREATED);
 
         let resp = test::call_service(
             &srv,
-            TestRequest::with_uri("/logout").cookie(c.clone()).to_request(),
+            TestRequest::with_uri("/logout")
+                .cookie(c.clone())
+                .to_request(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -717,8 +746,11 @@ mod tests {
         visit_timestamp: Option<SystemTime>,
     ) -> Cookie<'static> {
         let mut jar = CookieJar::new();
-        let key: Vec<u8> =
-            COOKIE_KEY_MASTER.iter().chain([1, 0, 0, 0].iter()).copied().collect();
+        let key: Vec<u8> = COOKIE_KEY_MASTER
+            .iter()
+            .chain([1, 0, 0, 0].iter())
+            .copied()
+            .collect();
         jar.private_mut(&Key::derive_from(&key)).add(Cookie::new(
             COOKIE_NAME,
             serde_json::to_string(&CookieValue {
@@ -742,8 +774,10 @@ mod tests {
         for cookie in response.headers().get_all(header::SET_COOKIE) {
             cookies.add(Cookie::parse(cookie.to_str().unwrap().to_string()).unwrap());
         }
-        let cookie =
-            cookies.private(&Key::derive_from(&COOKIE_KEY_MASTER)).get(COOKIE_NAME).unwrap();
+        let cookie = cookies
+            .private(&Key::derive_from(&COOKIE_KEY_MASTER))
+            .get(COOKIE_NAME)
+            .unwrap();
         assert_eq!(cookie.value(), identity);
     }
 
@@ -768,9 +802,15 @@ mod tests {
         for cookie in response.headers().get_all(header::SET_COOKIE) {
             cookies.add(Cookie::parse(cookie.to_str().unwrap().to_string()).unwrap());
         }
-        let key: Vec<u8> =
-            COOKIE_KEY_MASTER.iter().chain([1, 0, 0, 0].iter()).copied().collect();
-        let cookie = cookies.private(&Key::derive_from(&key)).get(COOKIE_NAME).unwrap();
+        let key: Vec<u8> = COOKIE_KEY_MASTER
+            .iter()
+            .chain([1, 0, 0, 0].iter())
+            .copied()
+            .collect();
+        let cookie = cookies
+            .private(&Key::derive_from(&key))
+            .get(COOKIE_NAME)
+            .unwrap();
         let cv: CookieValue = serde_json::from_str(cookie.value()).unwrap();
         assert_eq!(cv.identity, identity);
         let now = SystemTime::now();
@@ -814,7 +854,9 @@ mod tests {
         let cookie = legacy_login_cookie(COOKIE_LOGIN);
         let mut resp = test::call_service(
             &srv,
-            TestRequest::with_uri("/").cookie(cookie.clone()).to_request(),
+            TestRequest::with_uri("/")
+                .cookie(cookie.clone())
+                .to_request(),
         )
         .await;
         assert_no_login_cookie(&mut resp);
@@ -827,7 +869,9 @@ mod tests {
         let cookie = legacy_login_cookie(COOKIE_LOGIN);
         let mut resp = test::call_service(
             &srv,
-            TestRequest::with_uri("/").cookie(cookie.clone()).to_request(),
+            TestRequest::with_uri("/")
+                .cookie(cookie.clone())
+                .to_request(),
         )
         .await;
         assert_login_cookie(
@@ -845,7 +889,9 @@ mod tests {
         let cookie = legacy_login_cookie(COOKIE_LOGIN);
         let mut resp = test::call_service(
             &srv,
-            TestRequest::with_uri("/").cookie(cookie.clone()).to_request(),
+            TestRequest::with_uri("/")
+                .cookie(cookie.clone())
+                .to_request(),
         )
         .await;
         assert_login_cookie(
@@ -863,7 +909,9 @@ mod tests {
         let cookie = login_cookie(COOKIE_LOGIN, None, Some(SystemTime::now()));
         let mut resp = test::call_service(
             &srv,
-            TestRequest::with_uri("/").cookie(cookie.clone()).to_request(),
+            TestRequest::with_uri("/")
+                .cookie(cookie.clone())
+                .to_request(),
         )
         .await;
         assert_login_cookie(
@@ -881,7 +929,9 @@ mod tests {
         let cookie = login_cookie(COOKIE_LOGIN, Some(SystemTime::now()), None);
         let mut resp = test::call_service(
             &srv,
-            TestRequest::with_uri("/").cookie(cookie.clone()).to_request(),
+            TestRequest::with_uri("/")
+                .cookie(cookie.clone())
+                .to_request(),
         )
         .await;
         assert_login_cookie(
@@ -896,11 +946,16 @@ mod tests {
     #[ntex::test]
     async fn test_identity_cookie_rejected_if_login_timestamp_too_old() {
         let srv = create_identity_server(|c| c.login_deadline(Duration::days(90))).await;
-        let cookie =
-            login_cookie(COOKIE_LOGIN, Some(SystemTime::now() - Duration::days(180)), None);
+        let cookie = login_cookie(
+            COOKIE_LOGIN,
+            Some(SystemTime::now() - Duration::days(180)),
+            None,
+        );
         let mut resp = test::call_service(
             &srv,
-            TestRequest::with_uri("/").cookie(cookie.clone()).to_request(),
+            TestRequest::with_uri("/")
+                .cookie(cookie.clone())
+                .to_request(),
         )
         .await;
         assert_login_cookie(
@@ -915,11 +970,16 @@ mod tests {
     #[ntex::test]
     async fn test_identity_cookie_rejected_if_visit_timestamp_too_old() {
         let srv = create_identity_server(|c| c.visit_deadline(Duration::days(90))).await;
-        let cookie =
-            login_cookie(COOKIE_LOGIN, None, Some(SystemTime::now() - Duration::days(180)));
+        let cookie = login_cookie(
+            COOKIE_LOGIN,
+            None,
+            Some(SystemTime::now() - Duration::days(180)),
+        );
         let mut resp = test::call_service(
             &srv,
-            TestRequest::with_uri("/").cookie(cookie.clone()).to_request(),
+            TestRequest::with_uri("/")
+                .cookie(cookie.clone())
+                .to_request(),
         )
         .await;
         assert_login_cookie(
@@ -937,7 +997,9 @@ mod tests {
         let cookie = login_cookie(COOKIE_LOGIN, Some(SystemTime::now()), None);
         let mut resp = test::call_service(
             &srv,
-            TestRequest::with_uri("/").cookie(cookie.clone()).to_request(),
+            TestRequest::with_uri("/")
+                .cookie(cookie.clone())
+                .to_request(),
         )
         .await;
         assert_no_login_cookie(&mut resp);
@@ -948,14 +1010,17 @@ mod tests {
     #[ntex::test]
     async fn test_identity_cookie_updated_on_visit_deadline() {
         let srv = create_identity_server(|c| {
-            c.visit_deadline(Duration::days(90)).login_deadline(Duration::days(90))
+            c.visit_deadline(Duration::days(90))
+                .login_deadline(Duration::days(90))
         })
         .await;
         let timestamp = SystemTime::now() - Duration::days(1);
         let cookie = login_cookie(COOKIE_LOGIN, Some(timestamp), Some(timestamp));
         let mut resp = test::call_service(
             &srv,
-            TestRequest::with_uri("/").cookie(cookie.clone()).to_request(),
+            TestRequest::with_uri("/")
+                .cookie(cookie.clone())
+                .to_request(),
         )
         .await;
         assert_login_cookie(

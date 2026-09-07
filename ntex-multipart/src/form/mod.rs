@@ -112,7 +112,10 @@ where
     }
 
     fn from_state(name: &str, state: &mut State) -> Result<Self, MultipartError> {
-        Ok(state.remove(name).map(|m| *m.downcast::<Vec<T>>().unwrap()).unwrap_or_default())
+        Ok(state
+            .remove(name)
+            .map(|m| *m.downcast::<Vec<T>>().unwrap())
+            .unwrap_or_default())
     }
 }
 

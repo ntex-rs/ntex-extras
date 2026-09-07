@@ -168,7 +168,11 @@ impl<'a, F: std::fmt::Write + 'a> std::fmt::Write for NewlineReplacer<'a, F> {
                 since = i + 1;
             }
         }
-        if since < s.len() { self.0.write_str(&s[since..]) } else { Ok(()) }
+        if since < s.len() {
+            self.0.write_str(&s[since..])
+        } else {
+            Ok(())
+        }
     }
 
     #[inline]

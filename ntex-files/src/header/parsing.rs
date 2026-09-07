@@ -134,15 +134,17 @@ pub fn parse_extended_value(val: &str) -> error::Result<ExtendedValue> {
         Some(v) => percent_encoding::percent_decode(v.as_bytes()).collect(),
     };
 
-    Ok(ExtendedValue { charset, language_tag: lang, value })
+    Ok(ExtendedValue {
+        charset,
+        language_tag: lang,
+        value,
+    })
 }
 
 impl Display for ExtendedValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let encoded_value = percent_encoding::percent_encode(
-            &self.value[..],
-            percent_encoding_http::HTTP_VALUE,
-        );
+        let encoded_value =
+            percent_encoding::percent_encode(&self.value[..], percent_encoding_http::HTTP_VALUE);
         if let Some(ref lang) = self.language_tag {
             write!(f, "{}'{}'{}", self.charset, lang, encoded_value)
         } else {
@@ -204,7 +206,10 @@ mod tests {
         assert_eq!(Charset::Iso_8859_1, extended_value.charset);
         assert!(extended_value.language_tag.is_some());
         assert_eq!(expected_language_tag, extended_value.language_tag.unwrap());
-        assert_eq!(vec![163, b' ', b'r', b'a', b't', b'e', b's'], extended_value.value);
+        assert_eq!(
+            vec![163, b' ', b'r', b'a', b't', b'e', b's'],
+            extended_value.value
+        );
     }
 
     #[test]
@@ -265,6 +270,9 @@ mod tests {
                 b'e', b's',
             ],
         };
-        assert_eq!("UTF-8''%C2%A3%20and%20%E2%82%AC%20rates", format!("{}", extended_value));
+        assert_eq!(
+            "UTF-8''%C2%A3%20and%20%E2%82%AC%20rates",
+            format!("{}", extended_value)
+        );
     }
 }

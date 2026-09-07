@@ -55,7 +55,10 @@ pub enum MultipartError {
 
     /// Form field handler raised error.
     #[display("An error occurred processing field: {}", name)]
-    Field { name: String, source: ntex::web::Error },
+    Field {
+        name: String,
+        source: ntex::web::Error,
+    },
 
     /// Duplicate field found (for structure that opted-in to denying duplicate fields).
     #[display("Duplicate field found: {}", _0)]

@@ -35,7 +35,9 @@ pub struct HttpDate(InnerDate);
 impl FromStr for HttpDate {
     type Err = Error;
     fn from_str(s: &str) -> Result<HttpDate> {
-        InnerDate::from_str(s).map(HttpDate).map_err(|_| Error::Header)
+        InnerDate::from_str(s)
+            .map(HttpDate)
+            .map_err(|_| Error::Header)
     }
 }
 

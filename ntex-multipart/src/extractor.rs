@@ -45,10 +45,7 @@ where
     type Error = Infallible;
 
     #[inline]
-    async fn from_request(
-        req: &HttpRequest,
-        payload: &mut Payload,
-    ) -> Result<Self, Self::Error> {
+    async fn from_request(req: &HttpRequest, payload: &mut Payload) -> Result<Self, Self::Error> {
         Ok(Multipart::new(req.headers(), payload.take()))
     }
 }
@@ -62,10 +59,7 @@ where
     type Error = MultipartError;
 
     #[inline]
-    async fn from_request(
-        req: &HttpRequest,
-        payload: &mut Payload,
-    ) -> Result<Self, Self::Error> {
+    async fn from_request(req: &HttpRequest, payload: &mut Payload) -> Result<Self, Self::Error> {
         let mut multipart = Multipart::new(req.headers(), payload.take());
 
         let content_type = match multipart.content_type() {

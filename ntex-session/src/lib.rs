@@ -41,14 +41,11 @@
 //!         .await
 //! }
 //! ```
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::convert::Infallible;
-use std::rc::Rc;
+use std::{cell::RefCell, convert::Infallible, rc::Rc};
 
 use ntex::http::{Payload, RequestHead};
-use ntex::util::Extensions;
-use ntex::web::{Error, FromRequest, HttpRequest, WebRequest, WebResponse};
+use ntex::web::{FromRequest, HttpRequest, WebError, WebRequest, WebResponse};
+use ntex::{util::Extensions, util::HashMap};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -92,7 +89,7 @@ impl UserSession for HttpRequest {
     }
 }
 
-impl<Err> UserSession for WebRequest<Err> {
+impl UserSession for WebRequest {
     fn get_session(&self) -> Session {
         Session::get_session(&mut self.extensions_mut())
     }
@@ -127,7 +124,7 @@ struct SessionInner {
 
 impl Session {
     /// Get a `value` from the session.
-    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, Error> {
+    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, WebError> {
         if let Some(s) = self.0.borrow().state.get(key) {
             Ok(Some(serde_json::from_str(s)?))
         } else {
@@ -136,11 +133,13 @@ impl Session {
     }
 
     /// Set a `value` from the session.
-    pub fn set<T: Serialize>(&self, key: &str, value: T) -> Result<(), Error> {
+    pub fn set<T: Serialize>(&self, key: &str, value: T) -> Result<(), WebError> {
         let mut inner = self.0.borrow_mut();
         if inner.status != SessionStatus::Purged {
             inner.status = SessionStatus::Changed;
-            inner.state.insert(key.to_owned(), serde_json::to_string(&value)?);
+            inner
+                .state
+                .insert(key.to_owned(), serde_json::to_string(&value)?);
         }
         Ok(())
     }
@@ -178,10 +177,7 @@ impl Session {
         }
     }
 
-    pub fn set_session<Err>(
-        data: impl Iterator<Item = (String, String)>,
-        req: &WebRequest<Err>,
-    ) {
+    pub fn set_session(data: impl Iterator<Item = (String, String)>, req: &WebRequest) {
         let session = Session::get_session(&mut req.extensions_mut());
         let mut inner = session.0.borrow_mut();
         inner.state.extend(data);
@@ -189,8 +185,15 @@ impl Session {
 
     pub fn get_changes(
         res: &mut WebResponse,
-    ) -> (SessionStatus, Option<impl Iterator<Item = (String, String)> + use<>>) {
-        if let Some(s_impl) = res.request().extensions().get::<Rc<RefCell<SessionInner>>>() {
+    ) -> (
+        SessionStatus,
+        Option<impl Iterator<Item = (String, String)> + use<>>,
+    ) {
+        if let Some(s_impl) = res
+            .request()
+            .extensions()
+            .get::<Rc<RefCell<SessionInner>>>()
+        {
             let state = std::mem::take(&mut s_impl.borrow_mut().state);
             (s_impl.borrow().status.clone(), Some(state.into_iter()))
         } else {
@@ -225,11 +228,15 @@ impl Session {
 /// }
 /// # fn main() {}
 /// ```
-impl<Err> FromRequest<Err> for Session {
+impl<St> FromRequest<St> for Session {
     type Error = Infallible;
 
     #[inline]
-    async fn from_request(req: &HttpRequest, _: &mut Payload) -> Result<Session, Infallible> {
+    async fn from_request(
+        _: &St,
+        req: &HttpRequest,
+        _: &mut Payload,
+    ) -> Result<Session, Infallible> {
         Ok(Session::get_session(&mut req.extensions_mut()))
     }
 }

@@ -35,10 +35,12 @@ impl FieldReader for TempFile {
         let config = req.app_state::<TempFileConfig>().unwrap_or(&DEFAULT_CONFIG);
         let mut size = 0;
 
-        let file = config.create_tempfile().map_err(|err| MultipartError::Field {
-            name: field.form_field_name.to_owned(),
-            source: TempFileError::FileIo(err).into(),
-        })?;
+        let file = config
+            .create_tempfile()
+            .map_err(|err| MultipartError::Field {
+                name: field.form_field_name.to_owned(),
+                source: TempFileError::FileIo(err).into(),
+            })?;
 
         let (file, mut f) = spawn_blocking(move || file.reopen().map(move |f| (file, f)))
             .await?
@@ -58,10 +60,12 @@ impl FieldReader for TempFile {
                 })?;
         }
 
-        spawn_blocking(move || f.flush()).await?.map_err(|err| MultipartError::Field {
-            name: field.form_field_name.to_owned(),
-            source: TempFileError::FileIo(err).into(),
-        })?;
+        spawn_blocking(move || f.flush())
+            .await?
+            .map_err(|err| MultipartError::Field {
+                name: field.form_field_name.to_owned(),
+                source: TempFileError::FileIo(err).into(),
+            })?;
 
         Ok(TempFile {
             file,

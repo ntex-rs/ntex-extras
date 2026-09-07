@@ -48,12 +48,12 @@ where
 
         let bytes = Bytes::read_field(req, field, limits).await?;
 
-        Ok(Json(serde_json::from_slice(bytes.data.as_ref()).map_err(|err| {
-            MultipartError::Field {
+        Ok(Json(serde_json::from_slice(bytes.data.as_ref()).map_err(
+            |err| MultipartError::Field {
                 name: form_field_name,
                 source: JsonFieldError::Deserialize(err).into(),
-            }
-        })?))
+            },
+        )?))
     }
 }
 
@@ -82,7 +82,9 @@ pub struct JsonConfig {
     validate_content_type: bool,
 }
 
-const DEFAULT_CONFIG: JsonConfig = JsonConfig { validate_content_type: true };
+const DEFAULT_CONFIG: JsonConfig = JsonConfig {
+    validate_content_type: true,
+};
 
 impl JsonConfig {
     /// Sets whether or not the field must have a valid `Content-Type` header to be parsed.

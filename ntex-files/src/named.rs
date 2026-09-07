@@ -13,12 +13,9 @@ use mime_guess::from_path;
 use ntex::http::body::SizedStream;
 use ntex::http::header::ContentEncoding;
 use ntex::http::{self, StatusCode};
-use ntex::web::{BodyEncoding, ErrorRenderer, HttpRequest, HttpResponse, Responder};
+use ntex::web::{AppState, BodyEncoding, HttpRequest, HttpResponse, Responder};
 
-use crate::header::{self, Header};
-
-use crate::ChunkedReadFile;
-use crate::range::HttpRange;
+use crate::{ChunkedReadFile, header, header::Header, range::HttpRange};
 
 bitflags! {
     #[derive(Clone)]
@@ -54,7 +51,10 @@ impl std::fmt::Debug for Flags {
         f.debug_struct("Flags")
             .field("etag", &self.contains(Flags::ETAG))
             .field("last_modified", &self.contains(Flags::LAST_MD))
-            .field("content_disposition", &self.contains(Flags::CONTENT_DISPOSITION))
+            .field(
+                "content_disposition",
+                &self.contains(Flags::CONTENT_DISPOSITION),
+            )
             .finish()
     }
 }
@@ -104,9 +104,7 @@ impl NamedFile {
                 }
                 mime::APPLICATION => match ct.subtype() {
                     mime::JAVASCRIPT | mime::JSON => header::DispositionType::Inline,
-                    name if name == "wasm" || name == "xhtml" => {
-                        header::DispositionType::Inline
-                    }
+                    name if name == "wasm" || name == "xhtml" => header::DispositionType::Inline,
                     _ => header::DispositionType::Attachment,
                 },
                 _ => header::DispositionType::Attachment,
@@ -130,7 +128,10 @@ impl NamedFile {
                 ))
             }
 
-            let cd = header::ContentDisposition { disposition, parameters };
+            let cd = header::ContentDisposition {
+                disposition,
+                parameters,
+            };
             (ct, cd)
         };
 
@@ -282,7 +283,7 @@ impl NamedFile {
 
     pub fn into_response(self, req: &HttpRequest) -> HttpResponse {
         if self.status_code != StatusCode::OK {
-            let mut resp = HttpResponse::build(self.status_code);
+            let mut resp = HttpResponse::builder(self.status_code);
             if self.flags.contains(Flags::CONTENT_DISPOSITION) {
                 resp.header(
                     http::header::CONTENT_DISPOSITION,
@@ -303,9 +304,16 @@ impl NamedFile {
             return resp.streaming(reader);
         }
 
-        let etag = if self.flags.contains(Flags::ETAG) { self.etag() } else { None };
-        let last_modified =
-            if self.flags.contains(Flags::LAST_MD) { self.last_modified() } else { None };
+        let etag = if self.flags.contains(Flags::ETAG) {
+            self.etag()
+        } else {
+            None
+        };
+        let last_modified = if self.flags.contains(Flags::LAST_MD) {
+            self.last_modified()
+        } else {
+            None
+        };
 
         // check preconditions
         let precondition_failed = if !any_match(etag.as_ref(), req) {
@@ -360,7 +368,7 @@ impl NamedFile {
             false
         };
 
-        let mut resp = HttpResponse::build(self.status_code);
+        let mut resp = HttpResponse::builder(self.status_code);
         if self.flags.contains(Flags::CONTENT_DISPOSITION) {
             resp.header(
                 http::header::CONTENT_DISPOSITION,
@@ -372,7 +380,10 @@ impl NamedFile {
             resp.encoding(current_encoding);
         }
         if let Some(lm) = last_modified {
-            resp.header(http::header::LAST_MODIFIED, header::LastModified(lm).to_string());
+            resp.header(
+                http::header::LAST_MODIFIED,
+                header::LastModified(lm).to_string(),
+            );
         }
         if let Some(etag) = etag {
             resp.header(http::header::ETAG, header::ETag(etag).to_string());
@@ -397,17 +408,17 @@ impl NamedFile {
                     );
                 } else {
                     resp.header(http::header::CONTENT_RANGE, format!("bytes */{}", length));
-                    return resp.status(StatusCode::RANGE_NOT_SATISFIABLE).finish();
+                    return resp.status(StatusCode::RANGE_NOT_SATISFIABLE).build();
                 };
             } else {
-                return resp.status(StatusCode::BAD_REQUEST).finish();
+                return resp.status(StatusCode::BAD_REQUEST).build();
             };
         };
 
         if precondition_failed {
-            return resp.status(StatusCode::PRECONDITION_FAILED).finish();
+            return resp.status(StatusCode::PRECONDITION_FAILED).build();
         } else if not_modified {
-            return resp.status(StatusCode::NOT_MODIFIED).finish();
+            return resp.status(StatusCode::NOT_MODIFIED).build();
         }
 
         let reader = ChunkedReadFile {
@@ -491,7 +502,7 @@ fn none_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
     true
 }
 
-impl<Err: ErrorRenderer> Responder<Err> for NamedFile {
+impl<St: AppState> Responder<St> for NamedFile {
     async fn respond_to(self, req: &HttpRequest) -> HttpResponse {
         self.into_response(req)
     }
