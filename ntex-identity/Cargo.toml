@@ -23,9 +23,9 @@ cookie-policy = ["cookie/secure", "ntex/cookie"]
 
 [dependencies]
 ntex = { workspace = true }
-futures = "0.3"
-serde = "1.0"
-serde_json = "1.0"
-derive_more = { version = "2", features = ["from", "display"] }
-cookie = { version = "0.18", features = ["private"] }
-time = { version = "0.3", default-features = false, features = ["std"] }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+cookie = { workspace = true, features = ["private"] }
+time = { workspace = true, default-features = false, features = ["std"] }
+thiserror = { workspace = true }

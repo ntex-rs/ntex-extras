@@ -44,10 +44,11 @@
 use std::{cell::RefCell, convert::Infallible, rc::Rc};
 
 use ntex::http::{Payload, RequestHead};
-use ntex::web::{FromRequest, HttpRequest, WebError, WebRequest, WebResponse};
-use ntex::{util::Extensions, util::HashMap};
+use ntex::util::{Extensions, HashMap};
+use ntex::web::{FromRequest, HttpRequest, WebRequest, WebResponse};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::error::Error as JsonError;
 
 #[cfg(feature = "cookie-session")]
 mod cookie;
@@ -124,7 +125,7 @@ struct SessionInner {
 
 impl Session {
     /// Get a `value` from the session.
-    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, WebError> {
+    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, JsonError> {
         if let Some(s) = self.0.borrow().state.get(key) {
             Ok(Some(serde_json::from_str(s)?))
         } else {
@@ -133,7 +134,7 @@ impl Session {
     }
 
     /// Set a `value` from the session.
-    pub fn set<T: Serialize>(&self, key: &str, value: T) -> Result<(), WebError> {
+    pub fn set<T: Serialize>(&self, key: &str, value: T) -> Result<(), JsonError> {
         let mut inner = self.0.borrow_mut();
         if inner.status != SessionStatus::Purged {
             inner.status = SessionStatus::Changed;

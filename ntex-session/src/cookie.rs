@@ -139,7 +139,7 @@ impl CookieSessionInner {
         Ok(())
     }
 
-    fn load<Err>(&self, req: &WebRequest) -> (bool, HashMap<String, String>) {
+    fn load(&self, req: &WebRequest) -> (bool, HashMap<String, String>) {
         if let Ok(cookies) = req.cookies() {
             for cookie in cookies.iter() {
                 if cookie.name() == self.name {
@@ -308,6 +308,7 @@ impl<S, St: AppState> Service<St, WebRequest> for CookieSessionMiddleware<S>
 where
     S: Service<St, WebRequest, Res = WebResponse>,
     S::Error: 'static,
+    CookieSessionError: WebResponseError<St::Error>,
 {
     type Res = WebResponse;
     type Error = S::Error;
@@ -333,17 +334,17 @@ where
         ctx.call(&self.service, req).await.map(|mut res| {
             match Session::get_changes(&mut res) {
                 (SessionStatus::Changed, Some(state)) | (SessionStatus::Renewed, Some(state)) => {
-                    res.checked_expr(|res| inner.set_cookie(res, state))
+                    res.checked_expr::<St, _, _>(|res| inner.set_cookie(res, state))
                 }
                 (SessionStatus::Unchanged, Some(state)) if prolong_expiration => {
-                    res.checked_expr(|res| inner.set_cookie(res, state))
+                    res.checked_expr::<St, _, _>(|res| inner.set_cookie(res, state))
                 }
                 (SessionStatus::Unchanged, _) =>
                 // set a new session cookie upon first request (new client)
                 {
                     if is_new {
                         let state: HashMap<String, String> = HashMap::new();
-                        res.checked_expr(|res| inner.set_cookie(res, state.into_iter()))
+                        res.checked_expr::<St, _, _>(|res| inner.set_cookie(res, state.into_iter()))
                     } else {
                         res
                     }

@@ -44,10 +44,10 @@
 //!     .service(web::resource("/login.html").to(login))
 //!     .service(web::resource("/logout.html").to(logout));
 //! ```
+#![allow(async_fn_in_trait)]
 use std::{convert::Infallible, rc::Rc, time::SystemTime};
 
 use cookie::{Cookie, CookieJar, Key, SameSite};
-use derive_more::{Display, From};
 use serde::{Deserialize, Serialize};
 use time::Duration;
 
@@ -76,12 +76,12 @@ use ntex::web::{
 ///
 /// fn login(id: Identity) -> web::HttpResponse {
 ///     id.remember("User1".to_owned()); // <- remember identity
-///     web::HttpResponse::Ok().finish()
+///     web::HttpResponse::Ok().build()
 /// }
 ///
 /// fn logout(id: Identity) -> web::HttpResponse {
 ///     id.forget(); // <- remove identity
-///     web::HttpResponse::Ok().finish()
+///     web::HttpResponse::Ok().build()
 /// }
 /// # fn main() {}
 /// ```
@@ -215,10 +215,10 @@ impl<T> IdentityService<T> {
     }
 }
 
-impl<S, St, C, T> Middleware<S, St, C> for IdentityService<T> {
+impl<S, St, T> Middleware<S, St> for IdentityService<T> {
     type Service = IdentityServiceMiddleware<S, T>;
 
-    fn create(&self, service: S, _: &C) -> Self::Service {
+    fn create(&self, _: &St, service: S) -> Self::Service {
         IdentityServiceMiddleware {
             service,
             backend: self.backend.clone(),
@@ -246,6 +246,7 @@ where
     S: Service<St, WebRequest, Res = WebResponse> + 'static,
     St: AppState,
     T: IdentityPolicy,
+    T::Error: WebResponseError<St>,
     St::Error: From<S::Error>,
     St::Error: From<T::Error>,
 {
@@ -272,7 +273,7 @@ where
                 if let Some(id) = id {
                     match self.backend.to_response(id.id, id.changed, &mut res).await {
                         Ok(_) => Ok(res),
-                        Err(e) => Ok(WebResponse::error_response::<Err, _>(res, e)),
+                        Err(e) => Ok(WebResponse::error_response(res, e)),
                     }
                 } else {
                     Ok(res)
@@ -373,7 +374,7 @@ impl CookieIdentityInner {
         Ok(())
     }
 
-    fn load<Err>(&self, req: &WebRequest) -> Option<CookieValue> {
+    fn load(&self, req: &WebRequest) -> Option<CookieValue> {
         let cookie = req.cookie(&self.name)?;
         let mut jar = CookieJar::new();
         jar.add_original(cookie.clone());
@@ -446,10 +447,12 @@ impl CookieIdentityInner {
 /// ```
 pub struct CookieIdentityPolicy(Rc<CookieIdentityInner>);
 
-#[derive(Debug, Display, From)]
+#[derive(Debug, thiserror::Error)]
 pub enum CookieIdentityPolicyError {
-    Http(HttpError),
-    Json(serde_json::error::Error),
+    #[error("Http error {0}")]
+    Http(#[from] HttpError),
+    #[error("Json error {0}")]
+    Json(#[from] serde_json::error::Error),
 }
 
 impl WebResponseError<WebError> for CookieIdentityPolicyError {}
