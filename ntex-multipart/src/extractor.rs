@@ -1,17 +1,18 @@
 //! Multipart payload support
-
-use crate::multipart::Multipart;
-use ntex::http::Payload;
-use ntex::web::{ErrorRenderer, FromRequest, HttpRequest};
 use std::convert::Infallible;
+
+use futures::TryStreamExt;
+use ntex::web::{AppState, FromRequest, HttpRequest, WebResponseError};
+use ntex::{http::Payload, util::HashMap};
+
 #[cfg(feature = "form")]
 use {
     crate::form::{Limits, State},
     crate::multipart_form::MultipartFormConfig,
     crate::{MultipartCollect, MultipartError, MultipartForm},
-    futures::TryStreamExt,
-    std::collections::HashMap,
 };
+
+use crate::multipart::Multipart;
 
 /// Get request's payload as multipart stream
 ///
@@ -21,10 +22,10 @@ use {
 ///
 /// ```rust
 /// use futures::{Stream, StreamExt};
-/// use ntex::web::{self, HttpResponse, Error};
+/// use ntex::web::{self, HttpResponse};
 /// use ntex_multipart as mp;
 ///
-/// async fn index(mut payload: mp::Multipart) -> Result<HttpResponse, Error> {
+/// async fn index(mut payload: mp::Multipart) -> Result<HttpResponse, mp::MultipartError> {
 ///     // iterate over multipart stream
 ///     while let Some(item) = payload.next().await {
 ///            let mut field = item?;
@@ -38,14 +39,12 @@ use {
 /// }
 /// # fn main() {}
 /// ```
-impl<Err> FromRequest<Err> for Multipart
-where
-    Err: ErrorRenderer,
-{
+impl<St> FromRequest<St> for Multipart {
     type Error = Infallible;
 
     #[inline]
     async fn from_request(
+        _: &St,
         req: &HttpRequest,
         payload: &mut Payload,
     ) -> Result<Self, Self::Error> {
@@ -54,15 +53,17 @@ where
 }
 
 #[cfg(feature = "form")]
-impl<T, Err> FromRequest<Err> for MultipartForm<T>
+impl<T, St> FromRequest<St> for MultipartForm<T>
 where
     T: MultipartCollect + 'static,
-    Err: ErrorRenderer,
+    St: AppState,
+    MultipartError: WebResponseError<St, St::Error>,
 {
     type Error = MultipartError;
 
     #[inline]
     async fn from_request(
+        _: &St,
         req: &HttpRequest,
         payload: &mut Payload,
     ) -> Result<Self, Self::Error> {
@@ -83,7 +84,7 @@ where
         let mut state = State::default();
 
         // ensure limits are shared for all fields with this name
-        let mut field_limits = HashMap::<String, Option<usize>>::new();
+        let mut field_limits = HashMap::<String, Option<usize>>::default();
 
         while let Some(field) = multipart.try_next().await? {
             debug_assert!(

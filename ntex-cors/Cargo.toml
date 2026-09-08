@@ -1,6 +1,6 @@
 [package]
 name = "ntex-cors"
-version = "3.2.1"
+version = "4.0.0-beta.4"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Cross-origin resource sharing (CORS) for ntex applications."
 readme = "README.md"
@@ -10,16 +10,17 @@ repository = "https://github.com/ntex-rs/ntex-extras.git"
 documentation = "https://docs.rs/ntex-cors/"
 license = "MIT OR Apache-2.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [lib]
 name = "ntex_cors"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "3.2.0"
-derive_more = { version = "2", features = ["from", "display"] }
-futures = "0.3"
+ntex = { workspace = true }
+derive_more = { workspace = true, features = ["from", "display"] }
+futures = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-ntex = { version = "3.2", features=["neon"] }
+ntex = { workspace = true, features=["neon"] }

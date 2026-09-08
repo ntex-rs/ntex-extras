@@ -13,10 +13,11 @@
 //! extractor allows us to get or set session data.
 //!
 //! ```rust,no_run
-//! use ntex::web::{self, App, HttpResponse, Error};
+//! use ntex::web::{self, App, HttpResponse, WebError};
 //! use ntex_session::{Session, CookieSession};
+//! use serde_json::error::Error as JsonError;
 //!
-//! fn index(session: Session) -> Result<&'static str, Error> {
+//! fn index(session: Session) -> Result<&'static str, JsonError> {
 //!     // access session data
 //!     if let Some(count) = session.get::<i32>("counter")? {
 //!         println!("SESSION value: {}", count);
@@ -31,26 +32,24 @@
 //! #[ntex::main]
 //! async fn main() -> std::io::Result<()> {
 //!     web::server(
-//!         async || App::new().middleware(
+//!         async |_| App::new().middleware(
 //!               CookieSession::signed(&[0; 32]) // <- create cookie based session middleware
 //!                     .secure(false)
 //!              )
 //!             .service(web::resource("/").to(|| async { HttpResponse::Ok() })))
-//!         .bind("127.0.0.1:59880")?
+//!         .bind("127.0.0.1:59880", ntex::SharedCfg::default())?
 //!         .run()
 //!         .await
 //! }
 //! ```
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::convert::Infallible;
-use std::rc::Rc;
+use std::{cell::RefCell, convert::Infallible, rc::Rc};
 
 use ntex::http::{Payload, RequestHead};
-use ntex::util::Extensions;
-use ntex::web::{Error, FromRequest, HttpRequest, WebRequest, WebResponse};
+use ntex::util::{Extensions, HashMap};
+use ntex::web::{FromRequest, HttpRequest, WebRequest, WebResponse};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::error::Error as JsonError;
 
 #[cfg(feature = "cookie-session")]
 mod cookie;
@@ -66,8 +65,9 @@ pub use crate::cookie::CookieSession;
 /// ```rust
 /// use ntex_session::Session;
 /// use ntex::web::*;
+/// use serde_json::error::Error as JsonError;
 ///
-/// fn index(session: Session) -> Result<&'static str, Error> {
+/// fn index(session: Session) -> Result<&'static str, JsonError> {
 ///     // access session data
 ///     if let Some(count) = session.get::<i32>("counter")? {
 ///         session.set("counter", count + 1)?;
@@ -92,7 +92,7 @@ impl UserSession for HttpRequest {
     }
 }
 
-impl<Err> UserSession for WebRequest<Err> {
+impl UserSession for WebRequest {
     fn get_session(&self) -> Session {
         Session::get_session(&mut self.extensions_mut())
     }
@@ -127,7 +127,7 @@ struct SessionInner {
 
 impl Session {
     /// Get a `value` from the session.
-    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, Error> {
+    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, JsonError> {
         if let Some(s) = self.0.borrow().state.get(key) {
             Ok(Some(serde_json::from_str(s)?))
         } else {
@@ -136,11 +136,13 @@ impl Session {
     }
 
     /// Set a `value` from the session.
-    pub fn set<T: Serialize>(&self, key: &str, value: T) -> Result<(), Error> {
+    pub fn set<T: Serialize>(&self, key: &str, value: T) -> Result<(), JsonError> {
         let mut inner = self.0.borrow_mut();
         if inner.status != SessionStatus::Purged {
             inner.status = SessionStatus::Changed;
-            inner.state.insert(key.to_owned(), serde_json::to_string(&value)?);
+            inner
+                .state
+                .insert(key.to_owned(), serde_json::to_string(&value)?);
         }
         Ok(())
     }
@@ -178,10 +180,7 @@ impl Session {
         }
     }
 
-    pub fn set_session<Err>(
-        data: impl Iterator<Item = (String, String)>,
-        req: &WebRequest<Err>,
-    ) {
+    pub fn set_session(data: impl Iterator<Item = (String, String)>, req: &WebRequest) {
         let session = Session::get_session(&mut req.extensions_mut());
         let mut inner = session.0.borrow_mut();
         inner.state.extend(data);
@@ -189,8 +188,15 @@ impl Session {
 
     pub fn get_changes(
         res: &mut WebResponse,
-    ) -> (SessionStatus, Option<impl Iterator<Item = (String, String)> + use<>>) {
-        if let Some(s_impl) = res.request().extensions().get::<Rc<RefCell<SessionInner>>>() {
+    ) -> (
+        SessionStatus,
+        Option<impl Iterator<Item = (String, String)> + use<>>,
+    ) {
+        if let Some(s_impl) = res
+            .request()
+            .extensions()
+            .get::<Rc<RefCell<SessionInner>>>()
+        {
             let state = std::mem::take(&mut s_impl.borrow_mut().state);
             (s_impl.borrow().status.clone(), Some(state.into_iter()))
         } else {
@@ -212,8 +218,9 @@ impl Session {
 ///
 /// ```rust
 /// use ntex_session::Session;
+/// use serde_json::error::Error as JsonError;
 ///
-/// fn index(session: Session) -> Result<&'static str, ntex::web::Error> {
+/// fn index(session: Session) -> Result<&'static str, JsonError> {
 ///     // access session data
 ///     if let Some(count) = session.get::<i32>("counter")? {
 ///         session.set("counter", count + 1)?;
@@ -225,11 +232,15 @@ impl Session {
 /// }
 /// # fn main() {}
 /// ```
-impl<Err> FromRequest<Err> for Session {
+impl<St> FromRequest<St> for Session {
     type Error = Infallible;
 
     #[inline]
-    async fn from_request(req: &HttpRequest, _: &mut Payload) -> Result<Session, Infallible> {
+    async fn from_request(
+        _: &St,
+        req: &HttpRequest,
+        _: &mut Payload,
+    ) -> Result<Session, Infallible> {
         Ok(Session::get_session(&mut req.extensions_mut()))
     }
 }
@@ -255,7 +266,7 @@ mod tests {
         session.set("key2", "value2".to_string()).unwrap();
         session.remove("key");
 
-        let mut res = req.into_response(HttpResponse::Ok().finish());
+        let mut res = req.into_response(HttpResponse::Ok().build());
         let (_status, state) = Session::get_changes(&mut res);
         let changes: Vec<_> = state.unwrap().collect();
         assert_eq!(changes, [("key2".to_string(), "\"value2\"".to_string())]);

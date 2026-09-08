@@ -9,11 +9,6 @@ members = [
 ]
 resolver = "3"
 
-[workspace.package]
-license = "MIT OR Apache-2.0"
-edition = "2024"
-rust-version = "1.88"
-
 [patch.crates-io]
 ntex-cors = { path = "ntex-cors" }
 ntex-files = { path = "ntex-files" }
@@ -21,3 +16,38 @@ ntex-identity = { path = "ntex-identity" }
 ntex-multipart = { path = "ntex-multipart" }
 ntex-multipart-derive = { path = "ntex-multipart-derive" }
 ntex-session = { path = "ntex-session" }
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
+edition = "2024"
+rust-version = "1.95"
+
+[workspace.dependencies]
+ntex = "4.0.0-beta.9"
+ntex-http = "1"
+ntex-files = "4.0.0-beta.0"
+ntex-multipart-derive = "3.0.0"
+
+bitflags = "2"
+cookie = "0.18"
+derive_more = { version = "2.0.1", features = ["from", "display"] }
+futures = "0.3.34"
+futures-test = "0.3.34"
+http = "1"
+httpdate = "1.0"
+httparse = "1.10"
+language-tags = "0.3"
+log = "0.4"
+mime = "0.3"
+mime_guess = "2.0"
+percent-encoding = "2.1"
+regex = "1.12.3"
+serde = "1"
+serde_json = "1"
+serde_plain = "1"
+twoway = "0.2"
+tempfile = "3.4"
+thiserror = "2"
+time = { version = "0.3.54", default-features = false, features = ["std"] }
+v_htmlescape = "0.15"
+unicase = "2.6"

@@ -1,10 +1,9 @@
 //! Writes a field to a temporary file on disk.
 use std::{io, io::Write, path::Path, path::PathBuf};
 
-use derive_more::Display;
 use futures::TryStreamExt;
 use mime::Mime;
-use ntex::web::{DefaultError, HttpRequest, WebResponseError};
+use ntex::web::{DefaultError, HttpRequest, HttpResponse, WebResponseError};
 use ntex::{http::StatusCode, rt::spawn_blocking};
 use tempfile::NamedTempFile;
 
@@ -27,7 +26,8 @@ pub struct TempFile {
 }
 
 impl FieldReader for TempFile {
-    async fn read_field(
+    async fn read_field<St>(
+        st: &St,
         req: &HttpRequest,
         mut field: Field,
         limits: &mut Limits,
@@ -35,16 +35,18 @@ impl FieldReader for TempFile {
         let config = req.app_state::<TempFileConfig>().unwrap_or(&DEFAULT_CONFIG);
         let mut size = 0;
 
-        let file = config.create_tempfile().map_err(|err| MultipartError::Field {
-            name: field.form_field_name.to_owned(),
-            source: TempFileError::FileIo(err).into(),
-        })?;
+        let file = config
+            .create_tempfile()
+            .map_err(|err| MultipartError::Field {
+                name: field.form_field_name.to_owned(),
+                source: TempFileError::FileIo(err).error_response(st),
+            })?;
 
         let (file, mut f) = spawn_blocking(move || file.reopen().map(move |f| (file, f)))
             .await?
             .map_err(|err| MultipartError::Field {
                 name: field.form_field_name.to_owned(),
-                source: TempFileError::FileIo(err).into(),
+                source: TempFileError::FileIo(err).error_response(st),
             })?;
 
         while let Some(chunk) = field.try_next().await? {
@@ -54,14 +56,16 @@ impl FieldReader for TempFile {
                 .await?
                 .map_err(|err| MultipartError::Field {
                     name: field.form_field_name.to_owned(),
-                    source: TempFileError::FileIo(err).into(),
+                    source: TempFileError::FileIo(err).error_response(st),
                 })?;
         }
 
-        spawn_blocking(move || f.flush()).await?.map_err(|err| MultipartError::Field {
-            name: field.form_field_name.to_owned(),
-            source: TempFileError::FileIo(err).into(),
-        })?;
+        spawn_blocking(move || f.flush())
+            .await?
+            .map_err(|err| MultipartError::Field {
+                name: field.form_field_name.to_owned(),
+                source: TempFileError::FileIo(err).error_response(st),
+            })?;
 
         Ok(TempFile {
             file,
@@ -76,18 +80,18 @@ impl FieldReader for TempFile {
     }
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TempFileError {
     /// File I/O Error
-    #[display("File I/O error: {}", _0)]
+    #[error("File I/O error: {}", _0)]
     FileIo(io::Error),
 }
 
 /// Return `BadRequest` for `TempFileError`
-impl WebResponseError<DefaultError> for TempFileError {
-    fn status_code(&self) -> StatusCode {
-        StatusCode::INTERNAL_SERVER_ERROR
+impl<St> WebResponseError<St, DefaultError> for TempFileError {
+    fn error_response(&mut self, _: &St) -> HttpResponse {
+        HttpResponse::render_with(StatusCode::INTERNAL_SERVER_ERROR, self)
     }
 }
 

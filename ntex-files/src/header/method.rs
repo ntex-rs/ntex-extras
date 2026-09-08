@@ -71,7 +71,11 @@ impl Method {
     /// See [the spec](https://tools.ietf.org/html/rfc7231#section-4.2.2) for
     /// more words.
     pub fn idempotent(&self) -> bool {
-        if self.safe() { true } else { matches!(*self, Put | Delete) }
+        if self.safe() {
+            true
+        } else {
+            matches!(*self, Put | Delete)
+        }
     }
 }
 
@@ -150,7 +154,10 @@ impl From<http::Method> for Method {
             http::Method::CONNECT => Method::Connect,
             http::Method::PATCH => Method::Patch,
             http::Method::TRACE => Method::Trace,
-            _ => method.as_ref().parse().expect("attempted to convert invalid method"),
+            _ => method
+                .as_ref()
+                .parse()
+                .expect("attempted to convert invalid method"),
         }
     }
 }
@@ -199,7 +206,10 @@ mod tests {
     #[test]
     fn test_from_str() {
         assert_eq!(Get, FromStr::from_str("GET").unwrap());
-        assert_eq!(Extension("MOVE".to_owned()), FromStr::from_str("MOVE").unwrap());
+        assert_eq!(
+            Extension("MOVE".to_owned()),
+            FromStr::from_str("MOVE").unwrap()
+        );
         let x: Result<Method, _> = FromStr::from_str("");
         if let Err(Error::Method) = x {
         } else {
@@ -210,7 +220,10 @@ mod tests {
     #[test]
     fn test_fmt() {
         assert_eq!("GET".to_owned(), format!("{}", Get));
-        assert_eq!("MOVE".to_owned(), format!("{}", Extension("MOVE".to_owned())));
+        assert_eq!(
+            "MOVE".to_owned(),
+            format!("{}", Extension("MOVE".to_owned()))
+        );
     }
 
     #[test]

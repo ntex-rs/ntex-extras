@@ -9,23 +9,19 @@
 //! Static files support
 use std::fs::{DirEntry, File};
 use std::path::{Path, PathBuf};
-use std::{
-    cmp, fmt::Write, io, io::Read, io::Seek, pin::Pin, rc::Rc, task::Context, task::Poll,
-};
+use std::{cmp, fmt::Write, io, io::Read, io::Seek, pin::Pin, rc::Rc, task::Context, task::Poll};
 
-use futures::future::{FutureExt, LocalBoxFuture};
-use futures::{Future, Stream};
+use futures::{Future, Stream, future::FutureExt, future::LocalBoxFuture};
 use mime_guess::from_ext;
-use ntex::http::error::BlockingError;
-use ntex::http::{Method, Payload, Uri};
+use ntex::error::{Failure, IntoFailure};
+use ntex::http::{Method, Payload, Uri, error::BlockingError};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
-use ntex::service::{IntoServiceFactory, Service, ServiceCtx, ServiceFactory};
 use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
-use ntex::web::error::ErrorRenderer;
+use ntex::web::error::{WebError, WebResponseError};
 use ntex::web::guard::Guard;
-use ntex::web::{self, FromRequest, HttpRequest, HttpResponse, WebRequest, WebResponse};
-use ntex::{SharedCfg, util::Bytes};
+use ntex::web::{self, AppState, FromRequest, HttpRequest, HttpResponse, WebRequest, WebResponse};
+use ntex::{Ctx, IntoServiceFactory, Service, ServiceFactory, util::Bytes};
 use percent_encoding::{CONTROLS, utf8_percent_encode};
 use v_htmlescape::escape as escape_html_entity;
 
@@ -35,12 +31,11 @@ mod named;
 mod range;
 
 use self::error::{FilesError, UriSegmentError};
-pub use crate::named::NamedFile;
-pub use crate::range::HttpRange;
+pub use crate::{named::NamedFile, range::HttpRange};
 
-type HttpService<Err: ErrorRenderer> = BoxService<WebRequest<Err>, WebResponse, Err::Container>;
-type HttpServiceFactory<Err: ErrorRenderer> =
-    BoxServiceFactory<SharedCfg, WebRequest<Err>, WebResponse, Err::Container, ()>;
+type HttpService<St: AppState> = BoxService<St, WebRequest, WebResponse, WebError<St, St::Error>>;
+type HttpServiceFactory<St: AppState> =
+    BoxServiceFactory<St, WebRequest, WebResponse, WebError<St, St::Error>, Failure>;
 
 /// Return the MIME type associated with a filename extension (case-insensitive).
 /// If `ext` is empty or no associated type for the extension was found, returns
@@ -95,8 +90,7 @@ impl Stream for ChunkedReadFile {
             let mut file = self.file.take().expect("Use after completion");
             self.fut = Some(
                 web::block(move || {
-                    let max_bytes: usize =
-                        cmp::min(size.saturating_sub(counter), 65_536) as usize;
+                    let max_bytes: usize = cmp::min(size.saturating_sub(counter), 65_536) as usize;
                     let mut buf = Vec::with_capacity(max_bytes);
                     file.seek(io::SeekFrom::Start(offset))?;
                     let nbytes = file.by_ref().take(max_bytes as u64).read_to_end(&mut buf)?;
@@ -207,7 +201,9 @@ fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<WebResponse, 
         index_of, index_of, body
     );
     Ok(WebResponse::new(
-        HttpResponse::Ok().content_type("text/html; charset=utf-8").body(html),
+        HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .body(html),
         req.clone(),
     ))
 }
@@ -225,20 +221,20 @@ type MimeOverride = dyn Fn(&mime::Name) -> header::DispositionType;
 /// let app = App::new()
 ///    .service(fs::Files::new("/static", "."));
 /// ```
-pub struct Files<Err: ErrorRenderer> {
+pub struct Files<St: AppState> {
     path: String,
     directory: PathBuf,
     index: Option<String>,
     show_index: bool,
     redirect_to_slash: bool,
-    default: Option<Rc<HttpServiceFactory<Err>>>,
+    default: Option<HttpServiceFactory<St>>,
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
     guards: Option<Rc<dyn Guard>>,
 }
 
-impl<Err: ErrorRenderer> Clone for Files<Err> {
+impl<St: AppState> Clone for Files<St> {
     fn clone(&self) -> Self {
         Self {
             directory: self.directory.clone(),
@@ -255,7 +251,7 @@ impl<Err: ErrorRenderer> Clone for Files<Err> {
     }
 }
 
-impl<Err: ErrorRenderer> Files<Err> {
+impl<St: AppState> Files<St> {
     /// Create new `Files` instance for specified base directory.
     ///
     /// `File` uses `ThreadPool` for blocking filesystem operations.
@@ -368,27 +364,27 @@ impl<Err: ErrorRenderer> Files<Err> {
     /// Sets default handler which is used when no matched file could be found.
     pub fn default_handler<F, U>(mut self, f: F) -> Self
     where
-        F: IntoServiceFactory<U, WebRequest<Err>, SharedCfg>,
-        U: ServiceFactory<
-                WebRequest<Err>,
-                SharedCfg,
-                Response = WebResponse,
-                Error = Err::Container,
-            > + 'static,
+        F: IntoServiceFactory<U, St, WebRequest>,
+        U: ServiceFactory<St, WebRequest, Res = WebResponse> + 'static,
+        U::Error: WebResponseError<St, St::Error>,
+        U::InitError: IntoFailure,
     {
         // create and configure default resource
-        self.default = Some(Rc::new(boxed::factory(f.into_factory().map_init_err(|_| ()))));
+        self.default = Some(boxed::factory(
+            f.into_factory()
+                .map_err(WebError::from_err)
+                .map_init_err(IntoFailure::fail),
+        ));
 
         self
     }
 }
 
-impl<Err> WebServiceFactory<Err> for Files<Err>
+impl<St: AppState> WebServiceFactory<St> for Files<St>
 where
-    Err: ErrorRenderer,
-    Err::Container: From<FilesError>,
+    FilesError: WebResponseError<St, St::Error>,
 {
-    fn register(mut self, config: &mut WebServiceConfig<Err>) {
+    fn register(mut self, config: &mut WebServiceConfig<St>) {
         if self.default.is_none() {
             self.default = Some(config.default_service());
         }
@@ -397,21 +393,21 @@ where
         } else {
             ResourceDef::prefix(&self.path)
         };
-        config.register_service(rdef, None, self, None)
+        config.register_service(rdef, self, None, None)
     }
 }
 
-impl<Err> ServiceFactory<WebRequest<Err>, SharedCfg> for Files<Err>
+impl<St: AppState> ServiceFactory<St, WebRequest> for Files<St>
 where
-    Err: ErrorRenderer,
-    Err::Container: From<FilesError>,
+    FilesError: WebResponseError<St, St::Error>,
 {
-    type Response = WebResponse;
-    type Error = Err::Container;
-    type Service = FilesService<Err>;
-    type InitError = ();
+    type Res = WebResponse;
+    type Error = WebError<St, St::Error>;
 
-    async fn create(&self, cfg: SharedCfg) -> Result<Self::Service, Self::InitError> {
+    type Service = FilesService<St>;
+    type InitError = Failure;
+
+    async fn create(&self, cfg: &St) -> Result<Self::Service, Self::InitError> {
         let mut srv = FilesService {
             directory: self.directory.clone(),
             index: self.index.clone(),
@@ -432,7 +428,7 @@ where
                         srv.default = Some(default);
                         Ok(srv)
                     }
-                    Err(_) => Err(()),
+                    Err(e) => Err(e),
                 })
                 .await
         } else {
@@ -441,50 +437,49 @@ where
     }
 }
 
-pub struct FilesService<Err: ErrorRenderer> {
+pub struct FilesService<St: AppState> {
     directory: PathBuf,
     index: Option<String>,
     show_index: bool,
     redirect_to_slash: bool,
-    default: Option<HttpService<Err>>,
+    default: Option<HttpService<St>>,
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
     guards: Option<Rc<dyn Guard>>,
 }
 
-impl<Err: ErrorRenderer> FilesService<Err>
+impl<St: AppState> FilesService<St>
 where
-    Err::Container: From<FilesError>,
+    FilesError: WebResponseError<St, St::Error>,
 {
     async fn handle_io_error(
         &self,
         e: io::Error,
-        req: WebRequest<Err>,
-        ctx: ServiceCtx<'_, Self>,
-    ) -> Result<WebResponse, Err::Container> {
+        req: WebRequest,
+        ctx: Ctx<'_, Self, St>,
+    ) -> Result<WebResponse, WebError<St, St::Error>> {
         log::debug!("Files: Failed to handle {}: {}", req.path(), e);
         if let Some(ref default) = self.default {
-            ctx.call(default, req).await
+            Ok(ctx.call(default, req).await?)
         } else {
-            Ok(req.error_response(FilesError::from(e)))
+            Ok(req.error_response(ctx.st(), FilesError::from(e)))
         }
     }
 }
 
-impl<Err> Service<WebRequest<Err>> for FilesService<Err>
+impl<St: AppState> Service<St, WebRequest> for FilesService<St>
 where
-    Err: ErrorRenderer,
-    Err::Container: From<FilesError>,
+    FilesError: WebResponseError<St, St::Error>,
 {
-    type Response = WebResponse;
-    type Error = Err::Container;
+    type Res = WebResponse;
+    type Error = WebError<St, St::Error>;
 
     async fn call(
         &self,
-        req: WebRequest<Err>,
-        ctx: ServiceCtx<'_, Self>,
-    ) -> Result<Self::Response, Self::Error> {
+        req: WebRequest,
+        ctx: Ctx<'_, Self, St>,
+    ) -> Result<Self::Res, Self::Error> {
         let is_method_valid = if let Some(guard) = &self.guards {
             // execute user defined guards
             (**guard).check(req.head())
@@ -494,12 +489,12 @@ where
         };
 
         if !is_method_valid {
-            return Ok(req.error_response(FilesError::MethodNotAllowed));
+            return Ok(req.error_response(ctx.st(), FilesError::MethodNotAllowed));
         }
 
         let real_path = match PathBufWrp::get_pathbuf(req.match_info().path()) {
             Ok(item) => item,
-            Err(e) => return Ok(req.error_response(FilesError::from(e))),
+            Err(e) => return Ok(req.error_response(ctx.st(), FilesError::from(e))),
         };
 
         // full filepath
@@ -525,8 +520,7 @@ where
                 match NamedFile::open(path) {
                     Ok(mut named_file) => {
                         if let Some(ref mime_override) = self.mime_override {
-                            let new_disposition =
-                                mime_override(&named_file.content_type.type_());
+                            let new_disposition = mime_override(&named_file.content_type.type_());
                             named_file.content_disposition.disposition = new_disposition;
                         }
 
@@ -542,10 +536,14 @@ where
                 let x = (self.renderer)(&dir, &req);
                 match x {
                     Ok(resp) => Ok(resp),
-                    Err(e) => Ok(WebResponse::from_err::<Err, _>(FilesError::from(e), req)),
+                    Err(e) => Ok(WebResponse::from_err(ctx.st(), FilesError::from(e), req)),
                 }
             } else {
-                Ok(WebResponse::from_err::<Err, _>(FilesError::IsDirectory, req.into_parts().0))
+                Ok(WebResponse::from_err(
+                    ctx.st(),
+                    FilesError::IsDirectory,
+                    req.into_parts().0,
+                ))
             }
         } else {
             match NamedFile::open(path) {
@@ -597,26 +595,24 @@ impl PathBufWrp {
     }
 }
 
-impl<Err> FromRequest<Err> for PathBufWrp {
+impl<St> FromRequest<St> for PathBufWrp {
     type Error = UriSegmentError;
 
-    async fn from_request(req: &HttpRequest, _: &mut Payload) -> Result<Self, Self::Error> {
+    async fn from_request(_: &St, req: &HttpRequest, _: &mut Payload) -> Result<Self, Self::Error> {
         PathBufWrp::get_pathbuf(req.match_info().path())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::iter::FromIterator;
-    use std::ops::Add;
-    use std::time::{Duration, SystemTime};
+    use std::convert::Infallible;
+    use std::{fs, iter::FromIterator, ops::Add, time::Duration, time::SystemTime};
+
+    use ntex::http::{self, Method, StatusCode};
+    use ntex::web::test::{self, TestRequest};
+    use ntex::web::{App, guard, middleware::Compress};
 
     use super::*;
-    use ntex::http::{self, Method, StatusCode};
-    use ntex::web::middleware::Compress;
-    use ntex::web::test::{self, TestRequest};
-    use ntex::web::{App, DefaultError, guard};
 
     #[ntex::test]
     async fn test_file_extension_to_mime() {
@@ -669,9 +665,14 @@ mod tests {
 
         let req = TestRequest::default().to_http_request();
         let resp = test::respond_to(file, &req).await;
-        assert_eq!(resp.headers().get(http::header::CONTENT_TYPE).unwrap(), "text/x-toml");
         assert_eq!(
-            resp.headers().get(http::header::CONTENT_DISPOSITION).unwrap(),
+            resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/x-toml"
+        );
+        assert_eq!(
+            resp.headers()
+                .get(http::header::CONTENT_DISPOSITION)
+                .unwrap(),
             "inline; filename=\"Cargo.toml\""
         );
     }
@@ -691,14 +692,22 @@ mod tests {
         let req = TestRequest::default().to_http_request();
         let resp = test::respond_to(file, &req).await;
         assert_eq!(
-            resp.headers().get(http::header::CONTENT_DISPOSITION).unwrap(),
+            resp.headers()
+                .get(http::header::CONTENT_DISPOSITION)
+                .unwrap(),
             "inline; filename=\"Cargo.toml\""
         );
 
-        let file = NamedFile::open("Cargo.toml").unwrap().disable_content_disposition();
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .disable_content_disposition();
         let req = TestRequest::default().to_http_request();
         let resp = test::respond_to(file, &req).await;
-        assert!(resp.headers().get(http::header::CONTENT_DISPOSITION).is_none());
+        assert!(
+            resp.headers()
+                .get(http::header::CONTENT_DISPOSITION)
+                .is_none()
+        );
     }
 
     // #[ntex::test]
@@ -730,7 +739,9 @@ mod tests {
 
     #[ntex::test]
     async fn test_named_file_set_content_type() {
-        let mut file = NamedFile::open("Cargo.toml").unwrap().set_content_type(mime::TEXT_XML);
+        let mut file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_content_type(mime::TEXT_XML);
         {
             file.file();
             let _f: &File = &file;
@@ -741,9 +752,14 @@ mod tests {
 
         let req = TestRequest::default().to_http_request();
         let resp = test::respond_to(file, &req).await;
-        assert_eq!(resp.headers().get(http::header::CONTENT_TYPE).unwrap(), "text/xml");
         assert_eq!(
-            resp.headers().get(http::header::CONTENT_DISPOSITION).unwrap(),
+            resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/xml"
+        );
+        assert_eq!(
+            resp.headers()
+                .get(http::header::CONTENT_DISPOSITION)
+                .unwrap(),
             "inline; filename=\"Cargo.toml\""
         );
     }
@@ -761,9 +777,14 @@ mod tests {
 
         let req = TestRequest::default().to_http_request();
         let resp = test::respond_to(file, &req).await;
-        assert_eq!(resp.headers().get(http::header::CONTENT_TYPE).unwrap(), "image/png");
         assert_eq!(
-            resp.headers().get(http::header::CONTENT_DISPOSITION).unwrap(),
+            resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            resp.headers()
+                .get(http::header::CONTENT_DISPOSITION)
+                .unwrap(),
             "inline; filename=\"test.png\""
         );
     }
@@ -776,7 +797,9 @@ mod tests {
             disposition: DispositionType::Attachment,
             parameters: vec![DispositionParam::Filename(String::from("test.png"))],
         };
-        let mut file = NamedFile::open("tests/test.png").unwrap().set_content_disposition(cd);
+        let mut file = NamedFile::open("tests/test.png")
+            .unwrap()
+            .set_content_disposition(cd);
         {
             file.file();
             let _f: &File = &file;
@@ -787,9 +810,14 @@ mod tests {
 
         let req = TestRequest::default().to_http_request();
         let resp = test::respond_to(file, &req).await;
-        assert_eq!(resp.headers().get(http::header::CONTENT_TYPE).unwrap(), "image/png");
         assert_eq!(
-            resp.headers().get(http::header::CONTENT_DISPOSITION).unwrap(),
+            resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            resp.headers()
+                .get(http::header::CONTENT_DISPOSITION)
+                .unwrap(),
             "attachment; filename=\"test.png\""
         );
     }
@@ -812,15 +840,18 @@ mod tests {
             "application/octet-stream"
         );
         assert_eq!(
-            resp.headers().get(http::header::CONTENT_DISPOSITION).unwrap(),
+            resp.headers()
+                .get(http::header::CONTENT_DISPOSITION)
+                .unwrap(),
             "attachment; filename=\"test.binary\""
         );
     }
 
     #[ntex::test]
     async fn test_named_file_status_code_text() {
-        let mut file =
-            NamedFile::open("Cargo.toml").unwrap().set_status_code(StatusCode::NOT_FOUND);
+        let mut file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_status_code(StatusCode::NOT_FOUND);
         {
             file.file();
             let _f: &File = &file;
@@ -831,9 +862,14 @@ mod tests {
 
         let req = TestRequest::default().to_http_request();
         let resp = test::respond_to(file, &req).await;
-        assert_eq!(resp.headers().get(http::header::CONTENT_TYPE).unwrap(), "text/x-toml");
         assert_eq!(
-            resp.headers().get(http::header::CONTENT_DISPOSITION).unwrap(),
+            resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/x-toml"
+        );
+        assert_eq!(
+            resp.headers()
+                .get(http::header::CONTENT_DISPOSITION)
+                .unwrap(),
             "inline; filename=\"Cargo.toml\""
         );
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -845,9 +881,13 @@ mod tests {
             header::DispositionType::Attachment
         }
 
-        let srv = test::init_service(App::new().service(
-            Files::new("/", ".").mime_override(all_attachment).index_file("Cargo.toml"),
-        ))
+        let srv = test::init_service(
+            App::new().service(
+                Files::new("/", ".")
+                    .mime_override(all_attachment)
+                    .index_file("Cargo.toml"),
+            ),
+        )
         .await;
 
         let request = TestRequest::get().uri("/").to_request();
@@ -858,8 +898,9 @@ mod tests {
             .headers()
             .get(http::header::CONTENT_DISPOSITION)
             .expect("To have CONTENT_DISPOSITION");
-        let content_disposition =
-            content_disposition.to_str().expect("Convert CONTENT_DISPOSITION to str");
+        let content_disposition = content_disposition
+            .to_str()
+            .expect("Convert CONTENT_DISPOSITION to str");
         assert_eq!(content_disposition, "attachment; filename=\"Cargo.toml\"");
     }
 
@@ -902,8 +943,12 @@ mod tests {
             .to_request();
 
         let response = test::call_service(&srv, request).await;
-        let contentrange =
-            response.headers().get(http::header::CONTENT_RANGE).unwrap().to_str().unwrap();
+        let contentrange = response
+            .headers()
+            .get(http::header::CONTENT_RANGE)
+            .unwrap()
+            .to_str()
+            .unwrap();
 
         assert_eq!(contentrange, "bytes 10-20/100");
 
@@ -914,8 +959,12 @@ mod tests {
             .to_request();
         let response = test::call_service(&srv, request).await;
 
-        let contentrange =
-            response.headers().get(http::header::CONTENT_RANGE).unwrap().to_str().unwrap();
+        let contentrange = response
+            .headers()
+            .get(http::header::CONTENT_RANGE)
+            .unwrap()
+            .to_str()
+            .unwrap();
 
         assert_eq!(contentrange, "bytes */100");
     }
@@ -966,7 +1015,9 @@ mod tests {
         // assert_eq!(contentlength, "100");
 
         // chunked
-        let request = TestRequest::get().uri("/t%65st/tests/test.binary").to_request();
+        let request = TestRequest::get()
+            .uri("/t%65st/tests/test.binary")
+            .to_request();
         let response = test::call_service(&srv, request).await;
 
         // with enabled compression
@@ -1011,11 +1062,12 @@ mod tests {
 
     #[ntex::test]
     async fn test_static_files_with_spaces() {
-        let srv = test::init_service(
-            App::new().service(Files::new("/", ".").index_file("Cargo.toml")),
-        )
-        .await;
-        let request = TestRequest::get().uri("/tests/test%20space.binary").to_request();
+        let srv =
+            test::init_service(App::new().service(Files::new("/", ".").index_file("Cargo.toml")))
+                .await;
+        let request = TestRequest::get()
+            .uri("/tests/test%20space.binary")
+            .to_request();
         let response = test::call_service(&srv, request).await;
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -1028,25 +1080,33 @@ mod tests {
     async fn test_files_not_allowed() {
         let srv = test::init_service(App::new().service(Files::new("/", "."))).await;
 
-        let req = TestRequest::default().uri("/Cargo.toml").method(Method::POST).to_request();
+        let req = TestRequest::default()
+            .uri("/Cargo.toml")
+            .method(Method::POST)
+            .to_request();
 
         let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 
         let srv = test::init_service(App::new().service(Files::new("/", "."))).await;
-        let req = TestRequest::default().method(Method::PUT).uri("/Cargo.toml").to_request();
+        let req = TestRequest::default()
+            .method(Method::PUT)
+            .uri("/Cargo.toml")
+            .to_request();
         let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[ntex::test]
     async fn test_files_guards() {
-        let srv = test::init_service(
-            App::new().service(Files::new("/", ".").use_guards(guard::Post())),
-        )
-        .await;
+        let srv =
+            test::init_service(App::new().service(Files::new("/", ".").use_guards(guard::Post())))
+                .await;
 
-        let req = TestRequest::default().uri("/Cargo.toml").method(Method::POST).to_request();
+        let req = TestRequest::default()
+            .uri("/Cargo.toml")
+            .method(Method::POST)
+            .to_request();
 
         let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1090,7 +1150,11 @@ mod tests {
         let res = test::call_service(&srv, request).await;
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
-            res.headers().get(http::header::CONTENT_ENCODING).unwrap().to_str().unwrap(),
+            res.headers()
+                .get(http::header::CONTENT_ENCODING)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "gzip"
         );
     }
@@ -1106,8 +1170,7 @@ mod tests {
     #[ntex::test]
     async fn test_static_files() {
         let srv =
-            test::init_service(App::new().service(Files::new("/", ".").show_files_listing()))
-                .await;
+            test::init_service(App::new().service(Files::new("/", ".").show_files_listing())).await;
         let req = TestRequest::with_uri("/missing").to_request();
 
         let resp = test::call_service(&srv, req).await;
@@ -1120,8 +1183,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         let srv =
-            test::init_service(App::new().service(Files::new("/", ".").show_files_listing()))
-                .await;
+            test::init_service(App::new().service(Files::new("/", ".").show_files_listing())).await;
         let req = TestRequest::with_uri("/tests").to_request();
         let resp = test::call_service(&srv, req).await;
         assert_eq!(
@@ -1145,9 +1207,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         // should redirect if index present
-        let srv = test::init_service(App::new().service(
-            Files::new("/", ".").index_file("test.png").redirect_to_slash_directory(),
-        ))
+        let srv = test::init_service(
+            App::new().service(
+                Files::new("/", ".")
+                    .index_file("test.png")
+                    .redirect_to_slash_directory(),
+            ),
+        )
         .await;
         let req = TestRequest::with_uri("/tests").to_request();
         let resp = test::call_service(&srv, req).await;
@@ -1161,22 +1227,22 @@ mod tests {
 
     #[ntex::test]
     async fn test_static_files_bad_directory() {
-        let _st: Files<DefaultError> = Files::new("/", "missing");
-        let _st: Files<DefaultError> = Files::new("/", "Cargo.toml");
+        let _st: Files<()> = Files::new("/", "missing");
+        let _st: Files<()> = Files::new("/", "Cargo.toml");
     }
 
     #[ntex::test]
     async fn test_default_handler_file_missing() {
         let st = Files::new("/", ".")
-            .default_handler(|req: WebRequest<DefaultError>| async move {
-                Ok(req.into_response(HttpResponse::Ok().body("default content")))
+            .default_handler(|req: WebRequest| async move {
+                Ok::<_, Infallible>(req.into_response(HttpResponse::Ok().body("default content")))
             })
-            .pipeline(SharedCfg::default())
+            .pipeline(())
             .await
             .unwrap();
         let req = TestRequest::with_uri("/missing").to_srv_request();
 
-        let resp = test::call_service(&st, req).await;
+        let resp = st.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = test::read_body(resp).await;
         assert_eq!(bytes, Bytes::from_static(b"default content"));
