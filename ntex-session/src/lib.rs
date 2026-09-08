@@ -15,8 +15,9 @@
 //! ```rust,no_run
 //! use ntex::web::{self, App, HttpResponse, WebError};
 //! use ntex_session::{Session, CookieSession};
+//! use serde_json::error::Error as JsonError;
 //!
-//! fn index(session: Session) -> Result<&'static str, WebError> {
+//! fn index(session: Session) -> Result<&'static str, JsonError> {
 //!     // access session data
 //!     if let Some(count) = session.get::<i32>("counter")? {
 //!         println!("SESSION value: {}", count);
@@ -31,12 +32,12 @@
 //! #[ntex::main]
 //! async fn main() -> std::io::Result<()> {
 //!     web::server(
-//!         async || App::new().middleware(
+//!         async |_| App::new().middleware(
 //!               CookieSession::signed(&[0; 32]) // <- create cookie based session middleware
 //!                     .secure(false)
 //!              )
 //!             .service(web::resource("/").to(|| async { HttpResponse::Ok() })))
-//!         .bind("127.0.0.1:59880")?
+//!         .bind("127.0.0.1:59880", ntex::SharedCfg::default())?
 //!         .run()
 //!         .await
 //! }
@@ -64,8 +65,9 @@ pub use crate::cookie::CookieSession;
 /// ```rust
 /// use ntex_session::Session;
 /// use ntex::web::*;
+/// use serde_json::error::Error as JsonError;
 ///
-/// fn index(session: Session) -> Result<&'static str, WebError> {
+/// fn index(session: Session) -> Result<&'static str, JsonError> {
 ///     // access session data
 ///     if let Some(count) = session.get::<i32>("counter")? {
 ///         session.set("counter", count + 1)?;
@@ -216,8 +218,9 @@ impl Session {
 ///
 /// ```rust
 /// use ntex_session::Session;
+/// use serde_json::error::Error as JsonError;
 ///
-/// fn index(session: Session) -> Result<&'static str, ntex::web::WebError> {
+/// fn index(session: Session) -> Result<&'static str, JsonError> {
 ///     // access session data
 ///     if let Some(count) = session.get::<i32>("counter")? {
 ///         session.set("counter", count + 1)?;

@@ -56,16 +56,17 @@ use ntex::http::{HttpMessage, Payload, error::HttpError};
 use ntex::service::{Ctx, Middleware, Service};
 use ntex::util::Extensions;
 use ntex::web::{
-    AppState, FromRequest, HttpRequest, WebError, WebRequest, WebResponse, WebResponseError,
+    AppState, DefaultError, FromRequest, HttpRequest, WebRequest, WebResponse, WebResponseError,
 };
 
 /// The extractor type to obtain your identity from a request.
 ///
 /// ```rust
+/// use std::convert::Infallible;
 /// use ntex::web;
 /// use ntex_identity::Identity;
 ///
-/// fn index(id: Identity) -> Result<String, web::WebError> {
+/// fn index(id: Identity) -> Result<String, Infallible> {
 ///     // access request identity
 ///     if let Some(id) = id.identity() {
 ///         Ok(format!("Welcome! {}", id))
@@ -251,8 +252,8 @@ where
     S: Service<St, WebRequest, Res = WebResponse> + 'static,
     St: AppState,
     T: IdentityPolicy<St>,
-    T::Error: WebResponseError<St::Error>,
-    S::Error: WebResponseError<St::Error>,
+    T::Error: WebResponseError<St, St::Error>,
+    S::Error: WebResponseError<St, St::Error>,
 {
     type Res = WebResponse;
     type Error = S::Error;
@@ -281,13 +282,13 @@ where
                         .await
                     {
                         Ok(_) => Ok(res),
-                        Err(e) => Ok(WebResponse::error_response::<St, _>(res, e)),
+                        Err(e) => Ok(WebResponse::error_response(res, ctx.st(), e)),
                     }
                 } else {
                     Ok(res)
                 }
             }
-            Err(err) => Ok(req.error_response::<St, _>(err)),
+            Err(err) => Ok(req.error_response(ctx.st(), err)),
         }
     }
 }
@@ -463,7 +464,7 @@ pub enum CookieIdentityPolicyError {
     Json(#[from] serde_json::error::Error),
 }
 
-impl WebResponseError<WebError> for CookieIdentityPolicyError {}
+impl<St> WebResponseError<St, DefaultError> for CookieIdentityPolicyError {}
 
 impl CookieIdentityPolicy {
     /// Construct new `CookieIdentityPolicy` instance.
@@ -651,7 +652,7 @@ mod tests {
 
         let resp = test::call_service(&srv, TestRequest::with_uri("/login").to_request()).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let c = resp.response().cookies().next().unwrap().into_owned();
+        let c = resp.cookies().next().unwrap().into_owned();
 
         let resp = test::call_service(
             &srv,
@@ -695,7 +696,7 @@ mod tests {
         let resp = test::call_service(&srv, TestRequest::with_uri("/login").to_request()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(resp.headers().contains_key(header::SET_COOKIE));
-        let c = resp.response().cookies().next().unwrap().to_owned();
+        let c = resp.cookies().next().unwrap().to_owned();
         assert_eq!(duration, c.max_age().unwrap());
     }
 
@@ -721,7 +722,7 @@ mod tests {
         let resp = test::call_service(&srv, TestRequest::with_uri("/login").to_request()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(resp.headers().contains_key(header::SET_COOKIE));
-        let c = resp.response().cookies().next().unwrap().to_owned();
+        let c = resp.cookies().next().unwrap().to_owned();
         assert_eq!(Duration::seconds(seconds), c.max_age().unwrap());
     }
 
@@ -729,7 +730,7 @@ mod tests {
         F: Fn(CookieIdentityPolicy) -> CookieIdentityPolicy + Sync + Send + Clone + 'static,
     >(
         f: F,
-    ) -> Pipeline<Request, WebResponse, WebError> {
+    ) -> Pipeline<Request, HttpResponse, WebError<(), DefaultError>> {
         test::init_service(
             App::new()
                 .middleware(IdentityService::new(f(CookieIdentityPolicy::new(
@@ -779,13 +780,13 @@ mod tests {
         jar.get(COOKIE_NAME).unwrap().clone()
     }
 
-    async fn assert_logged_in(response: WebResponse, identity: Option<&str>) {
+    async fn assert_logged_in(response: HttpResponse, identity: Option<&str>) {
         let bytes = test::read_body(response).await;
         let resp: Option<String> = serde_json::from_slice(&bytes[..]).unwrap();
         assert_eq!(resp.as_ref().map(|s| s.borrow()), identity);
     }
 
-    fn assert_legacy_login_cookie(response: &mut WebResponse, identity: &str) {
+    fn assert_legacy_login_cookie(response: &mut HttpResponse, identity: &str) {
         let mut cookies = CookieJar::new();
         for cookie in response.headers().get_all(header::SET_COOKIE) {
             cookies.add(Cookie::parse(cookie.to_str().unwrap().to_string()).unwrap());
@@ -809,7 +810,7 @@ mod tests {
     }
 
     fn assert_login_cookie(
-        response: &mut WebResponse,
+        response: &mut HttpResponse,
         identity: &str,
         login_timestamp: LoginTimestampCheck,
         visit_timestamp: VisitTimeStampCheck,
@@ -848,7 +849,7 @@ mod tests {
         }
     }
 
-    fn assert_no_login_cookie(response: &mut WebResponse) {
+    fn assert_no_login_cookie(response: &mut HttpResponse) {
         let mut cookies = CookieJar::new();
         for cookie in response.headers().get_all(header::SET_COOKIE) {
             cookies.add(Cookie::parse(cookie.to_str().unwrap().to_string()).unwrap());

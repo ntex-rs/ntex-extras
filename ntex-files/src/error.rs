@@ -1,5 +1,5 @@
 use ntex::http::StatusCode;
-use ntex::web::{HttpRequest, HttpResponse, error::DefaultError, error::WebResponseError};
+use ntex::web::{HttpResponse, error::DefaultError, error::WebResponseError};
 
 /// Errors which can occur when serving static files.
 #[derive(Debug, thiserror::Error)]
@@ -28,16 +28,13 @@ pub enum FilesError {
 
 /// Return `NotFound` for `FilesError`
 impl<St> WebResponseError<St, DefaultError> for FilesError {
-    fn error_response(&mut self, _: &St, _: &HttpRequest) -> HttpResponse {
+    fn error_response(&mut self, _: &St) -> HttpResponse {
         match self {
-            FilesError::Uri(_) => {
-                WebResponseError::<St, _>::error_response_with_status(self, StatusCode::BAD_REQUEST)
+            FilesError::Uri(_) => HttpResponse::render_with(StatusCode::BAD_REQUEST, self),
+            FilesError::MethodNotAllowed => {
+                HttpResponse::render_with(StatusCode::METHOD_NOT_ALLOWED, self)
             }
-            FilesError::MethodNotAllowed => WebResponseError::<St, _>::error_response_with_status(
-                self,
-                StatusCode::METHOD_NOT_ALLOWED,
-            ),
-            _ => WebResponseError::<St, _>::error_response_with_status(self, StatusCode::NOT_FOUND),
+            _ => HttpResponse::render_with(StatusCode::NOT_FOUND, self),
         }
     }
 }
@@ -57,7 +54,7 @@ pub enum UriSegmentError {
 
 /// Return `BadRequest` for `UriSegmentError`
 impl<St> WebResponseError<St, DefaultError> for UriSegmentError {
-    fn error_response(&mut self, _: &St, _: &HttpRequest) -> HttpResponse {
-        WebResponseError::<St, _>::error_response_with_status(self, StatusCode::BAD_REQUEST)
+    fn error_response(&mut self, _: &St) -> HttpResponse {
+        HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }

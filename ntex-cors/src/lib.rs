@@ -54,9 +54,7 @@ use ntex::http::header::{self, HeaderName, HeaderValue};
 use ntex::http::{HeaderMap, Method, RequestHead, StatusCode, Uri, error::HttpError};
 use ntex::service::{Ctx, Middleware, Service};
 use ntex::util::{ByteString, Either};
-use ntex::web::{
-    AppState, DefaultError, HttpRequest, HttpResponse, WebRequest, WebResponse, WebResponseError,
-};
+use ntex::web::{AppState, DefaultError, HttpResponse, WebRequest, WebResponse, WebResponseError};
 
 /// A set of errors that can occur during processing CORS
 #[derive(Debug, Display, thiserror::Error)]
@@ -91,8 +89,8 @@ pub enum CorsError {
 
 /// DefaultError renderer support
 impl<St> WebResponseError<St, DefaultError> for CorsError {
-    fn error_response(&mut self, _: &St, _: &HttpRequest) -> HttpResponse {
-        WebResponseError::<St, _>::error_response_with_status(self, StatusCode::BAD_REQUEST)
+    fn error_response(&mut self, _: &St) -> HttpResponse {
+        HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }
 
@@ -809,7 +807,7 @@ mod tests {
             .pipeline(());
         let req = TestRequest::with_header("Origin", "https://www.example.com").to_srv_request();
 
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -818,7 +816,7 @@ mod tests {
         let cors = Cors::default().create(&(), test::ok_service()).pipeline(());
         let req = TestRequest::with_header("Origin", "https://www.example.com").to_srv_request();
 
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -849,7 +847,7 @@ mod tests {
         assert!(cors.inner.validate_allowed_headers(req.head()).is_err());
 
         let svc = cors.clone().pipeline(());
-        let resp = test::call_service(&svc, req).await;
+        let resp = svc.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
@@ -870,7 +868,7 @@ mod tests {
             .to_srv_request();
 
         let svc = cors.clone().pipeline(());
-        let resp = test::call_service(&svc, req).await;
+        let resp = svc.call(req).await.unwrap();
         assert_eq!(
             &b"*"[..],
             resp.headers()
@@ -955,7 +953,7 @@ mod tests {
             .method(Method::GET)
             .to_srv_request();
 
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -968,7 +966,7 @@ mod tests {
             .pipeline(());
 
         let req = TestRequest::default().method(Method::GET).to_srv_request();
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert!(
             resp.headers()
                 .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
@@ -978,7 +976,7 @@ mod tests {
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::OPTIONS)
             .to_srv_request();
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert_eq!(
             &b"https://www.example.com"[..],
             resp.headers()
@@ -1007,7 +1005,7 @@ mod tests {
             .method(Method::OPTIONS)
             .to_srv_request();
 
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert_eq!(
             &b"*"[..],
             resp.headers()
@@ -1056,10 +1054,11 @@ mod tests {
                     }),
                 )
                 .pipeline(());
+
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::OPTIONS)
             .to_srv_request();
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert_eq!(
             &b"Accept, Origin"[..],
             resp.headers().get(header::VARY).unwrap().as_bytes()
@@ -1077,7 +1076,7 @@ mod tests {
             .method(Method::OPTIONS)
             .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
             .to_srv_request();
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
 
         let origins_str = resp
             .headers()
@@ -1103,7 +1102,7 @@ mod tests {
             .method(Method::GET)
             .to_srv_request();
 
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert_eq!(
             &b"https://example.com"[..],
             resp.headers()
@@ -1116,7 +1115,7 @@ mod tests {
             .method(Method::GET)
             .to_srv_request();
 
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert_eq!(
             &b"https://example.org"[..],
             resp.headers()
@@ -1141,7 +1140,7 @@ mod tests {
             .method(Method::OPTIONS)
             .to_srv_request();
 
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert_eq!(
             &b"https://example.com"[..],
             resp.headers()
@@ -1155,7 +1154,7 @@ mod tests {
             .method(Method::OPTIONS)
             .to_srv_request();
 
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert_eq!(
             &b"https://example.org"[..],
             resp.headers()
@@ -1177,7 +1176,7 @@ mod tests {
             .method(Method::GET)
             .to_srv_request();
 
-        let resp = test::call_service(&cors, req).await;
+        let resp = cors.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 }

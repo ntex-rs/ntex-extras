@@ -21,7 +21,7 @@ use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
 use ntex::http::{HttpMessage, header::HeaderValue, header::SET_COOKIE};
 use ntex::service::{Ctx, Middleware, Service};
-use ntex::web::{AppState, WebError, WebRequest, WebResponse, WebResponseError};
+use ntex::web::{AppState, DefaultError, WebRequest, WebResponse, WebResponseError};
 use serde_json::error::Error as JsonError;
 use time::{Duration, OffsetDateTime};
 
@@ -38,7 +38,7 @@ pub enum CookieSessionError {
     Serialize(JsonError),
 }
 
-impl WebResponseError<WebError> for CookieSessionError {}
+impl<St> WebResponseError<St, DefaultError> for CookieSessionError {}
 
 enum CookieSecurity {
     Signed,
@@ -308,7 +308,7 @@ impl<S, St: AppState> Service<St, WebRequest> for CookieSessionMiddleware<S>
 where
     S: Service<St, WebRequest, Res = WebResponse>,
     S::Error: 'static,
-    CookieSessionError: WebResponseError<St::Error>,
+    CookieSessionError: WebResponseError<St, St::Error>,
 {
     type Res = WebResponse;
     type Error = S::Error;
@@ -334,17 +334,30 @@ where
         ctx.call(&self.service, req).await.map(|mut res| {
             match Session::get_changes(&mut res) {
                 (SessionStatus::Changed, Some(state)) | (SessionStatus::Renewed, Some(state)) => {
-                    res.checked_expr::<St, _, _>(|res| inner.set_cookie(res, state))
+                    if let Err(e) = inner.set_cookie(&mut res, state) {
+                        res.error_response(ctx.st(), e)
+                    } else {
+                        res
+                    }
                 }
                 (SessionStatus::Unchanged, Some(state)) if prolong_expiration => {
-                    res.checked_expr::<St, _, _>(|res| inner.set_cookie(res, state))
+                    if let Err(e) = inner.set_cookie(&mut res, state) {
+                        res.error_response(ctx.st(), e)
+                    } else {
+                        res
+                    }
                 }
                 (SessionStatus::Unchanged, _) =>
                 // set a new session cookie upon first request (new client)
                 {
                     if is_new {
                         let state: HashMap<String, String> = HashMap::new();
-                        res.checked_expr::<St, _, _>(|res| inner.set_cookie(res, state.into_iter()))
+
+                        if let Err(e) = inner.set_cookie(&mut res, state.into_iter()) {
+                            res.error_response(ctx.st(), e)
+                        } else {
+                            res
+                        }
                     } else {
                         res
                     }
@@ -379,12 +392,7 @@ mod tests {
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(
-            response
-                .response()
-                .cookies()
-                .any(|c| c.name() == "ntex-session")
-        );
+        assert!(response.cookies().any(|c| c.name() == "ntex-session"));
     }
 
     #[ntex::test]
@@ -401,12 +409,7 @@ mod tests {
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(
-            response
-                .response()
-                .cookies()
-                .any(|c| c.name() == "ntex-session")
-        );
+        assert!(response.cookies().any(|c| c.name() == "ntex-session"));
     }
 
     #[ntex::test]
@@ -423,12 +426,7 @@ mod tests {
 
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
-        assert!(
-            response
-                .response()
-                .cookies()
-                .any(|c| c.name() == "ntex-session")
-        );
+        assert!(response.cookies().any(|c| c.name() == "ntex-session"));
     }
 
     #[ntex::test]
@@ -458,7 +456,6 @@ mod tests {
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
         let cookie = response
-            .response()
             .cookies()
             .find(|c| c.name() == "ntex-test")
             .unwrap()
@@ -488,7 +485,6 @@ mod tests {
         let request = test::TestRequest::get().to_request();
         let response = app.call(request).await.unwrap();
         let expires_1 = response
-            .response()
             .cookies()
             .find(|c| c.name() == "ntex-session")
             .expect("Cookie is set")
@@ -500,7 +496,6 @@ mod tests {
         let request = test::TestRequest::with_uri("/test/").to_request();
         let response = app.call(request).await.unwrap();
         let expires_2 = response
-            .response()
             .cookies()
             .find(|c| c.name() == "ntex-session")
             .expect("Cookie is set")

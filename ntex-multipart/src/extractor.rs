@@ -1,16 +1,15 @@
 //! Multipart payload support
 use std::convert::Infallible;
 
-use ntex::http::Payload;
-use ntex::web::{FromRequest, HttpRequest};
+use futures::TryStreamExt;
+use ntex::web::{AppState, FromRequest, HttpRequest, WebResponseError};
+use ntex::{http::Payload, util::HashMap};
 
 #[cfg(feature = "form")]
 use {
     crate::form::{Limits, State},
     crate::multipart_form::MultipartFormConfig,
     crate::{MultipartCollect, MultipartError, MultipartForm},
-    futures::TryStreamExt,
-    std::collections::HashMap,
 };
 
 use crate::multipart::Multipart;
@@ -23,10 +22,10 @@ use crate::multipart::Multipart;
 ///
 /// ```rust
 /// use futures::{Stream, StreamExt};
-/// use ntex::web::{self, HttpResponse, Error};
+/// use ntex::web::{self, HttpResponse};
 /// use ntex_multipart as mp;
 ///
-/// async fn index(mut payload: mp::Multipart) -> Result<HttpResponse, Error> {
+/// async fn index(mut payload: mp::Multipart) -> Result<HttpResponse, mp::MultipartError> {
 ///     // iterate over multipart stream
 ///     while let Some(item) = payload.next().await {
 ///            let mut field = item?;
@@ -57,7 +56,8 @@ impl<St> FromRequest<St> for Multipart {
 impl<T, St> FromRequest<St> for MultipartForm<T>
 where
     T: MultipartCollect + 'static,
-    MultipartError: ErrorRenderer<St>,
+    St: AppState,
+    MultipartError: WebResponseError<St, St::Error>,
 {
     type Error = MultipartError;
 
@@ -84,7 +84,7 @@ where
         let mut state = State::default();
 
         // ensure limits are shared for all fields with this name
-        let mut field_limits = HashMap::<String, Option<usize>>::new();
+        let mut field_limits = HashMap::<String, Option<usize>>::default();
 
         while let Some(field) = multipart.try_next().await? {
             debug_assert!(

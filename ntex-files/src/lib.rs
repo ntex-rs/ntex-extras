@@ -605,6 +605,7 @@ impl<St> FromRequest<St> for PathBufWrp {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::{fs, iter::FromIterator, ops::Add, time::Duration, time::SystemTime};
 
     use ntex::http::{self, Method, StatusCode};
@@ -1234,14 +1235,14 @@ mod tests {
     async fn test_default_handler_file_missing() {
         let st = Files::new("/", ".")
             .default_handler(|req: WebRequest| async move {
-                Ok(req.into_response(HttpResponse::Ok().body("default content")))
+                Ok::<_, Infallible>(req.into_response(HttpResponse::Ok().body("default content")))
             })
             .pipeline(())
             .await
             .unwrap();
         let req = TestRequest::with_uri("/missing").to_srv_request();
 
-        let resp = test::call_service(&st, req).await;
+        let resp = st.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = test::read_body(resp).await;
         assert_eq!(bytes, Bytes::from_static(b"default content"));
