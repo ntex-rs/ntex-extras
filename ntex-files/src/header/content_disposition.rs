@@ -428,12 +428,7 @@ impl fmt::Display for DispositionParam {
             }
 
             DispositionParam::Unknown(name, value) => {
-                write!(
-                    f,
-                    "{}=\"{}\"",
-                    name,
-                    &RE.replace_all(value, "\\$0").as_ref()
-                )
+                write!(f, "{}=\"{}\"", name, RE.replace_all(value, "\\$0").as_ref())
             }
 
             DispositionParam::FilenameExt(ext_value) => {

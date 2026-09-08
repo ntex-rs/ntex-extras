@@ -2,7 +2,7 @@
 use derive_more::{Display, Error, From};
 use ntex::http::{StatusCode, error::DecodeError, error::PayloadError};
 use ntex::rt::BlockingError;
-use ntex::web::error::{WebError, WebResponseError};
+use ntex::web::error::{DefaultError, WebResponseError};
 use ntex::web::{HttpRequest, HttpResponse};
 
 /// A set of errors that can occur during parsing multipart streams
@@ -84,8 +84,8 @@ pub enum MultipartError {
 }
 
 /// Return `BadRequest` for `MultipartError`
-impl WebResponseError<WebError> for MultipartError {
-    fn error_response(&mut self, _: &HttpRequest) -> HttpResponse {
+impl WebResponseError<DefaultError> for MultipartError {
+    fn error_response(self, _: &HttpRequest) -> HttpResponse {
         self.error_response_with_status(StatusCode::BAD_REQUEST)
     }
 }

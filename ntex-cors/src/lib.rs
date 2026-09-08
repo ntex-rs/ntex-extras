@@ -55,7 +55,7 @@ use ntex::http::{HeaderMap, Method, RequestHead, StatusCode, Uri, error::HttpErr
 use ntex::service::{Ctx, Middleware, Service};
 use ntex::util::{ByteString, Either};
 use ntex::web::{
-    AppState, HttpRequest, HttpResponse, WebError, WebRequest, WebResponse, WebResponseError,
+    AppState, DefaultError, HttpRequest, HttpResponse, WebRequest, WebResponse, WebResponseError,
 };
 
 /// A set of errors that can occur during processing CORS
@@ -90,9 +90,9 @@ pub enum CorsError {
 }
 
 /// DefaultError renderer support
-impl WebResponseError<WebError> for CorsError {
-    fn error_response(&mut self, _: &HttpRequest) -> HttpResponse {
-        self.error_response_with_status(StatusCode::BAD_REQUEST)
+impl<St> WebResponseError<St, DefaultError> for CorsError {
+    fn error_response(&mut self, _: &St, _: &HttpRequest) -> HttpResponse {
+        WebResponseError::<St, _>::error_response_with_status(self, StatusCode::BAD_REQUEST)
     }
 }
 
@@ -754,7 +754,7 @@ pub struct CorsService<S> {
 impl<S, St: AppState> Service<St, WebRequest> for CorsService<S>
 where
     S: Service<St, WebRequest, Res = WebResponse>,
-    CorsError: WebResponseError<St::Error>,
+    CorsError: WebResponseError<St, St::Error>,
 {
     type Res = WebResponse;
     type Error = S::Error;
@@ -774,7 +774,7 @@ where
                 }
                 Ok(res)
             }
-            Err(e) => Ok(req.error_response(e)),
+            Err(e) => Ok(req.error_response(ctx.st(), e)),
         }
     }
 

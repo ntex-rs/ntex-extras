@@ -503,7 +503,7 @@ fn none_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
 }
 
 impl<St: AppState> Responder<St> for NamedFile {
-    async fn respond_to(self, req: &HttpRequest) -> HttpResponse {
+    async fn respond_to(self, _: &St, req: &HttpRequest) -> HttpResponse {
         self.into_response(req)
     }
 }

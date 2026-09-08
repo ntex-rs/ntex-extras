@@ -23,7 +23,7 @@ edition = "2024"
 rust-version = "1.95"
 
 [workspace.dependencies]
-ntex = "4.0.0-beta.7"
+ntex = "4.0.0-beta.8"
 ntex-http = "1"
 ntex-files = "4.0.0-beta.0"
 ntex-multipart-derive = "3.0.0"

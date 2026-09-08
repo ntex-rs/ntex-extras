@@ -13,10 +13,10 @@
 //! extractor allows us to get or set session data.
 //!
 //! ```rust,no_run
-//! use ntex::web::{self, App, HttpResponse, Error};
+//! use ntex::web::{self, App, HttpResponse, WebError};
 //! use ntex_session::{Session, CookieSession};
 //!
-//! fn index(session: Session) -> Result<&'static str, Error> {
+//! fn index(session: Session) -> Result<&'static str, WebError> {
 //!     // access session data
 //!     if let Some(count) = session.get::<i32>("counter")? {
 //!         println!("SESSION value: {}", count);
@@ -65,7 +65,7 @@ pub use crate::cookie::CookieSession;
 /// use ntex_session::Session;
 /// use ntex::web::*;
 ///
-/// fn index(session: Session) -> Result<&'static str, Error> {
+/// fn index(session: Session) -> Result<&'static str, WebError> {
 ///     // access session data
 ///     if let Some(count) = session.get::<i32>("counter")? {
 ///         session.set("counter", count + 1)?;
@@ -217,7 +217,7 @@ impl Session {
 /// ```rust
 /// use ntex_session::Session;
 ///
-/// fn index(session: Session) -> Result<&'static str, ntex::web::Error> {
+/// fn index(session: Session) -> Result<&'static str, ntex::web::WebError> {
 ///     // access session data
 ///     if let Some(count) = session.get::<i32>("counter")? {
 ///         session.set("counter", count + 1)?;
@@ -263,7 +263,7 @@ mod tests {
         session.set("key2", "value2".to_string()).unwrap();
         session.remove("key");
 
-        let mut res = req.into_response(HttpResponse::Ok().finish());
+        let mut res = req.into_response(HttpResponse::Ok().build());
         let (_status, state) = Session::get_changes(&mut res);
         let changes: Vec<_> = state.unwrap().collect();
         assert_eq!(changes, [("key2".to_string(), "\"value2\"".to_string())]);

@@ -18,7 +18,7 @@ use ntex::http::{Method, Payload, Uri, error::BlockingError};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
-use ntex::web::error::WebResponseError;
+use ntex::web::error::{WebError, WebResponseError};
 use ntex::web::guard::Guard;
 use ntex::web::{self, AppState, FromRequest, HttpRequest, HttpResponse, WebRequest, WebResponse};
 use ntex::{Ctx, IntoServiceFactory, Service, ServiceFactory, util::Bytes};
@@ -33,8 +33,9 @@ mod range;
 use self::error::{FilesError, UriSegmentError};
 pub use crate::{named::NamedFile, range::HttpRange};
 
-type HttpService<St, Err> = BoxService<St, WebRequest, WebResponse, Err>;
-type HttpServiceFactory<St, Err> = BoxServiceFactory<St, WebRequest, WebResponse, Err, Failure>;
+type HttpService<St: AppState> = BoxService<St, WebRequest, WebResponse, WebError<St, St::Error>>;
+type HttpServiceFactory<St: AppState> =
+    BoxServiceFactory<St, WebRequest, WebResponse, WebError<St, St::Error>, Failure>;
 
 /// Return the MIME type associated with a filename extension (case-insensitive).
 /// If `ext` is empty or no associated type for the extension was found, returns
@@ -226,7 +227,7 @@ pub struct Files<St: AppState> {
     index: Option<String>,
     show_index: bool,
     redirect_to_slash: bool,
-    default: Option<HttpServiceFactory<St, St::Error>>,
+    default: Option<HttpServiceFactory<St>>,
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
@@ -364,12 +365,15 @@ impl<St: AppState> Files<St> {
     pub fn default_handler<F, U>(mut self, f: F) -> Self
     where
         F: IntoServiceFactory<U, St, WebRequest>,
-        U: ServiceFactory<St, WebRequest, Res = WebResponse, Error = St::Error> + 'static,
+        U: ServiceFactory<St, WebRequest, Res = WebResponse> + 'static,
+        U::Error: WebResponseError<St, St::Error>,
         U::InitError: IntoFailure,
     {
         // create and configure default resource
         self.default = Some(boxed::factory(
-            f.into_factory().map_init_err(IntoFailure::fail),
+            f.into_factory()
+                .map_err(WebError::from_err)
+                .map_init_err(IntoFailure::fail),
         ));
 
         self
@@ -378,7 +382,7 @@ impl<St: AppState> Files<St> {
 
 impl<St: AppState> WebServiceFactory<St> for Files<St>
 where
-    FilesError: WebResponseError<St>,
+    FilesError: WebResponseError<St, St::Error>,
 {
     fn register(mut self, config: &mut WebServiceConfig<St>) {
         if self.default.is_none() {
@@ -395,10 +399,10 @@ where
 
 impl<St: AppState> ServiceFactory<St, WebRequest> for Files<St>
 where
-    FilesError: WebResponseError<St>,
+    FilesError: WebResponseError<St, St::Error>,
 {
     type Res = WebResponse;
-    type Error = St::Error;
+    type Error = WebError<St, St::Error>;
 
     type Service = FilesService<St>;
     type InitError = Failure;
@@ -438,35 +442,38 @@ pub struct FilesService<St: AppState> {
     index: Option<String>,
     show_index: bool,
     redirect_to_slash: bool,
-    default: Option<HttpService<St, St::Error>>,
+    default: Option<HttpService<St>>,
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
     guards: Option<Rc<dyn Guard>>,
 }
 
-impl<St: AppState> FilesService<St> {
+impl<St: AppState> FilesService<St>
+where
+    FilesError: WebResponseError<St, St::Error>,
+{
     async fn handle_io_error(
         &self,
         e: io::Error,
         req: WebRequest,
         ctx: Ctx<'_, Self, St>,
-    ) -> Result<WebResponse, St::Error> {
+    ) -> Result<WebResponse, WebError<St, St::Error>> {
         log::debug!("Files: Failed to handle {}: {}", req.path(), e);
         if let Some(ref default) = self.default {
             Ok(ctx.call(default, req).await?)
         } else {
-            Ok(req.error_response(FilesError::from(e)))
+            Ok(req.error_response(ctx.st(), FilesError::from(e)))
         }
     }
 }
 
 impl<St: AppState> Service<St, WebRequest> for FilesService<St>
 where
-    FilesError: WebResponseError<St>,
+    FilesError: WebResponseError<St, St::Error>,
 {
     type Res = WebResponse;
-    type Error = St::Error;
+    type Error = WebError<St, St::Error>;
 
     async fn call(
         &self,
@@ -482,18 +489,18 @@ where
         };
 
         if !is_method_valid {
-            return Ok(req.error_response(FilesError::MethodNotAllowed));
+            return Ok(req.error_response(ctx.st(), FilesError::MethodNotAllowed));
         }
 
         let real_path = match PathBufWrp::get_pathbuf(req.match_info().path()) {
             Ok(item) => item,
-            Err(e) => return Ok(req.error_response(FilesError::from(e))),
+            Err(e) => return Ok(req.error_response(ctx.st(), FilesError::from(e))),
         };
 
         // full filepath
         let path = match self.directory.join(real_path.0).canonicalize() {
             Ok(path) => path,
-            Err(e) => return Ok(self.handle_io_error(e, req, ctx).await?),
+            Err(e) => return self.handle_io_error(e, req, ctx).await,
         };
 
         if path.is_dir() {
@@ -529,10 +536,11 @@ where
                 let x = (self.renderer)(&dir, &req);
                 match x {
                     Ok(resp) => Ok(resp),
-                    Err(e) => Ok(WebResponse::from_err::<St, _>(FilesError::from(e), req)),
+                    Err(e) => Ok(WebResponse::from_err(ctx.st(), FilesError::from(e), req)),
                 }
             } else {
-                Ok(WebResponse::from_err::<St, _>(
+                Ok(WebResponse::from_err(
+                    ctx.st(),
                     FilesError::IsDirectory,
                     req.into_parts().0,
                 ))
@@ -597,16 +605,13 @@ impl<St> FromRequest<St> for PathBufWrp {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::iter::FromIterator;
-    use std::ops::Add;
-    use std::time::{Duration, SystemTime};
+    use std::{fs, iter::FromIterator, ops::Add, time::Duration, time::SystemTime};
+
+    use ntex::http::{self, Method, StatusCode};
+    use ntex::web::test::{self, TestRequest};
+    use ntex::web::{App, guard, middleware::Compress};
 
     use super::*;
-    use ntex::http::{self, Method, StatusCode};
-    use ntex::web::middleware::Compress;
-    use ntex::web::test::{self, TestRequest};
-    use ntex::web::{App, DefaultError, guard};
 
     #[ntex::test]
     async fn test_file_extension_to_mime() {
@@ -1221,17 +1226,17 @@ mod tests {
 
     #[ntex::test]
     async fn test_static_files_bad_directory() {
-        let _st: Files<DefaultError> = Files::new("/", "missing");
-        let _st: Files<DefaultError> = Files::new("/", "Cargo.toml");
+        let _st: Files<()> = Files::new("/", "missing");
+        let _st: Files<()> = Files::new("/", "Cargo.toml");
     }
 
     #[ntex::test]
     async fn test_default_handler_file_missing() {
         let st = Files::new("/", ".")
-            .default_handler(|req: WebRequest<DefaultError>| async move {
+            .default_handler(|req: WebRequest| async move {
                 Ok(req.into_response(HttpResponse::Ok().body("default content")))
             })
-            .pipeline(SharedCfg::default())
+            .pipeline(())
             .await
             .unwrap();
         let req = TestRequest::with_uri("/missing").to_srv_request();

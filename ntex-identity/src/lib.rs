@@ -27,12 +27,12 @@
 //!
 //! async fn login(id: Identity) -> web::HttpResponse {
 //!     id.remember("User1".to_owned()); // <- remember identity
-//!     web::HttpResponse::Ok().finish()
+//!     web::HttpResponse::Ok().build()
 //! }
 //!
 //! async fn logout(id: Identity) -> web::HttpResponse {
 //!     id.forget();                      // <- remove identity
-//!     web::HttpResponse::Ok().finish()
+//!     web::HttpResponse::Ok().build()
 //! }
 //!
 //! let app = web::App::new().middleware(IdentityService::new(
@@ -62,10 +62,10 @@ use ntex::web::{
 /// The extractor type to obtain your identity from a request.
 ///
 /// ```rust
-/// use ntex::web::{self, Error};
+/// use ntex::web;
 /// use ntex_identity::Identity;
 ///
-/// fn index(id: Identity) -> Result<String, web::Error> {
+/// fn index(id: Identity) -> Result<String, web::WebError> {
 ///     // access request identity
 ///     if let Some(id) = id.identity() {
 ///         Ok(format!("Welcome! {}", id))
@@ -173,16 +173,21 @@ impl<St: AppState> FromRequest<St> for Identity {
 
 #[allow(clippy::wrong_self_convention)]
 /// Identity policy definition.
-pub trait IdentityPolicy: Sized + 'static {
+pub trait IdentityPolicy<St>: Sized + 'static {
     /// The error type of the policy
     type Error;
 
     /// Parse the session from request and load data from a service identity.
-    async fn from_request(&self, request: &mut WebRequest) -> Result<Option<String>, Self::Error>;
+    async fn from_request(
+        &self,
+        st: &St,
+        request: &mut WebRequest,
+    ) -> Result<Option<String>, Self::Error>;
 
     /// Write changes to response
     async fn to_response(
         &self,
+        st: &St,
         identity: Option<String>,
         changed: bool,
         response: &mut WebResponse,
@@ -245,13 +250,12 @@ impl<S, St, T> Service<St, WebRequest> for IdentityServiceMiddleware<S, T>
 where
     S: Service<St, WebRequest, Res = WebResponse> + 'static,
     St: AppState,
-    T: IdentityPolicy,
-    T::Error: WebResponseError<St>,
-    St::Error: From<S::Error>,
-    St::Error: From<T::Error>,
+    T: IdentityPolicy<St>,
+    T::Error: WebResponseError<St::Error>,
+    S::Error: WebResponseError<St::Error>,
 {
     type Res = WebResponse;
-    type Error = St::Error;
+    type Error = S::Error;
 
     ntex::forward_ready!(St, service);
     ntex::forward_shutdown!(St, service);
@@ -261,7 +265,7 @@ where
         mut req: WebRequest,
         ctx: Ctx<'_, Self, St>,
     ) -> Result<Self::Res, Self::Error> {
-        match self.backend.from_request(&mut req).await {
+        match self.backend.from_request(ctx.st(), &mut req).await {
             Ok(id) => {
                 req.extensions_mut()
                     .insert(IdentityItem { id, changed: false });
@@ -271,15 +275,19 @@ where
                 let id = res.request().extensions_mut().remove::<IdentityItem>();
 
                 if let Some(id) = id {
-                    match self.backend.to_response(id.id, id.changed, &mut res).await {
+                    match self
+                        .backend
+                        .to_response(ctx.st(), id.id, id.changed, &mut res)
+                        .await
+                    {
                         Ok(_) => Ok(res),
-                        Err(e) => Ok(WebResponse::error_response(res, e)),
+                        Err(e) => Ok(WebResponse::error_response::<St, _>(res, e)),
                     }
                 } else {
                     Ok(res)
                 }
             }
-            Err(err) => Ok(req.error_response(err)),
+            Err(err) => Ok(req.error_response::<St, _>(err)),
         }
     }
 }
@@ -526,10 +534,14 @@ impl CookieIdentityPolicy {
     }
 }
 
-impl IdentityPolicy for CookieIdentityPolicy {
+impl<St> IdentityPolicy<St> for CookieIdentityPolicy {
     type Error = CookieIdentityPolicyError;
 
-    async fn from_request(&self, req: &mut WebRequest) -> Result<Option<String>, Self::Error> {
+    async fn from_request(
+        &self,
+        _: &St,
+        req: &mut WebRequest,
+    ) -> Result<Option<String>, Self::Error> {
         Ok(self.0.load(req).map(
             |CookieValue {
                  identity,
@@ -547,6 +559,7 @@ impl IdentityPolicy for CookieIdentityPolicy {
 
     async fn to_response(
         &self,
+        _: &St,
         id: Option<String>,
         changed: bool,
         res: &mut WebResponse,
@@ -592,8 +605,8 @@ mod tests {
 
     use super::*;
     use ntex::web::test::{self, TestRequest};
-    use ntex::web::{self, App, Error, HttpResponse, error};
-    use ntex::{http::StatusCode, service::Pipeline, service::fn_service, time};
+    use ntex::web::{self, App, HttpResponse, WebError, error};
+    use ntex::{Pipeline, fn_service, http::Request, http::StatusCode, time};
 
     const COOKIE_KEY_MASTER: [u8; 32] = [0; 32];
     const COOKIE_NAME: &str = "ntex_auth";
@@ -628,7 +641,8 @@ mod tests {
                     } else {
                         HttpResponse::BadRequest()
                     }
-                })),
+                }))
+                .build(),
         )
         .await;
 
@@ -715,9 +729,7 @@ mod tests {
         F: Fn(CookieIdentityPolicy) -> CookieIdentityPolicy + Sync + Send + Clone + 'static,
     >(
         f: F,
-    ) -> Pipeline<
-        impl ntex::service::Service<ntex::http::Request, Response = WebResponse, Error = Error>,
-    > {
+    ) -> Pipeline<Request, WebResponse, WebError> {
         test::init_service(
             App::new()
                 .middleware(IdentityService::new(f(CookieIdentityPolicy::new(
@@ -731,7 +743,8 @@ mod tests {
                         id.remember(COOKIE_LOGIN.to_string())
                     }
                     web::types::Json(identity)
-                })),
+                }))
+                .build(),
         )
         .await
     }
@@ -1037,39 +1050,40 @@ mod tests {
 
     #[ntex::test]
     async fn test_borrowed_mut_error() {
-        use futures::future::{Ready, ok};
-        use ntex::web::{DefaultError, Error};
-
         struct Ident;
-        impl<Err: ErrorRenderer> IdentityPolicy<Err> for Ident {
-            type Error = Error;
-            type Future = Ready<Result<Option<String>, Error>>;
-            type ResponseFuture = Ready<Result<(), Error>>;
 
-            fn from_request(&self, _: &mut WebRequest<Err>) -> Self::Future {
-                ok(Some("test".to_string()))
+        impl<St> IdentityPolicy<St> for Ident {
+            type Error = Infallible;
+
+            async fn from_request(
+                &self,
+                _: &St,
+                _: &mut WebRequest,
+            ) -> Result<Option<String>, Infallible> {
+                Ok(Some("test".to_string()))
             }
 
-            fn to_response(
+            async fn to_response(
                 &self,
+                _: &St,
                 _: Option<String>,
                 _: bool,
                 _: &mut WebResponse,
-            ) -> Self::ResponseFuture {
-                ok(())
+            ) -> Result<(), Infallible> {
+                Ok(())
             }
         }
 
-        let srv: Pipeline<_> = IdentityServiceMiddleware {
+        let srv = IdentityServiceMiddleware {
             backend: Rc::new(Ident),
-            service: fn_service(|_: WebRequest<DefaultError>| async move {
+            service: fn_service(|_: WebRequest| async move {
                 time::sleep(time::Seconds(100)).await;
                 Err::<WebResponse, _>(error::ErrorBadRequest("error"))
             }),
         }
-        .into();
+        .pipeline(());
 
-        let srv2 = srv.clone();
+        let srv2 = srv.bind();
         let req = TestRequest::default().to_srv_request();
         ntex::rt::spawn(async move {
             let _ = srv2.call(req).await;
