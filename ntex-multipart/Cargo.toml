@@ -17,7 +17,6 @@ name = "ntex_multipart"
 path = "src/lib.rs"
 
 [features]
-form = ["derive", "serde", "serde_json", "serde_plain"]
 derive = ["ntex-multipart-derive"]
 
 [dependencies]
@@ -30,9 +29,9 @@ futures = { workspace = true }
 log = { workspace = true }
 mime = { workspace = true }
 twoway = { workspace = true }
-serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
-serde_plain = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_plain = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 

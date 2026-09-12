@@ -174,7 +174,7 @@ impl<St: AppState> FromRequest<St> for Identity {
 
 #[allow(clippy::wrong_self_convention)]
 /// Identity policy definition.
-pub trait IdentityPolicy<St>: Sized + 'static {
+pub trait IdentityPolicy<St, In>: Sized + 'static {
     /// The error type of the policy
     type Error;
 
@@ -182,7 +182,7 @@ pub trait IdentityPolicy<St>: Sized + 'static {
     async fn from_request(
         &self,
         st: &St,
-        request: &mut WebRequest,
+        request: &mut WebRequest<In>,
     ) -> Result<Option<String>, Self::Error>;
 
     /// Write changes to response
@@ -247,11 +247,11 @@ impl<S: Clone, T> Clone for IdentityServiceMiddleware<S, T> {
     }
 }
 
-impl<S, St, T> Service<St, WebRequest> for IdentityServiceMiddleware<S, T>
+impl<S, St, In, T> Service<St, WebRequest<In>> for IdentityServiceMiddleware<S, T>
 where
-    S: Service<St, WebRequest, Res = WebResponse> + 'static,
+    S: Service<St, WebRequest<In>, Res = WebResponse> + 'static,
     St: AppState,
-    T: IdentityPolicy<St>,
+    T: IdentityPolicy<St, In>,
     T::Error: WebResponseError<St, St::Error>,
     S::Error: WebResponseError<St, St::Error>,
 {
@@ -263,7 +263,7 @@ where
 
     async fn call(
         &self,
-        mut req: WebRequest,
+        mut req: WebRequest<In>,
         ctx: Ctx<'_, Self, St>,
     ) -> Result<Self::Res, Self::Error> {
         match self.backend.from_request(ctx.st(), &mut req).await {
@@ -383,7 +383,7 @@ impl CookieIdentityInner {
         Ok(())
     }
 
-    fn load(&self, req: &WebRequest) -> Option<CookieValue> {
+    fn load<In>(&self, req: &WebRequest<In>) -> Option<CookieValue> {
         let cookie = req.cookie(&self.name)?;
         let mut jar = CookieJar::new();
         jar.add_original(cookie.clone());
@@ -535,13 +535,13 @@ impl CookieIdentityPolicy {
     }
 }
 
-impl<St> IdentityPolicy<St> for CookieIdentityPolicy {
+impl<St, In> IdentityPolicy<St, In> for CookieIdentityPolicy {
     type Error = CookieIdentityPolicyError;
 
     async fn from_request(
         &self,
         _: &St,
-        req: &mut WebRequest,
+        req: &mut WebRequest<In>,
     ) -> Result<Option<String>, Self::Error> {
         Ok(self.0.load(req).map(
             |CookieValue {
@@ -1053,13 +1053,13 @@ mod tests {
     async fn test_borrowed_mut_error() {
         struct Ident;
 
-        impl<St> IdentityPolicy<St> for Ident {
+        impl<St, In> IdentityPolicy<St, In> for Ident {
             type Error = Infallible;
 
             async fn from_request(
                 &self,
                 _: &St,
-                _: &mut WebRequest,
+                _: &mut WebRequest<In>,
             ) -> Result<Option<String>, Infallible> {
                 Ok(Some("test".to_string()))
             }
@@ -1077,7 +1077,7 @@ mod tests {
 
         let srv = IdentityServiceMiddleware {
             backend: Rc::new(Ident),
-            service: fn_service(|_: WebRequest| async move {
+            service: fn_service(|_: WebRequest<()>| async move {
                 time::sleep(time::Seconds(100)).await;
                 Err::<WebResponse, _>(error::ErrorBadRequest("error"))
             }),

@@ -92,7 +92,7 @@ impl UserSession for HttpRequest {
     }
 }
 
-impl UserSession for WebRequest {
+impl<St> UserSession for WebRequest<St> {
     fn get_session(&self) -> Session {
         Session::get_session(&mut self.extensions_mut())
     }
@@ -180,7 +180,7 @@ impl Session {
         }
     }
 
-    pub fn set_session(data: impl Iterator<Item = (String, String)>, req: &WebRequest) {
+    pub fn set_session<St>(data: impl Iterator<Item = (String, String)>, req: &WebRequest<St>) {
         let session = Session::get_session(&mut req.extensions_mut());
         let mut inner = session.0.borrow_mut();
         inner.state.extend(data);

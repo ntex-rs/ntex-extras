@@ -5,14 +5,9 @@ use futures::TryStreamExt;
 use ntex::web::{AppState, FromRequest, HttpRequest, WebResponseError};
 use ntex::{http::Payload, util::HashMap};
 
-#[cfg(feature = "form")]
-use {
-    crate::form::{Limits, State},
-    crate::multipart_form::MultipartFormConfig,
-    crate::{MultipartCollect, MultipartError, MultipartForm},
-};
-
+use crate::form::{Limits, State};
 use crate::multipart::Multipart;
+use crate::{MultipartCollect, MultipartError, MultipartForm, multipart_form::MultipartFormConfig};
 
 /// Get request's payload as multipart stream
 ///
@@ -52,7 +47,6 @@ impl<St> FromRequest<St> for Multipart {
     }
 }
 
-#[cfg(feature = "form")]
 impl<T, St> FromRequest<St> for MultipartForm<T>
 where
     T: MultipartCollect + 'static,

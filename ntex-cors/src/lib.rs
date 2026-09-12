@@ -725,10 +725,7 @@ pub struct CorsMiddleware<St> {
     st: PhantomData<St>,
 }
 
-impl<S, St> Middleware<S, St> for CorsMiddleware<St>
-where
-    S: Service<St, WebRequest, Res = WebResponse>,
-{
+impl<S, St> Middleware<S, St> for CorsMiddleware<St> {
     type Service = CorsService<S>;
 
     fn create(&self, _: &St, service: S) -> Self::Service {
@@ -749,15 +746,19 @@ pub struct CorsService<S> {
     inner: Rc<Inner>,
 }
 
-impl<S, St: AppState> Service<St, WebRequest> for CorsService<S>
+impl<S, St: AppState, In> Service<St, WebRequest<In>> for CorsService<S>
 where
-    S: Service<St, WebRequest, Res = WebResponse>,
+    S: Service<St, WebRequest<In>, Res = WebResponse>,
     CorsError: WebResponseError<St, St::Error>,
 {
     type Res = WebResponse;
     type Error = S::Error;
 
-    async fn call(&self, req: WebRequest, ctx: Ctx<'_, Self, St>) -> Result<Self::Res, S::Error> {
+    async fn call(
+        &self,
+        req: WebRequest<In>,
+        ctx: Ctx<'_, Self, St>,
+    ) -> Result<Self::Res, S::Error> {
         match self.inner.preflight_check(req.head()) {
             Ok(Either::Left(res)) => Ok(req.into_response(res)),
             Ok(Either::Right(_)) => {
@@ -831,7 +832,7 @@ mod tests {
             .build()
             .create(
                 &(),
-                fn_service(async move |req: WebRequest| {
+                fn_service(async move |req: WebRequest<()>| {
                     Ok::<_, Infallible>(
                         req.into_response(HttpResponse::builder(StatusCode::OK).build()),
                     )
@@ -931,7 +932,7 @@ mod tests {
         let cors = Cors::new()
             .allowed_origin("https://www.example.com")
             .build()
-            .create(&(), test::ok_service::<()>());
+            .create(&(), test::ok_service::<(), ()>());
 
         let req = TestRequest::with_header("Origin", "https://www.unknown.com")
             .method(Method::GET)
@@ -1047,7 +1048,7 @@ mod tests {
                 .build()
                 .create(
                     &(),
-                    fn_service(|req: WebRequest| async move {
+                    fn_service(|req: WebRequest<()>| async move {
                         Ok::<_, std::convert::Infallible>(req.into_response(
                             HttpResponse::Ok().header(header::VARY, "Accept").build(),
                         ))

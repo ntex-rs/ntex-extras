@@ -139,7 +139,7 @@ impl CookieSessionInner {
         Ok(())
     }
 
-    fn load(&self, req: &WebRequest) -> (bool, HashMap<String, String>) {
+    fn load<St>(&self, req: &WebRequest<St>) -> (bool, HashMap<String, String>) {
         if let Ok(cookies) = req.cookies() {
             for cookie in cookies.iter() {
                 if cookie.name() == self.name {
@@ -304,9 +304,9 @@ pub struct CookieSessionMiddleware<S> {
     inner: Rc<CookieSessionInner>,
 }
 
-impl<S, St: AppState> Service<St, WebRequest> for CookieSessionMiddleware<S>
+impl<S, St: AppState, In> Service<St, WebRequest<In>> for CookieSessionMiddleware<S>
 where
-    S: Service<St, WebRequest, Res = WebResponse>,
+    S: Service<St, WebRequest<In>, Res = WebResponse>,
     S::Error: 'static,
     CookieSessionError: WebResponseError<St, St::Error>,
 {
@@ -323,7 +323,7 @@ where
     /// and this will trigger removal of the session cookie in the response.
     async fn call(
         &self,
-        req: WebRequest,
+        req: WebRequest<In>,
         ctx: Ctx<'_, Self, St>,
     ) -> Result<Self::Res, Self::Error> {
         let inner = self.inner.clone();

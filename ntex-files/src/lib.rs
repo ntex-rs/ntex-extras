@@ -33,9 +33,10 @@ mod range;
 use self::error::{FilesError, UriSegmentError};
 pub use crate::{named::NamedFile, range::HttpRange};
 
-type HttpService<St: AppState> = BoxService<St, WebRequest, WebResponse, WebError<St, St::Error>>;
-type HttpServiceFactory<St: AppState> =
-    BoxServiceFactory<St, WebRequest, WebResponse, WebError<St, St::Error>, Failure>;
+type HttpService<St: AppState, In> =
+    BoxService<St, WebRequest<In>, WebResponse, WebError<St, St::Error>>;
+type HttpServiceFactory<St: AppState, In> =
+    BoxServiceFactory<St, WebRequest<In>, WebResponse, WebError<St, St::Error>, Failure>;
 
 /// Return the MIME type associated with a filename extension (case-insensitive).
 /// If `ext` is empty or no associated type for the extension was found, returns
@@ -221,20 +222,20 @@ type MimeOverride = dyn Fn(&mime::Name) -> header::DispositionType;
 /// let app = App::new()
 ///    .service(fs::Files::new("/static", "."));
 /// ```
-pub struct Files<St: AppState> {
+pub struct Files<St: AppState, In> {
     path: String,
     directory: PathBuf,
     index: Option<String>,
     show_index: bool,
     redirect_to_slash: bool,
-    default: Option<HttpServiceFactory<St>>,
+    default: Option<HttpServiceFactory<St, In>>,
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
     guards: Option<Rc<dyn Guard>>,
 }
 
-impl<St: AppState> Clone for Files<St> {
+impl<St: AppState, In> Clone for Files<St, In> {
     fn clone(&self) -> Self {
         Self {
             directory: self.directory.clone(),
@@ -251,7 +252,7 @@ impl<St: AppState> Clone for Files<St> {
     }
 }
 
-impl<St: AppState> Files<St> {
+impl<St: AppState, In: 'static> Files<St, In> {
     /// Create new `Files` instance for specified base directory.
     ///
     /// `File` uses `ThreadPool` for blocking filesystem operations.
@@ -364,8 +365,8 @@ impl<St: AppState> Files<St> {
     /// Sets default handler which is used when no matched file could be found.
     pub fn default_handler<F, U>(mut self, f: F) -> Self
     where
-        F: IntoServiceFactory<U, St, WebRequest>,
-        U: ServiceFactory<St, WebRequest, Res = WebResponse> + 'static,
+        F: IntoServiceFactory<U, St, WebRequest<In>>,
+        U: ServiceFactory<St, WebRequest<In>, Res = WebResponse> + 'static,
         U::Error: WebResponseError<St, St::Error>,
         U::InitError: IntoFailure,
     {
@@ -380,31 +381,29 @@ impl<St: AppState> Files<St> {
     }
 }
 
-impl<St: AppState> WebServiceFactory<St> for Files<St>
+impl<St: AppState, In: 'static> WebServiceFactory<St, In> for Files<St, In>
 where
     FilesError: WebResponseError<St, St::Error>,
 {
-    fn register(mut self, config: &mut WebServiceConfig<St>) {
-        if self.default.is_none() {
-            self.default = Some(config.default_service());
-        }
+    fn register(self, config: &mut WebServiceConfig<St, In>) {
         let rdef = if config.is_root() {
             ResourceDef::root_prefix(&self.path)
         } else {
             ResourceDef::prefix(&self.path)
         };
-        config.register_service(rdef, self, None, None)
+        config.register_service(rdef, None, None, self)
     }
 }
 
-impl<St: AppState> ServiceFactory<St, WebRequest> for Files<St>
+impl<St: AppState, In> ServiceFactory<St, WebRequest<In>> for Files<St, In>
 where
+    In: 'static,
     FilesError: WebResponseError<St, St::Error>,
 {
     type Res = WebResponse;
     type Error = WebError<St, St::Error>;
 
-    type Service = FilesService<St>;
+    type Service = FilesService<St, In>;
     type InitError = Failure;
 
     async fn create(&self, cfg: &St) -> Result<Self::Service, Self::InitError> {
@@ -437,26 +436,26 @@ where
     }
 }
 
-pub struct FilesService<St: AppState> {
+pub struct FilesService<St: AppState, In> {
     directory: PathBuf,
     index: Option<String>,
     show_index: bool,
     redirect_to_slash: bool,
-    default: Option<HttpService<St>>,
+    default: Option<HttpService<St, In>>,
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
     guards: Option<Rc<dyn Guard>>,
 }
 
-impl<St: AppState> FilesService<St>
+impl<St: AppState, In> FilesService<St, In>
 where
     FilesError: WebResponseError<St, St::Error>,
 {
     async fn handle_io_error(
         &self,
         e: io::Error,
-        req: WebRequest,
+        req: WebRequest<In>,
         ctx: Ctx<'_, Self, St>,
     ) -> Result<WebResponse, WebError<St, St::Error>> {
         log::debug!("Files: Failed to handle {}: {}", req.path(), e);
@@ -468,7 +467,7 @@ where
     }
 }
 
-impl<St: AppState> Service<St, WebRequest> for FilesService<St>
+impl<St: AppState, In> Service<St, WebRequest<In>> for FilesService<St, In>
 where
     FilesError: WebResponseError<St, St::Error>,
 {
@@ -477,7 +476,7 @@ where
 
     async fn call(
         &self,
-        req: WebRequest,
+        req: WebRequest<In>,
         ctx: Ctx<'_, Self, St>,
     ) -> Result<Self::Res, Self::Error> {
         let is_method_valid = if let Some(guard) = &self.guards {
@@ -525,14 +524,14 @@ where
                         }
 
                         named_file.flags = self.file_flags.clone();
-                        let (req, _) = req.into_parts();
+                        let (req, _, _) = req.into_parts();
                         Ok(WebResponse::new(named_file.into_response(&req), req))
                     }
                     Err(e) => self.handle_io_error(e, req, ctx).await,
                 }
             } else if self.show_index {
                 let dir = Directory::new(self.directory.clone(), path);
-                let (req, _) = req.into_parts();
+                let (req, _, _) = req.into_parts();
                 let x = (self.renderer)(&dir, &req);
                 match x {
                     Ok(resp) => Ok(resp),
@@ -554,7 +553,7 @@ where
                     }
 
                     named_file.flags = self.file_flags.clone();
-                    let (req, _) = req.into_parts();
+                    let (req, _, _) = req.into_parts();
                     Ok(WebResponse::new(named_file.into_response(&req), req))
                 }
                 Err(e) => self.handle_io_error(e, req, ctx).await,
@@ -1227,14 +1226,14 @@ mod tests {
 
     #[ntex::test]
     async fn test_static_files_bad_directory() {
-        let _st: Files<()> = Files::new("/", "missing");
-        let _st: Files<()> = Files::new("/", "Cargo.toml");
+        let _st: Files<(), ()> = Files::new("/", "missing");
+        let _st: Files<(), ()> = Files::new("/", "Cargo.toml");
     }
 
     #[ntex::test]
     async fn test_default_handler_file_missing() {
         let st = Files::new("/", ".")
-            .default_handler(|req: WebRequest| async move {
+            .default_handler(|req: WebRequest<()>| async move {
                 Ok::<_, Infallible>(req.into_response(HttpResponse::Ok().body("default content")))
             })
             .pipeline(())
