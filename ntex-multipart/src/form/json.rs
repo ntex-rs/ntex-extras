@@ -72,7 +72,7 @@ pub enum JsonFieldError {
 
 /// Return `BadRequest` for `JsonFieldError`
 impl<St> WebResponseError<St, DefaultError> for JsonFieldError {
-    fn error_response(&mut self, _: &St) -> HttpResponse {
+    fn error_response(&self, _: &St) -> HttpResponse {
         HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }

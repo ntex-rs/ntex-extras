@@ -28,7 +28,7 @@ pub enum FilesError {
 
 /// Return `NotFound` for `FilesError`
 impl<St> WebResponseError<St, DefaultError> for FilesError {
-    fn error_response(&mut self, _: &St) -> HttpResponse {
+    fn error_response(&self, _: &St) -> HttpResponse {
         match self {
             FilesError::Uri(_) => HttpResponse::render_with(StatusCode::BAD_REQUEST, self),
             FilesError::MethodNotAllowed => {
@@ -54,7 +54,7 @@ pub enum UriSegmentError {
 
 /// Return `BadRequest` for `UriSegmentError`
 impl<St> WebResponseError<St, DefaultError> for UriSegmentError {
-    fn error_response(&mut self, _: &St) -> HttpResponse {
+    fn error_response(&self, _: &St) -> HttpResponse {
         HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }

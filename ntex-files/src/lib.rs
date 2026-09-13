@@ -219,7 +219,7 @@ type MimeOverride = dyn Fn(&mime::Name) -> header::DispositionType;
 /// use ntex::web::App;
 /// use ntex_files as fs;
 ///
-/// let app = App::new()
+/// let app = App::default()
 ///    .service(fs::Files::new("/static", "."));
 /// ```
 pub struct Files<St: AppState, In> {
@@ -462,7 +462,7 @@ where
         if let Some(ref default) = self.default {
             Ok(ctx.call(default, req).await?)
         } else {
-            Ok(req.error_response(ctx.st(), FilesError::from(e)))
+            Ok(req.error_response(ctx.st(), &FilesError::from(e)))
         }
     }
 }
@@ -488,12 +488,12 @@ where
         };
 
         if !is_method_valid {
-            return Ok(req.error_response(ctx.st(), FilesError::MethodNotAllowed));
+            return Ok(req.error_response(ctx.st(), &FilesError::MethodNotAllowed));
         }
 
         let real_path = match PathBufWrp::get_pathbuf(req.match_info().path()) {
             Ok(item) => item,
-            Err(e) => return Ok(req.error_response(ctx.st(), FilesError::from(e))),
+            Err(e) => return Ok(req.error_response(ctx.st(), &FilesError::from(e))),
         };
 
         // full filepath
@@ -535,12 +535,12 @@ where
                 let x = (self.renderer)(&dir, &req);
                 match x {
                     Ok(resp) => Ok(resp),
-                    Err(e) => Ok(WebResponse::from_err(ctx.st(), FilesError::from(e), req)),
+                    Err(e) => Ok(WebResponse::from_err(ctx.st(), &FilesError::from(e), req)),
                 }
             } else {
                 Ok(WebResponse::from_err(
                     ctx.st(),
-                    FilesError::IsDirectory,
+                    &FilesError::IsDirectory,
                     req.into_parts().0,
                 ))
             }

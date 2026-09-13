@@ -89,7 +89,7 @@ pub enum CorsError {
 
 /// DefaultError renderer support
 impl<St> WebResponseError<St, DefaultError> for CorsError {
-    fn error_response(&mut self, _: &St) -> HttpResponse {
+    fn error_response(&self, _: &St) -> HttpResponse {
         HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }
@@ -773,7 +773,7 @@ where
                 }
                 Ok(res)
             }
-            Err(e) => Ok(req.error_response(ctx.st(), e)),
+            Err(e) => Ok(req.error_response(ctx.st(), &e)),
         }
     }
 

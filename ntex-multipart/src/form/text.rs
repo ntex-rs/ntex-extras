@@ -88,7 +88,7 @@ pub enum TextError {
 
 /// Return `BadRequest` for `TextError`
 impl<St> WebResponseError<St, DefaultError> for TextError {
-    fn error_response(&mut self, _: &St) -> HttpResponse {
+    fn error_response(&self, _: &St) -> HttpResponse {
         HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }

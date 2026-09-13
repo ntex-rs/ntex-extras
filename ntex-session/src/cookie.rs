@@ -194,7 +194,7 @@ impl CookieSessionInner {
 /// use ntex_session::CookieSession;
 /// use ntex::web::{self, App, HttpResponse, HttpServer};
 ///
-/// let app = App::new().middleware(
+/// let app = App::default().middleware(
 ///     CookieSession::signed(&[0; 32])
 ///         .domain("www.rust-lang.org")
 ///         .name("ntex-session")
@@ -335,14 +335,14 @@ where
             match Session::get_changes(&mut res) {
                 (SessionStatus::Changed, Some(state)) | (SessionStatus::Renewed, Some(state)) => {
                     if let Err(e) = inner.set_cookie(&mut res, state) {
-                        res.error_response(ctx.st(), e)
+                        res.error_response(ctx.st(), &e)
                     } else {
                         res
                     }
                 }
                 (SessionStatus::Unchanged, Some(state)) if prolong_expiration => {
                     if let Err(e) = inner.set_cookie(&mut res, state) {
-                        res.error_response(ctx.st(), e)
+                        res.error_response(ctx.st(), &e)
                     } else {
                         res
                     }
@@ -354,7 +354,7 @@ where
                         let state: HashMap<String, String> = HashMap::new();
 
                         if let Err(e) = inner.set_cookie(&mut res, state.into_iter()) {
-                            res.error_response(ctx.st(), e)
+                            res.error_response(ctx.st(), &e)
                         } else {
                             res
                         }
