@@ -194,7 +194,7 @@ impl CookieSessionInner {
 /// use ntex_session::CookieSession;
 /// use ntex::web::{self, App, HttpResponse, HttpServer};
 ///
-/// let app = App::new().middleware(
+/// let app = App::default().middleware(
 ///     CookieSession::signed(&[0; 32])
 ///         .domain("www.rust-lang.org")
 ///         .name("ntex-session")
