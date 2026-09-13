@@ -1,6 +1,6 @@
 [package]
 name = "ntex-cors"
-version = "4.0.0-beta.5"
+version = "4.0.0-beta.6"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Cross-origin resource sharing (CORS) for ntex applications."
 readme = "README.md"

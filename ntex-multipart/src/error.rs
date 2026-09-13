@@ -81,7 +81,7 @@ pub enum MultipartError {
 
 /// Return `BadRequest` for `MultipartError`
 impl<St> WebResponseError<St, DefaultError> for MultipartError {
-    fn error_response(&mut self, _: &St) -> HttpResponse {
+    fn error_response(&self, _: &St) -> HttpResponse {
         HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }

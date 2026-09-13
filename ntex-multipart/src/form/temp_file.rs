@@ -90,7 +90,7 @@ pub enum TempFileError {
 
 /// Return `BadRequest` for `TempFileError`
 impl<St> WebResponseError<St, DefaultError> for TempFileError {
-    fn error_response(&mut self, _: &St) -> HttpResponse {
+    fn error_response(&self, _: &St) -> HttpResponse {
         HttpResponse::render_with(StatusCode::INTERNAL_SERVER_ERROR, self)
     }
 }

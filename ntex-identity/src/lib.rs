@@ -282,13 +282,13 @@ where
                         .await
                     {
                         Ok(_) => Ok(res),
-                        Err(e) => Ok(WebResponse::error_response(res, ctx.st(), e)),
+                        Err(e) => Ok(WebResponse::error_response(res, ctx.st(), &e)),
                     }
                 } else {
                     Ok(res)
                 }
             }
-            Err(err) => Ok(req.error_response(ctx.st(), err)),
+            Err(err) => Ok(req.error_response(ctx.st(), &err)),
         }
     }
 }
