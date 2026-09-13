@@ -1,8 +1,8 @@
 //! Deserializes a field as JSON.
 
-use derive_more::{Deref, DerefMut, Display};
+use derive_more::{Deref, DerefMut};
 use ntex::http::StatusCode;
-use ntex::web::{DefaultError, HttpRequest, WebResponseError};
+use ntex::web::{DefaultError, HttpRequest, HttpResponse, WebResponseError};
 use serde::de::DeserializeOwned;
 
 use crate::form::{FieldReader, Limits, bytes::Bytes};
@@ -22,7 +22,8 @@ impl<T> FieldReader for Json<T>
 where
     T: DeserializeOwned + 'static,
 {
-    async fn read_field(
+    async fn read_field<St>(
+        st: &St,
         req: &HttpRequest,
         field: Field,
         limits: &mut Limits,
@@ -39,40 +40,40 @@ where
             if !valid {
                 return Err(MultipartError::Field {
                     name: field.form_field_name,
-                    source: JsonFieldError::ContentType.into(),
+                    source: JsonFieldError::ContentType.error_response(st),
                 });
             }
         }
 
         let form_field_name = field.form_field_name.clone();
 
-        let bytes = Bytes::read_field(req, field, limits).await?;
+        let bytes = Bytes::read_field(st, req, field, limits).await?;
 
-        Ok(Json(serde_json::from_slice(bytes.data.as_ref()).map_err(|err| {
-            MultipartError::Field {
+        Ok(Json(serde_json::from_slice(bytes.data.as_ref()).map_err(
+            |err| MultipartError::Field {
                 name: form_field_name,
-                source: JsonFieldError::Deserialize(err).into(),
-            }
-        })?))
+                source: JsonFieldError::Deserialize(err).error_response(st),
+            },
+        )?))
     }
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum JsonFieldError {
     /// Deserialize error.
-    #[display("Json deserialize error: {:?}", _0)]
+    #[error("Json deserialize error: {:?}", _0)]
     Deserialize(serde_json::Error),
 
     /// Content type error.
-    #[display("Content type error")]
+    #[error("Content type error")]
     ContentType,
 }
 
 /// Return `BadRequest` for `JsonFieldError`
-impl WebResponseError<DefaultError> for JsonFieldError {
-    fn status_code(&self) -> StatusCode {
-        StatusCode::BAD_REQUEST
+impl<St> WebResponseError<St, DefaultError> for JsonFieldError {
+    fn error_response(&mut self, _: &St) -> HttpResponse {
+        HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }
 
@@ -82,7 +83,9 @@ pub struct JsonConfig {
     validate_content_type: bool,
 }
 
-const DEFAULT_CONFIG: JsonConfig = JsonConfig { validate_content_type: true };
+const DEFAULT_CONFIG: JsonConfig = JsonConfig {
+    validate_content_type: true,
+};
 
 impl JsonConfig {
     /// Sets whether or not the field must have a valid `Content-Type` header to be parsed.

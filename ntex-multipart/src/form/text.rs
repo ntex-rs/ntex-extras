@@ -1,9 +1,9 @@
 //! Deserializes a field from plain text.
 use std::str;
 
-use derive_more::{Deref, DerefMut, Display};
+use derive_more::{Deref, DerefMut};
 use ntex::http::StatusCode;
-use ntex::web::{DefaultError, HttpRequest, WebResponseError};
+use ntex::web::{DefaultError, HttpRequest, HttpResponse, WebResponseError};
 use serde::de::DeserializeOwned;
 
 use crate::form::{FieldReader, Limits, bytes::Bytes};
@@ -27,7 +27,8 @@ impl<T> FieldReader for Text<T>
 where
     T: DeserializeOwned + 'static,
 {
-    async fn read_field(
+    async fn read_field<St>(
+        st: &St,
         req: &HttpRequest,
         field: Field,
         limits: &mut Limits,
@@ -46,47 +47,49 @@ where
             if !valid {
                 return Err(MultipartError::Field {
                     name: field.form_field_name,
-                    source: TextError::ContentType.into(),
+                    source: TextError::ContentType.error_response(st),
                 });
             }
         }
 
         let form_field_name = field.form_field_name.clone();
 
-        let bytes = Bytes::read_field(req, field, limits).await?;
+        let bytes = Bytes::read_field(st, req, field, limits).await?;
 
         let text = str::from_utf8(&bytes.data).map_err(|err| MultipartError::Field {
             name: form_field_name.clone(),
-            source: TextError::Utf8Error(err).into(),
+            source: TextError::Utf8Error(err).error_response(st),
         })?;
 
-        Ok(Text(serde_plain::from_str(text).map_err(|err| MultipartError::Field {
-            name: form_field_name,
-            source: TextError::Deserialize(err).into(),
+        Ok(Text(serde_plain::from_str(text).map_err(|err| {
+            MultipartError::Field {
+                name: form_field_name,
+                source: TextError::Deserialize(err).error_response(st),
+            }
         })?))
     }
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TextError {
     /// UTF-8 decoding error.
-    #[display("UTF-8 decoding error: {}", _0)]
+    #[error("UTF-8 decoding error: {}", _0)]
     Utf8Error(str::Utf8Error),
 
     /// Deserialize error.
-    #[display("Plain text deserialize error: {}", _0)]
+    #[error("Plain text deserialize error: {}", _0)]
     Deserialize(serde_plain::Error),
 
     /// Content type error.
-    #[display("Content type error")]
+    #[error("Content type error")]
     ContentType,
 }
 
 /// Return `BadRequest` for `TextError`
-impl WebResponseError<DefaultError> for TextError {
-    fn status_code(&self) -> StatusCode {
-        StatusCode::BAD_REQUEST
+impl<St> WebResponseError<St, DefaultError> for TextError {
+    fn error_response(&mut self, _: &St) -> HttpResponse {
+        HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }
 
@@ -107,7 +110,9 @@ impl TextConfig {
     }
 }
 
-const DEFAULT_CONFIG: TextConfig = TextConfig { validate_content_type: true };
+const DEFAULT_CONFIG: TextConfig = TextConfig {
+    validate_content_type: true,
+};
 
 impl Default for TextConfig {
     fn default() -> Self {

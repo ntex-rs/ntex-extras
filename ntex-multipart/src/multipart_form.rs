@@ -1,10 +1,8 @@
-use crate::form::Limits;
-use crate::form::State;
-use crate::{Field, MultipartError};
 use derive_more::{Deref, DerefMut};
 use futures::future::LocalBoxFuture;
-use ntex::web::{Error, HttpRequest};
-use std::sync::Arc;
+use ntex::web::HttpRequest;
+
+use crate::{Field, MultipartError, form::Limits, form::State};
 
 #[cfg(feature = "derive")]
 pub use ntex_multipart_derive::MultipartForm;
@@ -51,9 +49,6 @@ impl<T: MultipartCollect> MultipartForm<T> {
     }
 }
 
-type MultipartFormErrorHandler =
-    Option<Arc<dyn Fn(MultipartError, &HttpRequest) -> Error + Send + Sync>>;
-
 /// [`struct@MultipartForm`] extractor configuration.
 ///
 /// Add to your app data to have it picked up by [`struct@MultipartForm`] extractors.
@@ -61,7 +56,6 @@ type MultipartFormErrorHandler =
 pub struct MultipartFormConfig {
     pub(crate) total_limit: usize,
     pub(crate) memory_limit: usize,
-    pub(crate) err_handler: MultipartFormErrorHandler,
 }
 
 impl MultipartFormConfig {
@@ -87,7 +81,6 @@ impl MultipartFormConfig {
 const DEFAULT_CONFIG: MultipartFormConfig = MultipartFormConfig {
     total_limit: 52_428_800, // 50 MiB
     memory_limit: 2_097_152, // 2 MiB
-    err_handler: None,
 };
 
 impl Default for MultipartFormConfig {

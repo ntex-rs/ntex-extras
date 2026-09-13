@@ -73,7 +73,11 @@ impl Multipart {
                     item: InnerMultipartItem::None,
                 }))),
             },
-            Err(err) => Multipart { error: Some(err), safety: Safety::new(), inner: None },
+            Err(err) => Multipart {
+                error: Some(err),
+                safety: Safety::new(),
+                inner: None,
+            },
         }
     }
 
@@ -216,8 +220,7 @@ impl InnerMultipart {
                     if chunk.len() < boundary.len() {
                         continue;
                     }
-                    if &chunk[..2] == b"--" && &chunk[2..chunk.len() - 2] == boundary.as_bytes()
-                    {
+                    if &chunk[..2] == b"--" && &chunk[2..chunk.len() - 2] == boundary.as_bytes() {
                         break;
                     } else {
                         if chunk.len() < boundary.len() + 2 {
@@ -281,8 +284,7 @@ impl InnerMultipart {
                 match self.state {
                     // read until first boundary
                     InnerState::FirstBoundary => {
-                        match InnerMultipart::skip_until_boundary(&mut payload, &self.boundary)?
-                        {
+                        match InnerMultipart::skip_until_boundary(&mut payload, &self.boundary)? {
                             Some(eof) => {
                                 if eof {
                                     self.state = InnerState::Eof;
@@ -329,9 +331,8 @@ impl InnerMultipart {
 
             let field_content_disposition = if let Some(hv) =
                 headers.get(&header::CONTENT_DISPOSITION)
-                && let Ok(cd) = ContentDisposition::parse_header(
-                    &ntex_files::header::Raw::from(hv.as_bytes()),
-                )
+                && let Ok(cd) =
+                    ContentDisposition::parse_header(&ntex_files::header::Raw::from(hv.as_bytes()))
                 && cd.disposition == DispositionType::FormData
             {
                 Some(cd)
@@ -345,9 +346,7 @@ impl InnerMultipart {
                 };
 
                 let Some(field_name) = cd.get_name() else {
-                    return Poll::Ready(Some(Err(
-                        MultipartError::ContentDispositionNameMissing,
-                    )));
+                    return Poll::Ready(Some(Err(MultipartError::ContentDispositionNameMissing)));
                 };
 
                 Some(field_name.to_owned())
@@ -426,7 +425,10 @@ mod tests {
         }
 
         let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("multipart/mixed"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("multipart/mixed"),
+        );
         match Multipart::boundary(&headers) {
             Err(MultipartError::Boundary) => (),
             _ => unreachable!("should not happen"),

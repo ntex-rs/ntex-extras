@@ -1,9 +1,8 @@
 //! Error and Result module
 use derive_more::{Display, Error, From};
-use ntex::http::StatusCode;
-use ntex::http::error::{DecodeError, PayloadError};
+use ntex::http::{StatusCode, error::DecodeError, error::PayloadError};
 use ntex::rt::BlockingError;
-use ntex::web::error::{DefaultError, WebResponseError};
+use ntex::web::{HttpResponse, error::DefaultError, error::WebResponseError};
 
 /// A set of errors that can occur during parsing multipart streams
 #[derive(Debug, Display, From, Error)]
@@ -55,7 +54,7 @@ pub enum MultipartError {
 
     /// Form field handler raised error.
     #[display("An error occurred processing field: {}", name)]
-    Field { name: String, source: ntex::web::Error },
+    Field { name: String, source: HttpResponse },
 
     /// Duplicate field found (for structure that opted-in to denying duplicate fields).
     #[display("Duplicate field found: {}", _0)]
@@ -81,9 +80,9 @@ pub enum MultipartError {
 }
 
 /// Return `BadRequest` for `MultipartError`
-impl WebResponseError<DefaultError> for MultipartError {
-    fn status_code(&self) -> StatusCode {
-        StatusCode::BAD_REQUEST
+impl<St> WebResponseError<St, DefaultError> for MultipartError {
+    fn error_response(&mut self, _: &St) -> HttpResponse {
+        HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }
 
@@ -91,12 +90,10 @@ impl WebResponseError<DefaultError> for MultipartError {
 mod tests {
     use super::*;
     use ntex::web::HttpResponse;
-    use ntex::web::test::TestRequest;
 
     #[test]
     fn test_multipart_error() {
-        let req = TestRequest::default().to_http_request();
-        let resp: HttpResponse = MultipartError::Boundary.error_response(&req);
+        let resp: HttpResponse = MultipartError::Boundary.error_response(&());
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

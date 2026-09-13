@@ -83,7 +83,10 @@ impl<'a> RawLike<'a> for Raw {
 
     #[inline]
     fn iter(&'a self) -> RawLines<'a> {
-        RawLines { inner: &self.0, pos: 0 }
+        RawLines {
+            inner: &self.0,
+            pos: 0,
+        }
     }
 }
 
@@ -170,7 +173,11 @@ impl PartialEq<str> for Raw {
 impl From<Vec<Vec<u8>>> for Raw {
     #[inline]
     fn from(val: Vec<Vec<u8>>) -> Raw {
-        Raw(Lines::Many(val.into_iter().map(|vec| maybe_literal(vec.into())).collect()))
+        Raw(Lines::Many(
+            val.into_iter()
+                .map(|vec| maybe_literal(vec.into()))
+                .collect(),
+        ))
     }
 }
 

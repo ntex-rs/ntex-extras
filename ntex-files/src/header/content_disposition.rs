@@ -239,12 +239,16 @@ impl ContentDisposition {
 
     /// Return the value of *filename* if exists.
     pub fn get_filename(&self) -> Option<&str> {
-        self.parameters.iter().find_map(DispositionParam::as_filename)
+        self.parameters
+            .iter()
+            .find_map(DispositionParam::as_filename)
     }
 
     /// Return the value of *filename\** if exists.
     pub fn get_filename_ext(&self) -> Option<&ExtendedValue> {
-        self.parameters.iter().find_map(DispositionParam::as_filename_ext)
+        self.parameters
+            .iter()
+            .find_map(DispositionParam::as_filename_ext)
     }
 
     /// Return the value of the parameter which the `name` matches.
@@ -277,8 +281,10 @@ impl Header for ContentDisposition {
                 None => return Err(error::Error::Header),
             };
 
-            let mut cd =
-                ContentDisposition { disposition: disposition.into(), parameters: Vec::new() };
+            let mut cd = ContentDisposition {
+                disposition: disposition.into(),
+                parameters: Vec::new(),
+            };
 
             for section in sections {
                 let mut parts = section.splitn(2, '=');
@@ -422,7 +428,7 @@ impl fmt::Display for DispositionParam {
             }
 
             DispositionParam::Unknown(name, value) => {
-                write!(f, "{}=\"{}\"", name, &RE.replace_all(value, "\\$0").as_ref())
+                write!(f, "{}=\"{}\"", name, RE.replace_all(value, "\\$0").as_ref())
             }
 
             DispositionParam::FilenameExt(ext_value) => {
@@ -487,8 +493,8 @@ mod tests {
                 charset: Charset::Ext(String::from("UTF-8")),
                 language_tag: None,
                 value: vec![
-                    0xc2, 0xa3, 0x20, b'a', b'n', b'd', 0x20, 0xe2, 0x82, 0xac, 0x20, b'r',
-                    b'a', b't', b'e', b's',
+                    0xc2, 0xa3, 0x20, b'a', b'n', b'd', 0x20, 0xe2, 0x82, 0xac, 0x20, b'r', b'a',
+                    b't', b'e', b's',
                 ],
             })],
         };
@@ -512,7 +518,10 @@ mod tests {
         let a: Raw = "attachment; filename=colourful.csv".into();
         let a: ContentDisposition = ContentDisposition::parse_header(&a).unwrap();
         let display_rendered = format!("{}", a);
-        assert_eq!("attachment; filename=\"colourful.csv\"".to_owned(), display_rendered);
+        assert_eq!(
+            "attachment; filename=\"colourful.csv\"".to_owned(),
+            display_rendered
+        );
     }
 }
 

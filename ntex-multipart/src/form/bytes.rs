@@ -18,7 +18,8 @@ pub struct Bytes {
 }
 
 impl FieldReader for Bytes {
-    async fn read_field(
+    async fn read_field<St>(
+        _: &St,
         _: &HttpRequest,
         mut field: Field,
         limits: &mut Limits,

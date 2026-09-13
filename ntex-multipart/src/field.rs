@@ -131,7 +131,12 @@ impl InnerField {
             None
         };
 
-        Ok(InnerField { boundary, payload: Some(payload), eof: false, length: len })
+        Ok(InnerField {
+            boundary,
+            payload: Some(payload),
+            eof: false,
+            length: len,
+        })
     }
 
     /// Reads body part content chunk of the specified size.
@@ -264,9 +269,7 @@ impl InnerField {
                 Ok(None) => Poll::Pending,
                 Ok(Some(line)) => {
                     if line.as_ref() != b"\r\n" {
-                        log::warn!(
-                            "multipart field did not read all the data or it is malformed"
-                        );
+                        log::warn!("multipart field did not read all the data or it is malformed");
                     }
                     Poll::Ready(None)
                 }

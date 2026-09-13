@@ -1,6 +1,6 @@
 [package]
 name = "ntex-files"
-version = "3.2.0"
+version = "4.0.0-beta.0"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Static files support for ntex web."
 readme = "README.md"
@@ -11,28 +11,28 @@ documentation = "https://docs.rs/ntex-files/"
 categories = ["asynchronous", "web-programming::http-server"]
 license = "MIT OR Apache-2.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [lib]
 name = "ntex_files"
 path = "src/lib.rs"
 
 [dependencies]
-ntex = "3.6"
-ntex-http = "1"
-bitflags = "2"
-futures = "0.3"
-derive_more = { version = "2", features = ["from", "display"] }
-http = "1"
-log = "0.4"
-mime = "0.3"
-mime_guess = "2.0"
-percent-encoding = "2.1"
-v_htmlescape = "0.15"
-unicase = "2.6"
-language-tags = "0.3"
-httpdate = "1.0"
-regex = "1.12.3"
+ntex = { workspace = true }
+ntex-http = { workspace = true }
+bitflags = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+httpdate = { workspace = true }
+language-tags = { workspace = true }
+log = { workspace = true }
+mime = { workspace = true }
+mime_guess = { workspace = true }
+percent-encoding = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+v_htmlescape = { workspace = true }
+unicase = { workspace = true }
 
 [dev-dependencies]
-ntex = { version = "3.6.1", features = ["neon", "openssl", "compress"] }
+ntex = { workspace = true, features = ["neon", "openssl", "compress"] }

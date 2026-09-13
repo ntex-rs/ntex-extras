@@ -15,20 +15,28 @@ pub(crate) struct PayloadRef {
 
 impl PayloadRef {
     pub(crate) fn new(payload: PayloadBuffer) -> PayloadRef {
-        PayloadRef { payload: Rc::new(payload.into()) }
+        PayloadRef {
+            payload: Rc::new(payload.into()),
+        }
     }
 
     pub(crate) fn get_mut<'a, 'b>(&'a self, s: &'b Safety) -> Option<RefMut<'a, PayloadBuffer>>
     where
         'a: 'b,
     {
-        if s.current() { Some(self.payload.borrow_mut()) } else { None }
+        if s.current() {
+            Some(self.payload.borrow_mut())
+        } else {
+            None
+        }
     }
 }
 
 impl Clone for PayloadRef {
     fn clone(&self) -> PayloadRef {
-        PayloadRef { payload: Rc::clone(&self.payload) }
+        PayloadRef {
+            payload: Rc::clone(&self.payload),
+        }
     }
 }
 
@@ -45,7 +53,11 @@ impl PayloadBuffer {
     where
         S: Stream<Item = Result<Bytes, PayloadError>> + 'static,
     {
-        PayloadBuffer { eof: false, buf: BytesMut::new(), stream: stream.boxed_local() }
+        PayloadBuffer {
+            eof: false,
+            buf: BytesMut::new(),
+            stream: stream.boxed_local(),
+        }
     }
 
     pub(crate) fn poll_stream(&mut self, cx: &mut Context) -> Result<(), PayloadError> {
@@ -65,7 +77,11 @@ impl PayloadBuffer {
     /// Read exact number of bytes
     #[cfg(test)]
     pub(crate) fn read_exact(&mut self, size: usize) -> Option<Bytes> {
-        if size <= self.buf.len() { Some(self.buf.split_to(size)) } else { None }
+        if size <= self.buf.len() {
+            Some(self.buf.split_to(size))
+        } else {
+            None
+        }
     }
 
     pub(crate) fn read_max(&mut self, size: u64) -> Result<Option<Bytes>, MultipartError> {
@@ -84,7 +100,11 @@ impl PayloadBuffer {
         let res =
             twoway::find_bytes(&self.buf, line).map(|idx| self.buf.split_to(idx + line.len()));
 
-        if res.is_none() && self.eof { Err(MultipartError::Incomplete) } else { Ok(res) }
+        if res.is_none() && self.eof {
+            Err(MultipartError::Incomplete)
+        } else {
+            Ok(res)
+        }
     }
 
     /// Read bytes until new line delimiter
@@ -196,10 +216,16 @@ mod tests {
         sender.feed_data(Bytes::from("line2"));
         lazy(|cx| payload.poll_stream(cx)).await.unwrap();
 
-        assert_eq!(Some(Bytes::from("line")), payload.read_until(b"ne").unwrap());
+        assert_eq!(
+            Some(Bytes::from("line")),
+            payload.read_until(b"ne").unwrap()
+        );
         assert_eq!(payload.buf.len(), 6);
 
-        assert_eq!(Some(Bytes::from("1line2")), payload.read_until(b"2").unwrap());
+        assert_eq!(
+            Some(Bytes::from("1line2")),
+            payload.read_until(b"2").unwrap()
+        );
         assert_eq!(payload.buf.len(), 0);
     }
 }

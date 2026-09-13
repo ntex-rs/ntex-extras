@@ -7,7 +7,9 @@ use std::str::FromStr;
 /// 2. in the range `%x23` to `%x7E`, or
 /// 3. above `%x80`
 fn check_slice_validity(slice: &str) -> bool {
-    slice.bytes().all(|c| c == b'\x21' || (b'\x23'..=b'\x7e').contains(&c) | (c >= b'\x80'))
+    slice
+        .bytes()
+        .all(|c| c == b'\x21' || (b'\x23'..=b'\x7e').contains(&c) | (c >= b'\x80'))
 }
 
 /// An entity tag, defined in [RFC7232](https://tools.ietf.org/html/rfc7232#section-2.3)
@@ -110,7 +112,11 @@ impl EntityTag {
 
 impl Display for EntityTag {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.weak { write!(f, "W/\"{}\"", self.tag) } else { write!(f, "\"{}\"", self.tag) }
+        if self.weak {
+            write!(f, "W/\"{}\"", self.tag)
+        } else {
+            write!(f, "\"{}\"", self.tag)
+        }
     }
 }
 
@@ -123,18 +129,22 @@ impl FromStr for EntityTag {
             return Err(Error::Header);
         }
         // The etag is weak if its first char is not a DQUOTE.
-        if slice.len() >= 2
-            && slice.starts_with('"')
-            && check_slice_validity(&slice[1..length - 1])
+        if slice.len() >= 2 && slice.starts_with('"') && check_slice_validity(&slice[1..length - 1])
         {
             // No need to check if the last char is a DQUOTE,
             // we already did that above.
-            return Ok(EntityTag { weak: false, tag: slice[1..length - 1].to_owned() });
+            return Ok(EntityTag {
+                weak: false,
+                tag: slice[1..length - 1].to_owned(),
+            });
         } else if slice.len() >= 4
             && slice.starts_with("W/\"")
             && check_slice_validity(&slice[3..length - 1])
         {
-            return Ok(EntityTag { weak: true, tag: slice[3..length - 1].to_owned() });
+            return Ok(EntityTag {
+                weak: true,
+                tag: slice[3..length - 1].to_owned(),
+            });
         }
         Err(Error::Header)
     }
@@ -151,7 +161,10 @@ mod tests {
             "\"foobar\"".parse::<EntityTag>().unwrap(),
             EntityTag::strong("foobar".to_owned())
         );
-        assert_eq!("\"\"".parse::<EntityTag>().unwrap(), EntityTag::strong("".to_owned()));
+        assert_eq!(
+            "\"\"".parse::<EntityTag>().unwrap(),
+            EntityTag::strong("".to_owned())
+        );
         assert_eq!(
             "W/\"weaktag\"".parse::<EntityTag>().unwrap(),
             EntityTag::weak("weaktag".to_owned())
@@ -160,14 +173,21 @@ mod tests {
             "W/\"\x65\x62\"".parse::<EntityTag>().unwrap(),
             EntityTag::weak("\x65\x62".to_owned())
         );
-        assert_eq!("W/\"\"".parse::<EntityTag>().unwrap(), EntityTag::weak("".to_owned()));
+        assert_eq!(
+            "W/\"\"".parse::<EntityTag>().unwrap(),
+            EntityTag::weak("".to_owned())
+        );
     }
 
     #[test]
     fn test_etag_parse_failures() {
         // Expected failures
         assert!("no-dquotes".parse::<EntityTag>().is_err());
-        assert!("w/\"the-first-w-is-case-sensitive\"".parse::<EntityTag>().is_err());
+        assert!(
+            "w/\"the-first-w-is-case-sensitive\""
+                .parse::<EntityTag>()
+                .is_err()
+        );
         assert!("".parse::<EntityTag>().is_err());
         assert!("\"unmatched-dquotes1".parse::<EntityTag>().is_err());
         assert!("unmatched-dquotes2\"".parse::<EntityTag>().is_err());
@@ -176,10 +196,19 @@ mod tests {
 
     #[test]
     fn test_etag_fmt() {
-        assert_eq!(format!("{}", EntityTag::strong("foobar".to_owned())), "\"foobar\"");
+        assert_eq!(
+            format!("{}", EntityTag::strong("foobar".to_owned())),
+            "\"foobar\""
+        );
         assert_eq!(format!("{}", EntityTag::strong("".to_owned())), "\"\"");
-        assert_eq!(format!("{}", EntityTag::weak("weak-etag".to_owned())), "W/\"weak-etag\"");
-        assert_eq!(format!("{}", EntityTag::weak("\u{0065}".to_owned())), "W/\"\x65\"");
+        assert_eq!(
+            format!("{}", EntityTag::weak("weak-etag".to_owned())),
+            "W/\"weak-etag\""
+        );
+        assert_eq!(
+            format!("{}", EntityTag::weak("\u{0065}".to_owned())),
+            "W/\"\x65\""
+        );
         assert_eq!(format!("{}", EntityTag::weak("".to_owned())), "W/\"\"");
     }
 

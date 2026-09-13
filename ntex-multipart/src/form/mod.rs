@@ -24,7 +24,8 @@ pub trait FieldReader: Sized + Any {
     /// your implementation of this method, you should [`fuse()`] the `Field` first.
     ///
     /// [`fuse()`]: futures_util::stream::StreamExt::fuse()
-    async fn read_field(
+    async fn read_field<St>(
+        st: &St,
         req: &HttpRequest,
         field: Field,
         limits: &mut Limits,
@@ -40,7 +41,8 @@ pub struct State(pub HashMap<String, Box<dyn Any>>);
 #[doc(hidden)]
 pub trait FieldGroupReader: Sized + Any {
     /// The form will call this function for each matching field.
-    async fn handle_field(
+    async fn handle_field<St>(
+        st: &St,
         req: &HttpRequest,
         field: Field,
         limits: &mut Limits,
@@ -56,7 +58,8 @@ impl<T> FieldGroupReader for Option<T>
 where
     T: FieldReader + 'static,
 {
-    async fn handle_field(
+    async fn handle_field<St>(
+        st: &St,
         req: &HttpRequest,
         field: Field,
         limits: &mut Limits,
@@ -76,7 +79,7 @@ where
         }
 
         let field_name = field.form_field_name.clone();
-        let t = T::read_field(req, field, limits).await?;
+        let t = T::read_field(st, req, field, limits).await?;
         state.insert(field_name, Box::new(t));
         Ok(())
     }
@@ -90,7 +93,8 @@ impl<T> FieldGroupReader for Vec<T>
 where
     T: FieldReader + 'static,
 {
-    async fn handle_field(
+    async fn handle_field<St>(
+        st: &St,
         req: &HttpRequest,
         field: Field,
         limits: &mut Limits,
@@ -105,14 +109,17 @@ where
             .downcast_mut::<Vec<T>>()
             .unwrap();
 
-        let item = T::read_field(req, field, limits).await?;
+        let item = T::read_field(st, req, field, limits).await?;
         vec.push(item);
 
         Ok(())
     }
 
     fn from_state(name: &str, state: &mut State) -> Result<Self, MultipartError> {
-        Ok(state.remove(name).map(|m| *m.downcast::<Vec<T>>().unwrap()).unwrap_or_default())
+        Ok(state
+            .remove(name)
+            .map(|m| *m.downcast::<Vec<T>>().unwrap())
+            .unwrap_or_default())
     }
 }
 
@@ -120,7 +127,8 @@ impl<T> FieldGroupReader for T
 where
     T: FieldReader,
 {
-    async fn handle_field(
+    async fn handle_field<St>(
+        st: &St,
         req: &HttpRequest,
         field: Field,
         limits: &mut Limits,
@@ -140,7 +148,7 @@ where
         }
 
         let field_name = field.form_field_name.clone();
-        let t = T::read_field(req, field, limits).await?;
+        let t = T::read_field(st, req, field, limits).await?;
         state.insert(field_name, Box::new(t));
         Ok(())
     }
@@ -157,7 +165,8 @@ impl<T> FieldGroupReader for Option<Vec<T>>
 where
     T: FieldReader,
 {
-    async fn handle_field(
+    async fn handle_field<St>(
+        st: &St,
         req: &HttpRequest,
         field: Field,
         limits: &mut Limits,
@@ -172,7 +181,7 @@ where
             .downcast_mut::<Vec<T>>()
             .unwrap();
 
-        let item = T::read_field(req, field, limits).await?;
+        let item = T::read_field(st, req, field, limits).await?;
         vec.push(item);
 
         Ok(())
