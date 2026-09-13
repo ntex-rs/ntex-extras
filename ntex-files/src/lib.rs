@@ -219,7 +219,7 @@ type MimeOverride = dyn Fn(&mime::Name) -> header::DispositionType;
 /// use ntex::web::App;
 /// use ntex_files as fs;
 ///
-/// let app = App::new()
+/// let app = App::default()
 ///    .service(fs::Files::new("/static", "."));
 /// ```
 pub struct Files<St: AppState, In> {

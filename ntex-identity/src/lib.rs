@@ -35,7 +35,7 @@
 //!     web::HttpResponse::Ok().build()
 //! }
 //!
-//! let app = web::App::new().middleware(IdentityService::new(
+//! let app = web::App::default().middleware(IdentityService::new(
 //!     // <- create identity middleware
 //!     CookieIdentityPolicy::new(&[0; 32])    // <- create cookie identity policy
 //!           .name("auth-cookie")
@@ -201,7 +201,7 @@ pub trait IdentityPolicy<St, In>: Sized + 'static {
 /// use ntex::web::App;
 /// use ntex_identity::{CookieIdentityPolicy, IdentityService};
 ///
-/// let app = App::new().middleware(IdentityService::new(
+/// let app = App::default().middleware(IdentityService::new(
 ///     // <- create identity middleware
 ///     CookieIdentityPolicy::new(&[0; 32])    // <- create cookie session backend
 ///           .name("auth-cookie")
@@ -445,7 +445,7 @@ impl CookieIdentityInner {
 /// use ntex::web::App;
 /// use ntex_identity::{CookieIdentityPolicy, IdentityService};
 ///
-/// let app = App::new().middleware(IdentityService::new(
+/// let app = App::default().middleware(IdentityService::new(
 ///     // <- create identity middleware
 ///     CookieIdentityPolicy::new(&[0; 32])  // <- construct cookie policy
 ///            .domain("www.rust-lang.org")
