@@ -13,7 +13,7 @@ use mime_guess::from_path;
 use ntex::http::body::SizedStream;
 use ntex::http::header::ContentEncoding;
 use ntex::http::{self, StatusCode};
-use ntex::web::{AppState, BodyEncoding, HttpRequest, HttpResponse, Responder};
+use ntex::web::{BodyEncoding, HttpRequest, HttpResponse, Responder, State};
 
 use crate::{ChunkedReadFile, header, header::Header, range::HttpRange};
 
@@ -502,7 +502,7 @@ fn none_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
     true
 }
 
-impl<St: AppState> Responder<St> for NamedFile {
+impl<St: State> Responder<St> for NamedFile {
     async fn respond_to(self, _: &St, req: &HttpRequest) -> HttpResponse {
         self.into_response(req)
     }

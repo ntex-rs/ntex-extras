@@ -1,5 +1,4 @@
 use derive_more::{Deref, DerefMut};
-use futures::future::LocalBoxFuture;
 use ntex::web::HttpRequest;
 
 use crate::{Field, MultipartError, form::Limits, form::State};
@@ -17,12 +16,13 @@ pub trait MultipartCollect: Sized {
 
     /// The extractor will call this function for each incoming field, the state can be updated
     /// with the processed field data.
-    fn handle_field<'t>(
-        req: &'t HttpRequest,
+    async fn handle_field<St>(
+        st: &St,
+        req: &HttpRequest,
         field: Field,
-        limits: &'t mut Limits,
-        state: &'t mut State,
-    ) -> LocalBoxFuture<'t, Result<(), MultipartError>>;
+        limits: &mut Limits,
+        state: &mut State,
+    ) -> Result<(), MultipartError>;
 
     /// Once all the fields have been processed and stored in the state, this is called
     /// to convert into the struct representation.

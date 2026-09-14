@@ -20,7 +20,7 @@ use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
 use ntex::web::error::{WebError, WebResponseError};
 use ntex::web::guard::Guard;
-use ntex::web::{self, AppState, FromRequest, HttpRequest, HttpResponse, WebRequest, WebResponse};
+use ntex::web::{self, FromRequest, HttpRequest, HttpResponse, State, WebRequest, WebResponse};
 use ntex::{Ctx, IntoServiceFactory, Service, ServiceFactory, util::Bytes};
 use percent_encoding::{CONTROLS, utf8_percent_encode};
 use v_htmlescape::escape as escape_html_entity;
@@ -33,9 +33,9 @@ mod range;
 use self::error::{FilesError, UriSegmentError};
 pub use crate::{named::NamedFile, range::HttpRange};
 
-type HttpService<St: AppState, In> =
+type HttpService<St: State, In> =
     BoxService<St, WebRequest<In>, WebResponse, WebError<St, St::Error>>;
-type HttpServiceFactory<St: AppState, In> =
+type HttpServiceFactory<St: State, In> =
     BoxServiceFactory<St, WebRequest<In>, WebResponse, WebError<St, St::Error>, Failure>;
 
 /// Return the MIME type associated with a filename extension (case-insensitive).
@@ -222,7 +222,7 @@ type MimeOverride = dyn Fn(&mime::Name) -> header::DispositionType;
 /// let app = App::default()
 ///    .service(fs::Files::new("/static", "."));
 /// ```
-pub struct Files<St: AppState, In> {
+pub struct Files<St: State, In> {
     path: String,
     directory: PathBuf,
     index: Option<String>,
@@ -235,7 +235,7 @@ pub struct Files<St: AppState, In> {
     guards: Option<Rc<dyn Guard>>,
 }
 
-impl<St: AppState, In> Clone for Files<St, In> {
+impl<St: State, In> Clone for Files<St, In> {
     fn clone(&self) -> Self {
         Self {
             directory: self.directory.clone(),
@@ -252,7 +252,7 @@ impl<St: AppState, In> Clone for Files<St, In> {
     }
 }
 
-impl<St: AppState, In: 'static> Files<St, In> {
+impl<St: State, In: 'static> Files<St, In> {
     /// Create new `Files` instance for specified base directory.
     ///
     /// `File` uses `ThreadPool` for blocking filesystem operations.
@@ -381,7 +381,7 @@ impl<St: AppState, In: 'static> Files<St, In> {
     }
 }
 
-impl<St: AppState, In: 'static> WebServiceFactory<St, In> for Files<St, In>
+impl<St: State, In: 'static> WebServiceFactory<St, In> for Files<St, In>
 where
     FilesError: WebResponseError<St, St::Error>,
 {
@@ -395,7 +395,7 @@ where
     }
 }
 
-impl<St: AppState, In> ServiceFactory<St, WebRequest<In>> for Files<St, In>
+impl<St: State, In> ServiceFactory<St, WebRequest<In>> for Files<St, In>
 where
     In: 'static,
     FilesError: WebResponseError<St, St::Error>,
@@ -436,7 +436,7 @@ where
     }
 }
 
-pub struct FilesService<St: AppState, In> {
+pub struct FilesService<St: State, In> {
     directory: PathBuf,
     index: Option<String>,
     show_index: bool,
@@ -448,7 +448,7 @@ pub struct FilesService<St: AppState, In> {
     guards: Option<Rc<dyn Guard>>,
 }
 
-impl<St: AppState, In> FilesService<St, In>
+impl<St: State, In> FilesService<St, In>
 where
     FilesError: WebResponseError<St, St::Error>,
 {
@@ -467,7 +467,7 @@ where
     }
 }
 
-impl<St: AppState, In> Service<St, WebRequest<In>> for FilesService<St, In>
+impl<St: State, In> Service<St, WebRequest<In>> for FilesService<St, In>
 where
     FilesError: WebResponseError<St, St::Error>,
 {

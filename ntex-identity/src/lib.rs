@@ -56,7 +56,7 @@ use ntex::http::{HttpMessage, Payload, error::HttpError};
 use ntex::service::{Ctx, Middleware, Service};
 use ntex::util::Extensions;
 use ntex::web::{
-    AppState, DefaultError, FromRequest, HttpRequest, WebRequest, WebResponse, WebResponseError,
+    DefaultError, FromRequest, HttpRequest, State, WebRequest, WebResponse, WebResponseError,
 };
 
 /// The extractor type to obtain your identity from a request.
@@ -159,7 +159,7 @@ where
 /// }
 /// # fn main() {}
 /// ```
-impl<St: AppState> FromRequest<St> for Identity {
+impl<St: State> FromRequest<St> for Identity {
     type Error = Infallible;
 
     #[inline]
@@ -250,7 +250,7 @@ impl<S: Clone, T> Clone for IdentityServiceMiddleware<S, T> {
 impl<S, St, In, T> Service<St, WebRequest<In>> for IdentityServiceMiddleware<S, T>
 where
     S: Service<St, WebRequest<In>, Res = WebResponse> + 'static,
-    St: AppState,
+    St: State,
     T: IdentityPolicy<St, In>,
     T::Error: WebResponseError<St, St::Error>,
     S::Error: WebResponseError<St, St::Error>,

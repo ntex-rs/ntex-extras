@@ -21,7 +21,7 @@ use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
 use ntex::http::{HttpMessage, header::HeaderValue, header::SET_COOKIE};
 use ntex::service::{Ctx, Middleware, Service};
-use ntex::web::{AppState, DefaultError, WebRequest, WebResponse, WebResponseError};
+use ntex::web::{DefaultError, State, WebRequest, WebResponse, WebResponseError};
 use serde_json::error::Error as JsonError;
 use time::{Duration, OffsetDateTime};
 
@@ -304,7 +304,7 @@ pub struct CookieSessionMiddleware<S> {
     inner: Rc<CookieSessionInner>,
 }
 
-impl<S, St: AppState, In> Service<St, WebRequest<In>> for CookieSessionMiddleware<S>
+impl<S, St: State, In> Service<St, WebRequest<In>> for CookieSessionMiddleware<S>
 where
     S: Service<St, WebRequest<In>, Res = WebResponse>,
     S::Error: 'static,
