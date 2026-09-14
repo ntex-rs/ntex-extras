@@ -2,7 +2,7 @@
 use std::convert::Infallible;
 
 use futures::TryStreamExt;
-use ntex::web::{AppState, FromRequest, HttpRequest, WebResponseError};
+use ntex::web::{self, FromRequest, HttpRequest, WebResponseError};
 use ntex::{http::Payload, util::HashMap};
 
 use crate::form::{Limits, State};
@@ -50,14 +50,14 @@ impl<St> FromRequest<St> for Multipart {
 impl<T, St> FromRequest<St> for MultipartForm<T>
 where
     T: MultipartCollect + 'static,
-    St: AppState,
+    St: web::State,
     MultipartError: WebResponseError<St, St::Error>,
 {
     type Error = MultipartError;
 
     #[inline]
     async fn from_request(
-        _: &St,
+        st: &St,
         req: &HttpRequest,
         payload: &mut Payload,
     ) -> Result<Self, Self::Error> {
@@ -93,7 +93,7 @@ where
 
             limits.field_limit_remaining.clone_from(entry);
 
-            T::handle_field(req, field, &mut limits, &mut state).await?;
+            T::handle_field(st, req, field, &mut limits, &mut state).await?;
 
             // Update the stored limit
             *entry = limits.field_limit_remaining;

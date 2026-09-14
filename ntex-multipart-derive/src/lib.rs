@@ -251,9 +251,7 @@ pub fn impl_multipart_form(input: TokenStream) -> TokenStream {
         let ty = &field.ty;
 
         handle_field_impl.extend(quote!(
-            #name => ::std::boxed::Box::pin(
-                <#ty as ::ntex_multipart::form::FieldGroupReader>::handle_field(req, field, limits, state, #duplicate_field)
-            ),
+            #name => <#ty as ::ntex_multipart::form::FieldGroupReader>::handle_field(st, req, field, limits, state, #duplicate_field).await,
         ));
     }
 
@@ -277,15 +275,16 @@ pub fn impl_multipart_form(input: TokenStream) -> TokenStream {
                 }
             }
 
-            fn handle_field<'t>(
-                req: &'t ::ntex::web::HttpRequest,
+            async fn handle_field<St>(
+                st: &St,
+                req: &::ntex::web::HttpRequest,
                 field: ::ntex_multipart::Field,
-                limits: &'t mut ::ntex_multipart::form::Limits,
-                state: &'t mut ::ntex_multipart::form::State,
-            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::std::result::Result<(), ::ntex_multipart::MultipartError>> + 't>> {
+                limits: &mut ::ntex_multipart::form::Limits,
+                state: &mut ::ntex_multipart::form::State,
+            ) -> ::std::result::Result<(), ::ntex_multipart::MultipartError> {
                 match field.name().unwrap() {
                     #handle_field_impl
-                    _ => return ::std::boxed::Box::pin(::std::future::ready(#unknown_field_result)),
+                    _ => return #unknown_field_result,
                 }
             }
 

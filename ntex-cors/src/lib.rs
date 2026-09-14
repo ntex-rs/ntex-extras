@@ -54,7 +54,7 @@ use ntex::http::header::{self, HeaderName, HeaderValue};
 use ntex::http::{HeaderMap, Method, RequestHead, StatusCode, Uri, error::HttpError};
 use ntex::service::{Ctx, Middleware, Service};
 use ntex::util::{ByteString, Either};
-use ntex::web::{AppState, DefaultError, HttpResponse, WebRequest, WebResponse, WebResponseError};
+use ntex::web::{DefaultError, HttpResponse, State, WebRequest, WebResponse, WebResponseError};
 
 /// A set of errors that can occur during processing CORS
 #[derive(Debug, Display, thiserror::Error)]
@@ -746,7 +746,7 @@ pub struct CorsService<S> {
     inner: Rc<Inner>,
 }
 
-impl<S, St: AppState, In> Service<St, WebRequest<In>> for CorsService<S>
+impl<S, St: State, In> Service<St, WebRequest<In>> for CorsService<S>
 where
     S: Service<St, WebRequest<In>, Res = WebResponse>,
     CorsError: WebResponseError<St, St::Error>,
