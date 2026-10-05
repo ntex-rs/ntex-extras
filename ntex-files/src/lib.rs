@@ -14,9 +14,10 @@ use std::{cmp, fmt::Write, io, io::Read, io::Seek, pin::Pin, rc::Rc, task::Conte
 use futures::{Future, Stream, future::FutureExt, future::LocalBoxFuture};
 use mime_guess::from_ext;
 use ntex::error::{Failure, IntoFailure};
-use ntex::http::{Method, Payload, Uri, error::BlockingError};
+use ntex::http::{Method, Payload, error::BlockingError};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
+use ntex::url::Url;
 use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
 use ntex::web::error::{WebError, WebResponseError};
 use ntex::web::guard::Guard;
@@ -586,7 +587,7 @@ impl PathBufWrp {
             } else if cfg!(windows) && segment.contains('\\') {
                 return Err(UriSegmentError::BadChar('\\'));
             } else {
-                buf.push(Uri::unquote(segment).as_ref())
+                buf.push(<Url as ResourcePath>::unquote(segment).as_ref())
             }
         }
 

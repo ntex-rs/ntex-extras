@@ -50,11 +50,31 @@ use std::{
 };
 
 use derive_more::Display;
+use ntex::error::{ErrorDiagnostic, Failure, IntoFailure};
 use ntex::http::header::{self, HeaderName, HeaderValue};
-use ntex::http::{HeaderMap, Method, RequestHead, StatusCode, Uri, error::HttpError};
+use ntex::http::{HeaderMap, Method, RequestHead, StatusCode, error::HttpError};
 use ntex::service::{Ctx, Middleware, Service};
+use ntex::url::{InvalidUrl, Url};
 use ntex::util::{ByteString, Either};
 use ntex::web::{DefaultError, HttpResponse, State, WebRequest, WebResponse, WebResponseError};
+
+/// Invalid cors configuration
+#[derive(Debug, thiserror::Error)]
+enum ConfigError {
+    #[error(transparent)]
+    Http(HttpError),
+    #[error(transparent)]
+    Origin(InvalidUrl),
+}
+
+impl ErrorDiagnostic for ConfigError {
+    fn signature(&self) -> &'static str {
+        match self {
+            ConfigError::Http(_) => "ntex-cors-InvalidConfig",
+            ConfigError::Origin(_) => "ntex-cors-InvalidOrigin",
+        }
+    }
+}
 
 /// A set of errors that can occur during processing CORS
 #[derive(Debug, Display, thiserror::Error)]
@@ -157,7 +177,7 @@ pub struct Cors {
     cors: Option<Inner>,
     methods: bool,
     expose_hdrs: HashSet<HeaderName>,
-    error: Option<HttpError>,
+    error: Option<Failure>,
 }
 
 impl Cors {
@@ -230,7 +250,7 @@ impl Cors {
     /// Builder panics if supplied origin is not valid uri.
     pub fn allowed_origin(mut self, origin: &str) -> Self {
         if let Some(cors) = cors(&mut self.cors, &self.error) {
-            match Uri::try_from(origin) {
+            match Url::parse(origin) {
                 Ok(_) => {
                     // If the origin is "*", set the origins to `All`
                     if origin.trim() == "*" {
@@ -245,7 +265,7 @@ impl Cors {
                     }
                 }
                 Err(e) => {
-                    self.error = Some(e.into());
+                    self.error = Some(ConfigError::Origin(e).fail());
                 }
             }
         }
@@ -284,7 +304,7 @@ impl Cors {
                         cors.methods.insert(method);
                     }
                     Err(e) => {
-                        self.error = Some(e.into());
+                        self.error = Some(ConfigError::Http(e.into()).fail());
                         break;
                     }
                 }
@@ -309,7 +329,7 @@ impl Cors {
                         headers.insert(method);
                     }
                 }
-                Err(e) => self.error = Some(e.into()),
+                Err(e) => self.error = Some(ConfigError::Http(e.into()).fail()),
             }
         }
         self
@@ -344,7 +364,7 @@ impl Cors {
                         }
                     }
                     Err(e) => {
-                        self.error = Some(e.into());
+                        self.error = Some(ConfigError::Http(e.into()).fail());
                         break;
                     }
                 }
@@ -373,7 +393,7 @@ impl Cors {
                     self.expose_hdrs.insert(method);
                 }
                 Err(e) => {
-                    self.error = Some(e.into());
+                    self.error = Some(ConfigError::Http(e.into()).fail());
                     break;
                 }
             }
@@ -516,7 +536,7 @@ impl Cors {
     }
 }
 
-fn cors<'a>(parts: &'a mut Option<Inner>, err: &Option<HttpError>) -> Option<&'a mut Inner> {
+fn cors<'a>(parts: &'a mut Option<Inner>, err: &Option<Failure>) -> Option<&'a mut Inner> {
     if err.is_some() {
         return None;
     }

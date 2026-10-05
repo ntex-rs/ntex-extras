@@ -1,6 +1,6 @@
 [package]
 name = "ntex-files"
-version = "4.0.0"
+version = "4.1.0"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Static files support for ntex web."
 readme = "README.md"
@@ -11,7 +11,7 @@ documentation = "https://docs.rs/ntex-files/"
 categories = ["asynchronous", "web-programming::http-server"]
 license = "MIT OR Apache-2.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97"
 
 [lib]
 name = "ntex_files"
@@ -35,4 +35,4 @@ v_htmlescape = { workspace = true }
 unicase = { workspace = true }
 
 [dev-dependencies]
-ntex = { workspace = true, features = ["neon", "openssl", "compress"] }
+ntex = { workspace = true, features = ["openssl", "compress"] }
