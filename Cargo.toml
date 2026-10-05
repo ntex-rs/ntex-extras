@@ -20,16 +20,16 @@ ntex-session = { path = "ntex-session" }
 [workspace.package]
 license = "MIT OR Apache-2.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97"
 
 [workspace.dependencies]
-ntex = "4.0.0-beta.12"
-ntex-http = "1"
-ntex-util = "4.0.0"
+ntex = "4.0.0-beta.16"
+ntex-http = "2"
+ntex-util = "4.2.1"
 
-ntex-files = "4.0.0"
-ntex-multipart = "4.0.0"
-ntex-multipart-derive = "4.0.0"
+ntex-files = "4.1.0"
+ntex-multipart = "4.1.0"
+ntex-multipart-derive = "4.1.0"
 
 bitflags = "2"
 bytesize = "2"
