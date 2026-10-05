@@ -23,7 +23,7 @@ edition = "2024"
 rust-version = "1.97"
 
 [workspace.dependencies]
-ntex = "4.0.0-beta.16"
+ntex = "4.0.0-beta.17"
 ntex-http = "2"
 ntex-util = "4.2.1"
 
@@ -60,3 +60,4 @@ thiserror = "2"
 time = { version = "0.3.54", default-features = false, features = ["std"] }
 v_htmlescape = "0.15"
 unicase = "2.6"
+urly = "1.1.0"

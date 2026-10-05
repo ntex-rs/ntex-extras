@@ -250,7 +250,7 @@ impl Cors {
     /// Builder panics if supplied origin is not valid uri.
     pub fn allowed_origin(mut self, origin: &str) -> Self {
         if let Some(cors) = cors(&mut self.cors, &self.error) {
-            match Url::parse(origin) {
+            match Url::try_from(origin) {
                 Ok(_) => {
                     // If the origin is "*", set the origins to `All`
                     if origin.trim() == "*" {
