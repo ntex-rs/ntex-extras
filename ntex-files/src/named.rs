@@ -291,7 +291,9 @@ impl NamedFile {
         }
 
         // This etag format is similar to Apache's.
-        self.modified.as_ref().map(|mtime| {
+        // A modification time before the UNIX epoch gets no etag.
+        let dur = self.modified?.duration_since(UNIX_EPOCH).ok()?;
+        Some({
             let ino = {
                 #[cfg(unix)]
                 {
@@ -303,9 +305,6 @@ impl NamedFile {
                 }
             };
 
-            let dur = mtime
-                .duration_since(UNIX_EPOCH)
-                .expect("modification time must be after epoch");
             header::EntityTag::strong(format!(
                 "{:x}:{:x}:{:x}:{:x}",
                 ino,
@@ -317,7 +316,14 @@ impl NamedFile {
     }
 
     pub(crate) fn last_modified(&self) -> Option<header::HttpDate> {
-        self.modified.map(|mtime| mtime.into())
+        // `httpdate` can only represent times from 1970 up to the end of year
+        // 9999, and converting any other time into an `HttpDate` panics.
+        let mtime = self.modified?;
+        let dur = mtime.duration_since(UNIX_EPOCH).ok()?;
+        if dur.as_secs() >= 253_402_300_800 {
+            return None;
+        }
+        Some(mtime.into())
     }
 
     pub fn into_response(self, req: &HttpRequest) -> HttpResponse {
@@ -453,14 +459,21 @@ impl NamedFile {
         // check for range header
         if let Some(ranges) = ranges.filter(|_| range_allowed) {
             if let Ok(rangesheader) = ranges.to_str() {
-                if let Ok(rangesvec) = HttpRange::parse(rangesheader, length) {
-                    length = rangesvec[0].length;
-                    offset = rangesvec[0].start;
-                    resp.encoding(ContentEncoding::Identity);
-                    resp.header(
-                        http::header::CONTENT_RANGE,
-                        format!("bytes {}-{}/{}", offset, offset + length - 1, self.md.len()),
-                    );
+                if let Some(range) = HttpRange::parse(rangesheader, length)
+                    .ok()
+                    .and_then(|ranges| ranges.first().copied())
+                {
+                    // A suffix range of an empty file selects zero bytes, which
+                    // a Content-Range cannot express, so the range is ignored.
+                    if range.length > 0 {
+                        length = range.length;
+                        offset = range.start;
+                        resp.encoding(ContentEncoding::Identity);
+                        resp.header(
+                            http::header::CONTENT_RANGE,
+                            format!("bytes {}-{}/{}", offset, offset + length - 1, self.md.len()),
+                        );
+                    }
                 } else {
                     resp.header(http::header::CONTENT_RANGE, format!("bytes */{}", length));
                     return resp.status(StatusCode::RANGE_NOT_SATISFIABLE).build();
@@ -584,5 +597,69 @@ fn none_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
 impl<St: State> Responder<St> for NamedFile {
     async fn respond_to(self, _: &St, req: &HttpRequest) -> HttpResponse {
         self.into_response(req)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use ntex::web::test::{self, TestRequest};
+
+    use super::*;
+
+    /// Opens a file whose modification time is one day before the UNIX epoch.
+    fn file_modified_before_epoch(dir: &tempfile::TempDir) -> NamedFile {
+        let path = dir.path().join("old.txt");
+        std::fs::write(&path, b"old").unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH - Duration::from_secs(86_400))
+            .unwrap();
+        assert!(std::fs::metadata(&path).unwrap().modified().unwrap() < UNIX_EPOCH);
+
+        NamedFile::open(&path).unwrap()
+    }
+
+    #[ntex::test]
+    async fn test_modified_before_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_modified_before_epoch(&dir);
+
+        let req = TestRequest::default().to_http_request();
+        let resp = test::respond_to(file, &req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get(http::header::ETAG).is_none());
+        assert!(resp.headers().get(http::header::LAST_MODIFIED).is_none());
+    }
+
+    #[ntex::test]
+    async fn test_modified_before_epoch_without_etag() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_modified_before_epoch(&dir).use_etag(false);
+
+        let req = TestRequest::default().to_http_request();
+        let resp = test::respond_to(file, &req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get(http::header::ETAG).is_none());
+        assert!(resp.headers().get(http::header::LAST_MODIFIED).is_none());
+    }
+
+    #[ntex::test]
+    async fn test_modified_after_year_9999() {
+        let mut file = NamedFile::open("Cargo.toml").unwrap();
+        // 10000-01-01T00:00:00Z, the first instant an HTTP-date cannot express
+        file.modified = Some(UNIX_EPOCH + Duration::from_secs(253_402_300_800));
+
+        let req = TestRequest::default().to_http_request();
+        let resp = test::respond_to(file, &req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get(http::header::ETAG).is_some());
+        assert!(resp.headers().get(http::header::LAST_MODIFIED).is_none());
     }
 }
