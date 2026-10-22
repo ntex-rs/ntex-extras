@@ -368,6 +368,9 @@ impl NamedFile {
             false
         };
 
+        // check If-Range: a validator that does not match makes Range ignored
+        let range_allowed = if_range_matches(etag.as_ref(), last_modified, req);
+
         let mut resp = HttpResponse::builder(self.status_code);
         if self.flags.contains(Flags::CONTENT_DISPOSITION) {
             resp.header(
@@ -396,7 +399,11 @@ impl NamedFile {
         let mut offset = 0;
 
         // check for range header
-        if let Some(ranges) = req.headers().get(&http::header::RANGE) {
+        if let Some(ranges) = req
+            .headers()
+            .get(&http::header::RANGE)
+            .filter(|_| range_allowed)
+        {
             if let Ok(rangesheader) = ranges.to_str() {
                 if let Ok(rangesvec) = HttpRange::parse(rangesheader, length) {
                     length = rangesvec[0].length;
@@ -477,6 +484,30 @@ fn any_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
         }
     }
     true
+}
+
+/// Returns true if `req` has no `If-Range` header or one whose validator matches the file.
+///
+/// An entity-tag must match `etag` by strong comparison, an HTTP-date must be
+/// equal to `last_modified`.
+fn if_range_matches(
+    etag: Option<&header::EntityTag>,
+    last_modified: Option<header::HttpDate>,
+    req: &HttpRequest,
+) -> bool {
+    let Some(val) = req.headers().get(http::header::IF_RANGE) else {
+        return true;
+    };
+    let Ok(val) = val.to_str() else {
+        return false;
+    };
+    if let Ok(tag) = val.parse::<header::EntityTag>() {
+        etag.is_some_and(|etag| etag.strong_eq(&tag))
+    } else if let Ok(date) = val.parse::<header::HttpDate>() {
+        last_modified == Some(date)
+    } else {
+        false
+    }
 }
 
 /// Returns true if `req` doesn't have an `If-None-Match` header matching `req`.
