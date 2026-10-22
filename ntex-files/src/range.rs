@@ -42,6 +42,11 @@ impl HttpRange {
                     // range start relative to the end of the file.
                     let mut length: i64 = end_str.parse().map_err(|_| ())?;
 
+                    if length == 0 {
+                        // A zero-length suffix range selects no bytes.
+                        no_overlap = true;
+                        return Ok(None);
+                    }
                     if length > size_sig {
                         length = size_sig;
                     }
@@ -125,6 +130,15 @@ mod tests {
             T("bytes=0x01-0x02", 10, vec![]),
             T("bytes=         ", 10, vec![]),
             T("bytes= , , ,   ", 10, vec![]),
+            T("bytes=-0", 10, vec![]),
+            T(
+                "bytes=-0,2-3",
+                10,
+                vec![HttpRange {
+                    start: 2,
+                    length: 2,
+                }],
+            ),
             T(
                 "bytes=0-9",
                 10,

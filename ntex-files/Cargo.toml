@@ -36,3 +36,4 @@ unicase = { workspace = true }
 
 [dev-dependencies]
 ntex = { workspace = true, features = ["openssl", "compress"] }
+tempfile = { workspace = true }

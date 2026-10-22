@@ -1333,6 +1333,183 @@ mod tests {
     }
 
     #[ntex::test]
+    async fn test_named_file_empty_range_header() {
+        let srv = test::init_service(App::new().service(Files::new("/", "."))).await;
+
+        for range in ["", "bytes=", "bytes=,", "bytes= , ,"] {
+            let request = TestRequest::get()
+                .uri("/tests/test.binary")
+                .header(http::header::RANGE, range)
+                .to_request();
+            let response = test::call_service(&srv, request).await;
+
+            assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+            assert_eq!(
+                response.headers().get(http::header::CONTENT_RANGE).unwrap(),
+                "bytes */100"
+            );
+        }
+    }
+
+    #[ntex::test]
+    async fn test_named_file_zero_length_suffix_range() {
+        let srv = test::init_service(App::new().service(Files::new("/", "."))).await;
+
+        let request = TestRequest::get()
+            .uri("/tests/test.binary")
+            .header(http::header::RANGE, "bytes=-0")
+            .to_request();
+        let response = test::call_service(&srv, request).await;
+
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response.headers().get(http::header::CONTENT_RANGE).unwrap(),
+            "bytes */100"
+        );
+    }
+
+    #[ntex::test]
+    async fn test_named_file_suffix_range_of_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("empty"), b"").unwrap();
+        let srv = test::init_service(App::new().service(Files::new("/", dir.path()))).await;
+
+        let request = TestRequest::get()
+            .uri("/empty")
+            .header(http::header::RANGE, "bytes=-5")
+            .to_request();
+        let response = test::call_service(&srv, request).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(http::header::CONTENT_RANGE)
+                .is_none()
+        );
+        assert!(test::read_body(response).await.is_empty());
+    }
+
+    #[ntex::test]
+    async fn test_named_file_one_byte_range() {
+        let srv = test::init_service(App::new().service(Files::new("/", "."))).await;
+        let data = fs::read("tests/test.binary").unwrap();
+
+        for (range, content_range, body) in [
+            ("bytes=0-0", "bytes 0-0/100", &data[..1]),
+            ("bytes=-1", "bytes 99-99/100", &data[99..]),
+        ] {
+            let request = TestRequest::get()
+                .uri("/tests/test.binary")
+                .header(http::header::RANGE, range)
+                .to_request();
+            let response = test::call_service(&srv, request).await;
+
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT, "{range}");
+            assert_eq!(
+                response.headers().get(http::header::CONTENT_RANGE).unwrap(),
+                content_range,
+                "{range}"
+            );
+            assert_eq!(&test::read_body(response).await[..], body, "{range}");
+        }
+    }
+
+    #[ntex::test]
+    async fn test_named_file_range_responses_match_the_selected_bytes() {
+        // What a single-range request selects in a file of `size` bytes
+        // (RFC 9110, section 14.1.2).
+        enum Selected {
+            Bytes(u64, u64),
+            // A suffix range of an empty file: satisfiable, but there is no
+            // byte to describe in a Content-Range, so the range is ignored.
+            Ignored,
+            Unsatisfiable,
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let srv = test::init_service(App::new().service(Files::new("/", dir.path()))).await;
+
+        for size in [5u64, 2, 1, 0] {
+            let data: Vec<u8> = (0..size as u8).collect();
+            fs::write(dir.path().join(size.to_string()), &data).unwrap();
+
+            let mut cases = Vec::new();
+            for a in 0..=size + 1 {
+                cases.push((
+                    format!("bytes={a}-"),
+                    if a < size {
+                        Selected::Bytes(a, size - 1)
+                    } else {
+                        Selected::Unsatisfiable
+                    },
+                ));
+                cases.push((
+                    format!("bytes=-{a}"),
+                    if a == 0 {
+                        Selected::Unsatisfiable
+                    } else if size == 0 {
+                        Selected::Ignored
+                    } else {
+                        Selected::Bytes(size - a.min(size), size - 1)
+                    },
+                ));
+                for b in 0..=size + 1 {
+                    cases.push((
+                        format!("bytes={a}-{b}"),
+                        if a <= b && a < size {
+                            Selected::Bytes(a, b.min(size - 1))
+                        } else {
+                            Selected::Unsatisfiable
+                        },
+                    ));
+                }
+            }
+            for range in ["", "bytes=", "bytes=,"] {
+                cases.push((range.to_string(), Selected::Unsatisfiable));
+            }
+
+            for (range, selected) in cases {
+                let request = TestRequest::get()
+                    .uri(&format!("/{size}"))
+                    .header(http::header::RANGE, range.as_str())
+                    .to_request();
+                let response = test::call_service(&srv, request).await;
+                let status = response.status();
+                let content_range = response
+                    .headers()
+                    .get(http::header::CONTENT_RANGE)
+                    .map(|v| v.to_str().unwrap().to_string());
+                let body = test::read_body(response).await;
+
+                let (expected_status, expected_range, expected_body) = match selected {
+                    // A range that covers the whole file is answered with 200
+                    // and the whole file.
+                    Selected::Bytes(0, last) if last == size - 1 => (
+                        StatusCode::OK,
+                        Some(format!("bytes 0-{last}/{size}")),
+                        &data[..],
+                    ),
+                    Selected::Bytes(first, last) => (
+                        StatusCode::PARTIAL_CONTENT,
+                        Some(format!("bytes {first}-{last}/{size}")),
+                        &data[first as usize..=last as usize],
+                    ),
+                    Selected::Ignored => (StatusCode::OK, None, &data[..]),
+                    Selected::Unsatisfiable => (
+                        StatusCode::RANGE_NOT_SATISFIABLE,
+                        Some(format!("bytes */{size}")),
+                        &[][..],
+                    ),
+                };
+                assert_eq!(status, expected_status, "{range} on {size} bytes");
+                assert_eq!(content_range, expected_range, "{range} on {size} bytes");
+                assert_eq!(&body[..], expected_body, "{range} on {size} bytes");
+            }
+        }
+    }
+
+    #[ntex::test]
     async fn test_named_file_if_range_match() {
         let file = NamedFile::open("Cargo.toml").unwrap();
         let etag = file.etag().unwrap();
