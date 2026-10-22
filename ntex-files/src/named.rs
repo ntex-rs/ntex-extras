@@ -429,16 +429,15 @@ impl NamedFile {
             counter: 0,
         };
         if offset != 0 || length != self.md.len() {
-            resp.status(StatusCode::PARTIAL_CONTENT).streaming(reader)
-        } else {
-            resp.body(SizedStream::new(
-                length,
-                reader.map_err(|e| {
-                    let e: Rc<dyn Error> = Rc::new(e);
-                    e
-                }),
-            ))
+            resp.status(StatusCode::PARTIAL_CONTENT);
         }
+        resp.body(SizedStream::new(
+            length,
+            reader.map_err(|e| {
+                let e: Rc<dyn Error> = Rc::new(e);
+                e
+            }),
+        ))
     }
 }
 
