@@ -12,10 +12,10 @@ use futures::stream::TryStreamExt;
 use mime_guess::from_path;
 use ntex::http::body::SizedStream;
 use ntex::http::header::ContentEncoding;
-use ntex::http::{self, StatusCode};
+use ntex::http::{self, Method, StatusCode};
 use ntex::web::{BodyEncoding, HttpRequest, HttpResponse, Responder, State};
 
-use crate::{ChunkedReadFile, header, header::Header, range::HttpRange};
+use crate::{ChunkedReadFile, header, header::StandardHeader, range::HttpRange};
 
 bitflags! {
     #[derive(Clone)]
@@ -315,22 +315,24 @@ impl NamedFile {
             None
         };
 
-        // check preconditions
-        let precondition_failed = if !any_match(etag.as_ref(), req) {
-            true
-        } else if let (Some(ref m), Some(header::IfUnmodifiedSince(ref since))) = {
-            let mut header = None;
-            for hdr in req.headers().get_all(http::header::IF_UNMODIFIED_SINCE) {
-                if let Ok(v) =
-                    header::IfUnmodifiedSince::parse_header(&header::Raw::from(hdr.as_bytes()))
-                {
-                    header = Some(v);
-                    break;
-                }
-            }
+        // conditional headers are ignored for methods that neither select nor
+        // modify a representation (RFC 9110 section 13.2.1)
+        let ignore_preconditions = matches!(
+            *req.method(),
+            Method::CONNECT | Method::OPTIONS | Method::TRACE
+        );
+        let is_get_or_head = matches!(*req.method(), Method::GET | Method::HEAD);
 
-            (last_modified, header)
-        } {
+        // check preconditions, in the order of RFC 9110 section 13.2.2
+        let precondition_failed = if ignore_preconditions {
+            false
+        } else if !any_match(etag.as_ref(), req) {
+            true
+        } else if req.headers().contains_key(&http::header::IF_MATCH) {
+            false
+        } else if let (Some(ref m), Some(header::IfUnmodifiedSince(ref since))) =
+            (last_modified, parse_field(req))
+        {
             let t1: SystemTime = (*m).into();
             let t2: SystemTime = (*since).into();
             match (t1.duration_since(UNIX_EPOCH), t2.duration_since(UNIX_EPOCH)) {
@@ -342,22 +344,15 @@ impl NamedFile {
         };
 
         // check last modified
-        let not_modified = if !none_match(etag.as_ref(), req) {
-            true
-        } else if req.headers().contains_key(&http::header::IF_NONE_MATCH) {
+        let not_modified = if ignore_preconditions {
             false
-        } else if let (Some(ref m), Some(header::IfModifiedSince(ref since))) = {
-            let mut header = None;
-            for hdr in req.headers().get_all(http::header::IF_MODIFIED_SINCE) {
-                if let Ok(v) =
-                    header::IfModifiedSince::parse_header(&header::Raw::from(hdr.as_bytes()))
-                {
-                    header = Some(v);
-                    break;
-                }
-            }
-            (last_modified, header)
-        } {
+        } else if !none_match(etag.as_ref(), req) {
+            true
+        } else if !is_get_or_head || req.headers().contains_key(&http::header::IF_NONE_MATCH) {
+            false
+        } else if let (Some(ref m), Some(header::IfModifiedSince(ref since))) =
+            (last_modified, parse_field(req))
+        {
             let t1: SystemTime = (*m).into();
             let t2: SystemTime = (*since).into();
             match (t1.duration_since(UNIX_EPOCH), t2.duration_since(UNIX_EPOCH)) {
@@ -392,11 +387,29 @@ impl NamedFile {
         resp.header(http::header::CONTENT_TYPE, self.content_type.to_string());
         resp.header(http::header::ACCEPT_RANGES, "bytes");
 
+        // a 412 or 304 response takes precedence over the range request
+        if precondition_failed || (not_modified && !is_get_or_head) {
+            return resp.status(StatusCode::PRECONDITION_FAILED).build();
+        } else if not_modified {
+            return resp.status(StatusCode::NOT_MODIFIED).build();
+        }
+
         let mut length = self.md.len();
         let mut offset = 0;
 
+        // range requests are defined only for GET, and a range unit
+        // other than "bytes" is ignored (RFC 9110 section 14.2)
+        let ranges = req.headers().get(&http::header::RANGE).filter(|ranges| {
+            *req.method() == Method::GET
+                && ranges
+                    .to_str()
+                    .ok()
+                    .and_then(|value| value.split_once('='))
+                    .is_none_or(|(unit, _)| unit.eq_ignore_ascii_case("bytes"))
+        });
+
         // check for range header
-        if let Some(ranges) = req.headers().get(&http::header::RANGE) {
+        if let Some(ranges) = ranges {
             if let Ok(rangesheader) = ranges.to_str() {
                 if let Ok(rangesvec) = HttpRange::parse(rangesheader, length) {
                     length = rangesvec[0].length;
@@ -414,12 +427,6 @@ impl NamedFile {
                 return resp.status(StatusCode::BAD_REQUEST).build();
             };
         };
-
-        if precondition_failed {
-            return resp.status(StatusCode::PRECONDITION_FAILED).build();
-        } else if not_modified {
-            return resp.status(StatusCode::NOT_MODIFIED).build();
-        }
 
         let reader = ChunkedReadFile {
             offset,
@@ -456,48 +463,55 @@ impl DerefMut for NamedFile {
     }
 }
 
+/// Parses a request header from all of its lines.
+///
+/// A list header sent on several lines is the union of its lines, and a
+/// single-value header sent on several lines fails to parse and is ignored.
+fn parse_field<H: StandardHeader>(req: &HttpRequest) -> Option<H> {
+    let mut lines = req.headers().get_all(H::http_header_name());
+    let mut raw = header::Raw::from(lines.next()?.as_bytes());
+    for line in lines {
+        raw.push(line.as_bytes());
+    }
+    H::parse_header(&raw).ok()
+}
+
 /// Returns true if `req` has no `If-Match` header or one which matches `etag`.
 fn any_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
-    if let Some(val) = req.headers().get(http::header::IF_MATCH) {
-        let hdr = ::http::HeaderValue::from(val);
-        if let Ok(val) = header::IfMatch::parse_header(&&hdr) {
-            match val {
-                header::IfMatch::Any => return true,
-                header::IfMatch::Items(ref items) => {
-                    if let Some(some_etag) = etag {
-                        for item in items {
-                            if item.strong_eq(some_etag) {
-                                return true;
-                            }
+    if let Some(val) = parse_field(req) {
+        match val {
+            header::IfMatch::Any => return true,
+            header::IfMatch::Items(ref items) => {
+                if let Some(some_etag) = etag {
+                    for item in items {
+                        if item.strong_eq(some_etag) {
+                            return true;
                         }
                     }
                 }
-            };
-            return false;
-        }
+            }
+        };
+        return false;
     }
     true
 }
 
 /// Returns true if `req` doesn't have an `If-None-Match` header matching `req`.
 fn none_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
-    if let Some(val) = req.headers().get(http::header::IF_NONE_MATCH) {
-        let hdr = ::http::HeaderValue::from(val);
-        if let Ok(val) = header::IfNoneMatch::parse_header(&&hdr) {
-            return match val {
-                header::IfNoneMatch::Any => false,
-                header::IfNoneMatch::Items(ref items) => {
-                    if let Some(some_etag) = etag {
-                        for item in items {
-                            if item.weak_eq(some_etag) {
-                                return false;
-                            }
+    if let Some(val) = parse_field(req) {
+        return match val {
+            header::IfNoneMatch::Any => false,
+            header::IfNoneMatch::Items(ref items) => {
+                if let Some(some_etag) = etag {
+                    for item in items {
+                        if item.weak_eq(some_etag) {
+                            return false;
                         }
                     }
-                    true
                 }
-            };
-        }
+                true
+            }
+        };
     }
     true
 }

@@ -606,8 +606,10 @@ impl<St> FromRequest<St> for PathBufWrp {
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
-    use std::{fs, iter::FromIterator, ops::Add, time::Duration, time::SystemTime};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::{fs, iter::FromIterator, ops::Add};
 
+    use ntex::http::header::{IF_MATCH, IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_UNMODIFIED_SINCE};
     use ntex::http::{self, Method, StatusCode};
     use ntex::web::test::{self, TestRequest};
     use ntex::web::{App, guard, middleware::Compress};
@@ -649,6 +651,200 @@ mod tests {
             .to_http_request();
         let resp = test::respond_to(file, &req).await;
         assert_ne!(resp.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    /// The `ETag` that `NamedFile` sends for `path`.
+    async fn named_file_etag(path: &str) -> String {
+        let req = TestRequest::default().to_http_request();
+        let resp = test::respond_to(NamedFile::open(path).unwrap(), &req).await;
+        let etag = resp.headers().get(http::header::ETAG).unwrap();
+        etag.to_str().unwrap().to_owned()
+    }
+
+    /// An HTTP-date `secs` seconds after the Unix epoch.
+    fn http_date(secs: u64) -> String {
+        header::HttpDate::from(UNIX_EPOCH + Duration::from_secs(secs)).to_string()
+    }
+
+    // 2004-01-01 and 2100-01-01: before and after the modification time of any test file.
+    const PAST: u64 = 1_072_915_200;
+    const FUTURE: u64 = 4_102_444_800;
+
+    #[ntex::test]
+    async fn test_preconditions_evaluated_before_range() {
+        let etag = named_file_etag("tests/test.binary").await;
+        let (past, future) = (http_date(PAST), http_date(FUTURE));
+        let (etag, past, future) = (etag.as_str(), past.as_str(), future.as_str());
+        let (failed, not_modified) = (StatusCode::PRECONDITION_FAILED, StatusCode::NOT_MODIFIED);
+
+        // satisfiable and unsatisfiable ranges
+        for range in ["bytes=10-20", "bytes=1000-2000"] {
+            for (name, value, expected) in [
+                (IF_MATCH, "\"other\"", failed),
+                (IF_UNMODIFIED_SINCE, past, failed),
+                (IF_NONE_MATCH, etag, not_modified),
+                (IF_NONE_MATCH, "*", not_modified),
+                (IF_MODIFIED_SINCE, future, not_modified),
+            ] {
+                let req = TestRequest::default()
+                    .header(name.clone(), value)
+                    .header(http::header::RANGE, range)
+                    .to_http_request();
+                let file = NamedFile::open("tests/test.binary").unwrap();
+                let resp = test::respond_to(file, &req).await;
+                assert_eq!(resp.status(), expected, "{name}: {value}, Range: {range}");
+                assert!(
+                    resp.headers().get(http::header::CONTENT_RANGE).is_none(),
+                    "{name}: {value}, Range: {range}"
+                );
+            }
+        }
+    }
+
+    #[ntex::test]
+    async fn test_if_match_takes_precedence_over_if_unmodified_since() {
+        let etag = named_file_etag("tests/test.binary").await;
+        for (if_match, since, expected) in [
+            (etag.as_str(), PAST, StatusCode::OK),
+            ("*", PAST, StatusCode::OK),
+            ("\"other\"", FUTURE, StatusCode::PRECONDITION_FAILED),
+        ] {
+            let req = TestRequest::default()
+                .header(IF_MATCH, if_match)
+                .header(IF_UNMODIFIED_SINCE, http_date(since))
+                .to_http_request();
+            let file = NamedFile::open("tests/test.binary").unwrap();
+            let resp = test::respond_to(file, &req).await;
+            assert_eq!(resp.status(), expected, "If-Match: {if_match}");
+        }
+    }
+
+    #[ntex::test]
+    async fn test_conditional_requests_by_method() {
+        let etag = named_file_etag("tests/test.binary").await;
+        let (past, future) = (http_date(PAST), http_date(FUTURE));
+        let (etag, past, future) = (etag.as_str(), past.as_str(), future.as_str());
+        let (ok, failed, not_modified) = (
+            StatusCode::OK,
+            StatusCode::PRECONDITION_FAILED,
+            StatusCode::NOT_MODIFIED,
+        );
+
+        // expected status for GET/HEAD, for CONNECT/OPTIONS/TRACE
+        // and for any other method
+        let cases = [
+            (IF_MATCH, "\"other\"", failed, ok, failed),
+            (IF_UNMODIFIED_SINCE, past, failed, ok, failed),
+            (IF_NONE_MATCH, etag, not_modified, ok, failed),
+            (IF_NONE_MATCH, "*", not_modified, ok, failed),
+            (IF_MODIFIED_SINCE, future, not_modified, ok, ok),
+        ];
+        let methods = [
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::PATCH,
+            Method::CONNECT,
+            Method::OPTIONS,
+            Method::TRACE,
+        ];
+
+        let mut mismatches = Vec::new();
+        for method in methods {
+            for (name, value, get_or_head, ignoring, other) in &cases {
+                let expected = match method {
+                    Method::GET | Method::HEAD => *get_or_head,
+                    Method::CONNECT | Method::OPTIONS | Method::TRACE => *ignoring,
+                    _ => *other,
+                };
+                let req = TestRequest::default()
+                    .method(method.clone())
+                    .header(name.clone(), *value)
+                    .to_http_request();
+                let file = NamedFile::open("tests/test.binary").unwrap();
+                let status = test::respond_to(file, &req).await.status();
+                if status != expected {
+                    mismatches.push(format!(
+                        "{method} {name}: {value} -> {status}, expected {expected}"
+                    ));
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[ntex::test]
+    async fn test_conditional_headers_on_several_lines() {
+        let etag = named_file_etag("tests/test.binary").await;
+        let (past, future) = (http_date(PAST), http_date(FUTURE));
+        let (etag, past, future) = (etag.as_str(), past.as_str(), future.as_str());
+
+        for (name, first, second, expected) in [
+            // a list header is the union of its lines
+            (IF_NONE_MATCH, "\"other\"", etag, StatusCode::NOT_MODIFIED),
+            (IF_MATCH, "\"other\"", etag, StatusCode::OK),
+            // a date header with more than one value is ignored
+            (IF_MODIFIED_SINCE, future, past, StatusCode::OK),
+            (IF_MODIFIED_SINCE, past, future, StatusCode::OK),
+            (IF_UNMODIFIED_SINCE, past, future, StatusCode::OK),
+            (IF_UNMODIFIED_SINCE, future, past, StatusCode::OK),
+        ] {
+            let req = TestRequest::default()
+                .header(name.clone(), first)
+                .header(name.clone(), second)
+                .to_http_request();
+            let file = NamedFile::open("tests/test.binary").unwrap();
+            let resp = test::respond_to(file, &req).await;
+            assert_eq!(resp.status(), expected, "{name}: {first} / {second}");
+        }
+    }
+
+    #[ntex::test]
+    async fn test_range_applies_only_to_get() {
+        for (method, expected) in [
+            (Method::GET, StatusCode::PARTIAL_CONTENT),
+            (Method::HEAD, StatusCode::OK),
+            (Method::POST, StatusCode::OK),
+        ] {
+            let req = TestRequest::default()
+                .method(method.clone())
+                .header(http::header::RANGE, "bytes=10-20")
+                .to_http_request();
+            let file = NamedFile::open("tests/test.binary").unwrap();
+            let resp = test::respond_to(file, &req).await;
+            assert_eq!(resp.status(), expected, "{method}");
+            assert_eq!(
+                resp.headers().contains_key(http::header::CONTENT_RANGE),
+                expected == StatusCode::PARTIAL_CONTENT,
+                "{method}"
+            );
+        }
+    }
+
+    #[ntex::test]
+    async fn test_range_units() {
+        // the unit is case-insensitive
+        let req = TestRequest::default()
+            .header(http::header::RANGE, "Bytes=10-20")
+            .to_http_request();
+        let file = NamedFile::open("tests/test.binary").unwrap();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            resp.headers().get(http::header::CONTENT_RANGE).unwrap(),
+            "bytes 10-20/100"
+        );
+
+        // an unknown unit is ignored
+        let req = TestRequest::default()
+            .header(http::header::RANGE, "items=0-5")
+            .to_http_request();
+        let file = NamedFile::open("tests/test.binary").unwrap();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get(http::header::CONTENT_RANGE).is_none());
     }
 
     #[ntex::test]
