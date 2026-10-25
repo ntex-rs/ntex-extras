@@ -1138,93 +1138,86 @@ mod tests {
 
     #[ntex::test]
     async fn test_named_file_content_length_headers() {
-        let srv = test::init_service(
-            App::new().service(Files::new("test", ".").index_file("tests/test.binary")),
-        )
-        .await;
+        let srv = test::server(async |_| App::new().service(Files::new("/", ".")));
+        let data = Bytes::from(fs::read("tests/test.binary").unwrap());
 
         // Valid range header
-        let request = TestRequest::get()
-            .uri("/t%65st/tests/test.binary")
+        let response = srv
+            .get("/tests/test.binary")
             .header(http::header::RANGE, "bytes=10-20")
-            .to_request();
-        let _response = test::call_service(&srv, request).await;
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let content_length = response.headers().get(http::header::CONTENT_LENGTH);
+        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("11"));
+        let transfer_encoding = response.headers().get(http::header::TRANSFER_ENCODING);
+        assert!(transfer_encoding.is_none());
+        let bytes = response.body().await.unwrap();
+        assert_eq!(bytes, data.slice(10..21));
 
-        // let contentlength = _response
-        //     .headers()
-        //     .get(header::CONTENT_LENGTH)
-        //     .unwrap()
-        //     .to_str()
-        //     .unwrap();
-        // assert_eq!(contentlength, "11");
+        // Valid range header, starting from 0
+        let response = srv
+            .get("/tests/test.binary")
+            .header(http::header::RANGE, "bytes=0-20")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let content_length = response.headers().get(http::header::CONTENT_LENGTH);
+        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("21"));
+        let transfer_encoding = response.headers().get(http::header::TRANSFER_ENCODING);
+        assert!(transfer_encoding.is_none());
+        let bytes = response.body().await.unwrap();
+        assert_eq!(bytes, data.slice(0..21));
 
         // Invalid range header
-        let request = TestRequest::get()
-            .uri("/t%65st/tests/test.binary")
+        let response = srv
+            .get("/tests/test.binary")
             .header(http::header::RANGE, "bytes=10-8")
-            .to_request();
-        let response = test::call_service(&srv, request).await;
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
 
         // Without range header
-        let request = TestRequest::get()
-            .uri("/t%65st/tests/test.binary")
-            // .no_default_headers()
-            .to_request();
-        let _response = test::call_service(&srv, request).await;
-
-        // let contentlength = response
-        //     .headers()
-        //     .get(header::CONTENT_LENGTH)
-        //     .unwrap()
-        //     .to_str()
-        //     .unwrap();
-        // assert_eq!(contentlength, "100");
-
-        // chunked
-        let request = TestRequest::get()
-            .uri("/t%65st/tests/test.binary")
-            .to_request();
-        let response = test::call_service(&srv, request).await;
-
-        // with enabled compression
-        // {
-        //     let te = response
-        //         .headers()
-        //         .get(header::TRANSFER_ENCODING)
-        //         .unwrap()
-        //         .to_str()
-        //         .unwrap();
-        //     assert_eq!(te, "chunked");
-        // }
-
-        let bytes = test::read_body(response).await;
-        let data = Bytes::from(fs::read("tests/test.binary").unwrap());
+        let response = srv.get("/tests/test.binary").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_length = response.headers().get(http::header::CONTENT_LENGTH);
+        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("100"));
+        let transfer_encoding = response.headers().get(http::header::TRANSFER_ENCODING);
+        assert!(transfer_encoding.is_none());
+        let bytes = response.body().await.unwrap();
         assert_eq!(bytes, data);
     }
 
     #[ntex::test]
     async fn test_head_content_length_headers() {
-        let srv = test::init_service(
-            App::new().service(Files::new("test", ".").index_file("tests/test.binary")),
-        )
-        .await;
+        let srv = test::server(async |_| App::new().service(Files::new("/", ".")));
+
+        // Without range header
+        let response = srv.head("/tests/test.binary").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_length = response.headers().get(http::header::CONTENT_LENGTH);
+        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("100"));
 
         // Valid range header
-        let request = TestRequest::default()
-            .method(Method::HEAD)
-            .uri("/t%65st/tests/test.binary")
-            .to_request();
-        let _response = test::call_service(&srv, request).await;
-
-        // TODO: fix check
-        // let contentlength = response
-        //     .headers()
-        //     .get(header::CONTENT_LENGTH)
-        //     .unwrap()
-        //     .to_str()
-        //     .unwrap();
-        // assert_eq!(contentlength, "100");
+        let response = srv
+            .head("/tests/test.binary")
+            .header(http::header::RANGE, "bytes=10-20")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let content_range = response.headers().get(http::header::CONTENT_RANGE);
+        assert_eq!(
+            content_range.map(|v| v.to_str().unwrap()),
+            Some("bytes 10-20/100")
+        );
+        let content_length = response.headers().get(http::header::CONTENT_LENGTH);
+        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("11"));
+        let transfer_encoding = response.headers().get(http::header::TRANSFER_ENCODING);
+        assert!(transfer_encoding.is_none());
     }
 
     #[ntex::test]
