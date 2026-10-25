@@ -17,7 +17,10 @@ impl HttpRange {
         if header.is_empty() {
             return Ok(Vec::new());
         }
-        if !header.starts_with(PREFIX) {
+        if !header
+            .get(..PREFIX_LEN)
+            .is_some_and(|unit| unit.eq_ignore_ascii_case(PREFIX))
+        {
             return Err(());
         }
 
@@ -124,6 +127,14 @@ mod tests {
             T("bytes= , , ,   ", 10, vec![]),
             T(
                 "bytes=0-9",
+                10,
+                vec![HttpRange {
+                    start: 0,
+                    length: 10,
+                }],
+            ),
+            T(
+                "Bytes=0-9",
                 10,
                 vec![HttpRange {
                     start: 0,
