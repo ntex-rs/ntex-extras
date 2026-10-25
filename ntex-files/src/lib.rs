@@ -1137,6 +1137,133 @@ mod tests {
     }
 
     #[ntex::test]
+    async fn test_named_file_if_range_match() {
+        let file = NamedFile::open("Cargo.toml").unwrap();
+        let etag = file.etag().unwrap();
+        let req = TestRequest::default()
+            .header(http::header::RANGE, "bytes=0-9")
+            .header(http::header::IF_RANGE, etag.to_string())
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+
+        let file = NamedFile::open("Cargo.toml").unwrap();
+        let modified = file.last_modified().unwrap();
+        let req = TestRequest::default()
+            .header(http::header::RANGE, "bytes=0-9")
+            .header(http::header::IF_RANGE, modified.to_string())
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    }
+
+    #[ntex::test]
+    async fn test_named_file_if_range_mismatch() {
+        let file = NamedFile::open("Cargo.toml").unwrap();
+        let etag = file.etag().unwrap();
+        let modified = file.last_modified().unwrap();
+        let later = header::HttpDate::from(SystemTime::from(modified).add(Duration::from_secs(60)));
+
+        // (If-Range, use_etag, use_last_modified)
+        let cases = [
+            ("\"stale\"".to_owned(), true, true),
+            (format!("W/{}", etag), true, true),
+            (later.to_string(), true, true),
+            ("not a validator".to_owned(), true, true),
+            (etag.to_string(), false, true),
+            (modified.to_string(), true, false),
+        ];
+        for (if_range, use_etag, use_last_modified) in cases {
+            let file = NamedFile::open("Cargo.toml")
+                .unwrap()
+                .use_etag(use_etag)
+                .use_last_modified(use_last_modified);
+            let req = TestRequest::default()
+                .header(http::header::RANGE, "bytes=0-9")
+                .header(http::header::IF_RANGE, if_range.as_str())
+                .to_http_request();
+            let resp = test::respond_to(file, &req).await;
+            assert_eq!(resp.status(), StatusCode::OK, "If-Range: {}", if_range);
+            assert!(
+                !resp.headers().contains_key(http::header::CONTENT_RANGE),
+                "If-Range: {}",
+                if_range
+            );
+        }
+    }
+
+    #[ntex::test]
+    async fn test_named_file_if_range_earlier_date() {
+        // the date must be equal to Last-Modified, not merely not later
+        let file = NamedFile::open("Cargo.toml").unwrap();
+        let modified = file.last_modified().unwrap();
+        let earlier = header::HttpDate::from(SystemTime::from(modified) - Duration::from_secs(60));
+        let req = TestRequest::default()
+            .header(http::header::RANGE, "bytes=0-9")
+            .header(http::header::IF_RANGE, earlier.to_string())
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!resp.headers().contains_key(http::header::CONTENT_RANGE));
+    }
+
+    #[ntex::test]
+    async fn test_named_file_if_range_not_utf8() {
+        let file = NamedFile::open("Cargo.toml").unwrap();
+        let req = TestRequest::default()
+            .header(http::header::RANGE, "bytes=0-9")
+            .header(
+                http::header::IF_RANGE,
+                http::header::HeaderValue::from_bytes(b"\"\xff\"").unwrap(),
+            )
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!resp.headers().contains_key(http::header::CONTENT_RANGE));
+    }
+
+    #[ntex::test]
+    async fn test_files_if_range() {
+        let srv = test::init_service(App::new().service(Files::new("/", "."))).await;
+        let data = Bytes::from(fs::read("tests/test.binary").unwrap());
+
+        // a validator that no longer matches yields the whole file,
+        // whether the range is satisfiable or not
+        for range in ["bytes=10-20", "bytes=200-300"] {
+            let request = TestRequest::get()
+                .uri("/tests/test.binary")
+                .header(http::header::RANGE, range)
+                .header(http::header::IF_RANGE, "\"stale\"")
+                .to_request();
+            let response = test::call_service(&srv, request).await;
+            assert_eq!(response.status(), StatusCode::OK, "Range: {}", range);
+            assert!(!response.headers().contains_key(http::header::CONTENT_RANGE));
+            let bytes = test::read_body(response).await;
+            assert_eq!(bytes, data);
+        }
+
+        // the validator of the current file yields the requested range
+        let request = TestRequest::get().uri("/tests/test.binary").to_request();
+        let response = test::call_service(&srv, request).await;
+        let etag = response
+            .headers()
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let request = TestRequest::get()
+            .uri("/tests/test.binary")
+            .header(http::header::RANGE, "bytes=10-20")
+            .header(http::header::IF_RANGE, etag.as_str())
+            .to_request();
+        let response = test::call_service(&srv, request).await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let bytes = test::read_body(response).await;
+        assert_eq!(bytes, data.slice(10..21));
+    }
+
+    #[ntex::test]
     async fn test_named_file_content_length_headers() {
         let srv = test::server(async |_| App::new().service(Files::new("/", ".")));
         let data = Bytes::from(fs::read("tests/test.binary").unwrap());
