@@ -652,6 +652,173 @@ mod tests {
     }
 
     #[ntex::test]
+    async fn test_named_file_custom_etag() {
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+
+        let req = TestRequest::default().to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(http::header::ETAG).map(|v| v.as_bytes()),
+            Some(&b"\"v1\""[..])
+        );
+
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .use_etag(false)
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(
+            resp.headers().get(http::header::ETAG).map(|v| v.as_bytes()),
+            Some(&b"\"v1\""[..])
+        );
+
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()))
+            .use_etag(false);
+        let resp = test::respond_to(file, &req).await;
+        assert!(resp.headers().get(http::header::ETAG).is_none());
+    }
+
+    #[ntex::test]
+    async fn test_named_file_custom_etag_content_change() {
+        struct RemoveOnDrop(std::path::PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+
+        let path = RemoveOnDrop(
+            std::env::temp_dir().join(format!("ntex-files-custom-etag-{}.txt", std::process::id())),
+        );
+        let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let write = |content: &str| {
+            fs::write(&path.0, content).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&path.0)
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
+        };
+
+        write("version 1");
+        let old_etag = NamedFile::open(&path.0).unwrap().etag().unwrap();
+
+        // same size and modification time, different bytes
+        write("version 2");
+
+        // the metadata-derived tag does not change, so a client that revalidates
+        // its copy of version 1 is told that the copy is still current
+        let req = TestRequest::default()
+            .header(http::header::IF_NONE_MATCH, old_etag.to_string())
+            .to_http_request();
+        let resp = test::respond_to(NamedFile::open(&path.0).unwrap(), &req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+
+        // a tag that follows the content makes the same client fetch version 2
+        let file = NamedFile::open(&path.0)
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v2".to_string()));
+        let req = TestRequest::default()
+            .header(http::header::IF_NONE_MATCH, "\"v1\"")
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(http::header::ETAG).map(|v| v.as_bytes()),
+            Some(&b"\"v2\""[..])
+        );
+    }
+
+    #[ntex::test]
+    async fn test_named_file_custom_etag_if_none_match() {
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_NONE_MATCH, "\"v1\"")
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            resp.headers().get(http::header::ETAG).map(|v| v.as_bytes()),
+            Some(&b"\"v1\""[..])
+        );
+
+        // the tag derived from file metadata no longer matches
+        let default_etag = NamedFile::open("Cargo.toml").unwrap().etag().unwrap();
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_NONE_MATCH, default_etag.to_string())
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[ntex::test]
+    async fn test_named_file_custom_etag_if_match() {
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_MATCH, "\"v1\"")
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // the tag derived from file metadata no longer matches
+        let default_etag = NamedFile::open("Cargo.toml").unwrap().etag().unwrap();
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_MATCH, default_etag.to_string())
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+    }
+
+    #[ntex::test]
+    async fn test_named_file_custom_etag_weak() {
+        // If-None-Match uses the weak comparison, so a weak tag satisfies it
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::weak("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_NONE_MATCH, "\"v1\"")
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            resp.headers().get(http::header::ETAG).map(|v| v.as_bytes()),
+            Some(&b"W/\"v1\""[..])
+        );
+
+        // If-Match uses the strong comparison, so a weak tag never satisfies it
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::weak("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_MATCH, "\"v1\"")
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+    }
+
+    #[ntex::test]
     async fn test_named_file_text() {
         assert!(NamedFile::open("test--").is_err());
         let mut file = NamedFile::open("Cargo.toml").unwrap();

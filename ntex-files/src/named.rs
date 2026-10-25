@@ -38,6 +38,7 @@ pub struct NamedFile {
     path: PathBuf,
     file: File,
     modified: Option<SystemTime>,
+    etag: Option<header::EntityTag>,
     pub(crate) md: Metadata,
     pub(crate) flags: Flags,
     pub(crate) status_code: StatusCode,
@@ -145,6 +146,7 @@ impl NamedFile {
             content_disposition,
             md,
             modified,
+            etag: None,
             encoding,
             status_code: StatusCode::OK,
             flags: Flags::default(),
@@ -250,7 +252,44 @@ impl NamedFile {
         self
     }
 
+    /// Set the `ETag` for serving this file.
+    ///
+    /// By default the `ETag` is derived from the file metadata: size, modification
+    /// time and, on Unix, the inode. Use this method when the version of the content
+    /// is known by other means, for example a hash of generated or cached content.
+    /// The given tag is sent in the `ETag` header and used to evaluate the
+    /// conditional request headers `If-Match` and `If-None-Match`.
+    ///
+    /// A strong tag must change whenever the bytes of the file change; if it does
+    /// not, use [`EntityTag::weak`](header::EntityTag::weak). `If-Match` uses the
+    /// strong comparison, so a weak tag never satisfies it.
+    ///
+    /// This also enables the `ETag` header; a later `use_etag(false)` disables it
+    /// again. If the modification time of the file does not reflect the content
+    /// version, consider disabling `Last-Modified` with `use_last_modified(false)`.
+    ///
+    /// ```rust,no_run
+    /// use ntex_files::{NamedFile, header::EntityTag};
+    ///
+    /// # fn main() -> std::io::Result<()> {
+    /// // for example a hex digest of the content, computed when the file was written
+    /// let content_hash = String::from("4f9c2e1a");
+    /// let file = NamedFile::open("index.html")?.set_etag(EntityTag::strong(content_hash));
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[inline]
+    pub fn set_etag(mut self, etag: header::EntityTag) -> Self {
+        self.etag = Some(etag);
+        self.flags.insert(Flags::ETAG);
+        self
+    }
+
     pub(crate) fn etag(&self) -> Option<header::EntityTag> {
+        if let Some(ref etag) = self.etag {
+            return Some(etag.clone());
+        }
+
         // This etag format is similar to Apache's.
         self.modified.as_ref().map(|mtime| {
             let ino = {
