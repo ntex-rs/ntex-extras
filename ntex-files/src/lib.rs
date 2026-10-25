@@ -1539,21 +1539,18 @@ mod tests {
         let content_length = response.headers().get(http::header::CONTENT_LENGTH);
         assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("100"));
 
-        // Valid range header
+        // Range is ignored for HEAD
         let response = srv
             .head("/tests/test.binary")
             .header(http::header::RANGE, "bytes=10-20")
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.status(), StatusCode::OK);
         let content_range = response.headers().get(http::header::CONTENT_RANGE);
-        assert_eq!(
-            content_range.map(|v| v.to_str().unwrap()),
-            Some("bytes 10-20/100")
-        );
+        assert!(content_range.is_none());
         let content_length = response.headers().get(http::header::CONTENT_LENGTH);
-        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("11"));
+        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("100"));
         let transfer_encoding = response.headers().get(http::header::TRANSFER_ENCODING);
         assert!(transfer_encoding.is_none());
     }
