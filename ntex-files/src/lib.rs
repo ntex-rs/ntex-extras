@@ -848,6 +848,173 @@ mod tests {
     }
 
     #[ntex::test]
+    async fn test_named_file_custom_etag() {
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+
+        let req = TestRequest::default().to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(http::header::ETAG).map(|v| v.as_bytes()),
+            Some(&b"\"v1\""[..])
+        );
+
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .use_etag(false)
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(
+            resp.headers().get(http::header::ETAG).map(|v| v.as_bytes()),
+            Some(&b"\"v1\""[..])
+        );
+
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()))
+            .use_etag(false);
+        let resp = test::respond_to(file, &req).await;
+        assert!(resp.headers().get(http::header::ETAG).is_none());
+    }
+
+    #[ntex::test]
+    async fn test_named_file_custom_etag_content_change() {
+        struct RemoveOnDrop(std::path::PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+
+        let path = RemoveOnDrop(
+            std::env::temp_dir().join(format!("ntex-files-custom-etag-{}.txt", std::process::id())),
+        );
+        let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let write = |content: &str| {
+            fs::write(&path.0, content).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&path.0)
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
+        };
+
+        write("version 1");
+        let old_etag = NamedFile::open(&path.0).unwrap().etag().unwrap();
+
+        // same size and modification time, different bytes
+        write("version 2");
+
+        // the metadata-derived tag does not change, so a client that revalidates
+        // its copy of version 1 is told that the copy is still current
+        let req = TestRequest::default()
+            .header(http::header::IF_NONE_MATCH, old_etag.to_string())
+            .to_http_request();
+        let resp = test::respond_to(NamedFile::open(&path.0).unwrap(), &req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+
+        // a tag that follows the content makes the same client fetch version 2
+        let file = NamedFile::open(&path.0)
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v2".to_string()));
+        let req = TestRequest::default()
+            .header(http::header::IF_NONE_MATCH, "\"v1\"")
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(http::header::ETAG).map(|v| v.as_bytes()),
+            Some(&b"\"v2\""[..])
+        );
+    }
+
+    #[ntex::test]
+    async fn test_named_file_custom_etag_if_none_match() {
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_NONE_MATCH, "\"v1\"")
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            resp.headers().get(http::header::ETAG).map(|v| v.as_bytes()),
+            Some(&b"\"v1\""[..])
+        );
+
+        // the tag derived from file metadata no longer matches
+        let default_etag = NamedFile::open("Cargo.toml").unwrap().etag().unwrap();
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_NONE_MATCH, default_etag.to_string())
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[ntex::test]
+    async fn test_named_file_custom_etag_if_match() {
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_MATCH, "\"v1\"")
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // the tag derived from file metadata no longer matches
+        let default_etag = NamedFile::open("Cargo.toml").unwrap().etag().unwrap();
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::strong("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_MATCH, default_etag.to_string())
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+    }
+
+    #[ntex::test]
+    async fn test_named_file_custom_etag_weak() {
+        // If-None-Match uses the weak comparison, so a weak tag satisfies it
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::weak("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_NONE_MATCH, "\"v1\"")
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            resp.headers().get(http::header::ETAG).map(|v| v.as_bytes()),
+            Some(&b"W/\"v1\""[..])
+        );
+
+        // If-Match uses the strong comparison, so a weak tag never satisfies it
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .set_etag(header::EntityTag::weak("v1".to_string()));
+
+        let req = TestRequest::default()
+            .header(http::header::IF_MATCH, "\"v1\"")
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+    }
+
+    #[ntex::test]
     async fn test_named_file_text() {
         assert!(NamedFile::open("test--").is_err());
         let mut file = NamedFile::open("Cargo.toml").unwrap();
@@ -1166,94 +1333,214 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn test_named_file_content_length_headers() {
-        let srv = test::init_service(
-            App::new().service(Files::new("test", ".").index_file("tests/test.binary")),
-        )
-        .await;
+    async fn test_named_file_if_range_match() {
+        let file = NamedFile::open("Cargo.toml").unwrap();
+        let etag = file.etag().unwrap();
+        let req = TestRequest::default()
+            .header(http::header::RANGE, "bytes=0-9")
+            .header(http::header::IF_RANGE, etag.to_string())
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
 
-        // Valid range header
+        let file = NamedFile::open("Cargo.toml").unwrap();
+        let modified = file.last_modified().unwrap();
+        let req = TestRequest::default()
+            .header(http::header::RANGE, "bytes=0-9")
+            .header(http::header::IF_RANGE, modified.to_string())
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    }
+
+    #[ntex::test]
+    async fn test_named_file_if_range_mismatch() {
+        let file = NamedFile::open("Cargo.toml").unwrap();
+        let etag = file.etag().unwrap();
+        let modified = file.last_modified().unwrap();
+        let later = header::HttpDate::from(SystemTime::from(modified).add(Duration::from_secs(60)));
+
+        // (If-Range, use_etag, use_last_modified)
+        let cases = [
+            ("\"stale\"".to_owned(), true, true),
+            (format!("W/{}", etag), true, true),
+            (later.to_string(), true, true),
+            ("not a validator".to_owned(), true, true),
+            (etag.to_string(), false, true),
+            (modified.to_string(), true, false),
+        ];
+        for (if_range, use_etag, use_last_modified) in cases {
+            let file = NamedFile::open("Cargo.toml")
+                .unwrap()
+                .use_etag(use_etag)
+                .use_last_modified(use_last_modified);
+            let req = TestRequest::default()
+                .header(http::header::RANGE, "bytes=0-9")
+                .header(http::header::IF_RANGE, if_range.as_str())
+                .to_http_request();
+            let resp = test::respond_to(file, &req).await;
+            assert_eq!(resp.status(), StatusCode::OK, "If-Range: {}", if_range);
+            assert!(
+                !resp.headers().contains_key(http::header::CONTENT_RANGE),
+                "If-Range: {}",
+                if_range
+            );
+        }
+    }
+
+    #[ntex::test]
+    async fn test_named_file_if_range_earlier_date() {
+        // the date must be equal to Last-Modified, not merely not later
+        let file = NamedFile::open("Cargo.toml").unwrap();
+        let modified = file.last_modified().unwrap();
+        let earlier = header::HttpDate::from(SystemTime::from(modified) - Duration::from_secs(60));
+        let req = TestRequest::default()
+            .header(http::header::RANGE, "bytes=0-9")
+            .header(http::header::IF_RANGE, earlier.to_string())
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!resp.headers().contains_key(http::header::CONTENT_RANGE));
+    }
+
+    #[ntex::test]
+    async fn test_named_file_if_range_not_utf8() {
+        let file = NamedFile::open("Cargo.toml").unwrap();
+        let req = TestRequest::default()
+            .header(http::header::RANGE, "bytes=0-9")
+            .header(
+                http::header::IF_RANGE,
+                http::header::HeaderValue::from_bytes(b"\"\xff\"").unwrap(),
+            )
+            .to_http_request();
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!resp.headers().contains_key(http::header::CONTENT_RANGE));
+    }
+
+    #[ntex::test]
+    async fn test_files_if_range() {
+        let srv = test::init_service(App::new().service(Files::new("/", "."))).await;
+        let data = Bytes::from(fs::read("tests/test.binary").unwrap());
+
+        // a validator that no longer matches yields the whole file,
+        // whether the range is satisfiable or not
+        for range in ["bytes=10-20", "bytes=200-300"] {
+            let request = TestRequest::get()
+                .uri("/tests/test.binary")
+                .header(http::header::RANGE, range)
+                .header(http::header::IF_RANGE, "\"stale\"")
+                .to_request();
+            let response = test::call_service(&srv, request).await;
+            assert_eq!(response.status(), StatusCode::OK, "Range: {}", range);
+            assert!(!response.headers().contains_key(http::header::CONTENT_RANGE));
+            let bytes = test::read_body(response).await;
+            assert_eq!(bytes, data);
+        }
+
+        // the validator of the current file yields the requested range
+        let request = TestRequest::get().uri("/tests/test.binary").to_request();
+        let response = test::call_service(&srv, request).await;
+        let etag = response
+            .headers()
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
         let request = TestRequest::get()
-            .uri("/t%65st/tests/test.binary")
+            .uri("/tests/test.binary")
             .header(http::header::RANGE, "bytes=10-20")
-            .to_request();
-        let _response = test::call_service(&srv, request).await;
-
-        // let contentlength = _response
-        //     .headers()
-        //     .get(header::CONTENT_LENGTH)
-        //     .unwrap()
-        //     .to_str()
-        //     .unwrap();
-        // assert_eq!(contentlength, "11");
-
-        // Invalid range header
-        let request = TestRequest::get()
-            .uri("/t%65st/tests/test.binary")
-            .header(http::header::RANGE, "bytes=10-8")
+            .header(http::header::IF_RANGE, etag.as_str())
             .to_request();
         let response = test::call_service(&srv, request).await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let bytes = test::read_body(response).await;
+        assert_eq!(bytes, data.slice(10..21));
+    }
+
+    #[ntex::test]
+    async fn test_named_file_content_length_headers() {
+        let srv = test::server(async |_| App::new().service(Files::new("/", ".")));
+        let data = Bytes::from(fs::read("tests/test.binary").unwrap());
+
+        // Valid range header
+        let response = srv
+            .get("/tests/test.binary")
+            .header(http::header::RANGE, "bytes=10-20")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let content_length = response.headers().get(http::header::CONTENT_LENGTH);
+        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("11"));
+        let transfer_encoding = response.headers().get(http::header::TRANSFER_ENCODING);
+        assert!(transfer_encoding.is_none());
+        let bytes = response.body().await.unwrap();
+        assert_eq!(bytes, data.slice(10..21));
+
+        // Valid range header, starting from 0
+        let response = srv
+            .get("/tests/test.binary")
+            .header(http::header::RANGE, "bytes=0-20")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let content_length = response.headers().get(http::header::CONTENT_LENGTH);
+        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("21"));
+        let transfer_encoding = response.headers().get(http::header::TRANSFER_ENCODING);
+        assert!(transfer_encoding.is_none());
+        let bytes = response.body().await.unwrap();
+        assert_eq!(bytes, data.slice(0..21));
+
+        // Invalid range header
+        let response = srv
+            .get("/tests/test.binary")
+            .header(http::header::RANGE, "bytes=10-8")
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
 
         // Without range header
-        let request = TestRequest::get()
-            .uri("/t%65st/tests/test.binary")
-            // .no_default_headers()
-            .to_request();
-        let _response = test::call_service(&srv, request).await;
-
-        // let contentlength = response
-        //     .headers()
-        //     .get(header::CONTENT_LENGTH)
-        //     .unwrap()
-        //     .to_str()
-        //     .unwrap();
-        // assert_eq!(contentlength, "100");
-
-        // chunked
-        let request = TestRequest::get()
-            .uri("/t%65st/tests/test.binary")
-            .to_request();
-        let response = test::call_service(&srv, request).await;
-
-        // with enabled compression
-        // {
-        //     let te = response
-        //         .headers()
-        //         .get(header::TRANSFER_ENCODING)
-        //         .unwrap()
-        //         .to_str()
-        //         .unwrap();
-        //     assert_eq!(te, "chunked");
-        // }
-
-        let bytes = test::read_body(response).await;
-        let data = Bytes::from(fs::read("tests/test.binary").unwrap());
+        let response = srv.get("/tests/test.binary").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_length = response.headers().get(http::header::CONTENT_LENGTH);
+        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("100"));
+        let transfer_encoding = response.headers().get(http::header::TRANSFER_ENCODING);
+        assert!(transfer_encoding.is_none());
+        let bytes = response.body().await.unwrap();
         assert_eq!(bytes, data);
     }
 
     #[ntex::test]
     async fn test_head_content_length_headers() {
-        let srv = test::init_service(
-            App::new().service(Files::new("test", ".").index_file("tests/test.binary")),
-        )
-        .await;
+        let srv = test::server(async |_| App::new().service(Files::new("/", ".")));
+
+        // Without range header
+        let response = srv.head("/tests/test.binary").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_length = response.headers().get(http::header::CONTENT_LENGTH);
+        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("100"));
 
         // Valid range header
-        let request = TestRequest::default()
-            .method(Method::HEAD)
-            .uri("/t%65st/tests/test.binary")
-            .to_request();
-        let _response = test::call_service(&srv, request).await;
-
-        // TODO: fix check
-        // let contentlength = response
-        //     .headers()
-        //     .get(header::CONTENT_LENGTH)
-        //     .unwrap()
-        //     .to_str()
-        //     .unwrap();
-        // assert_eq!(contentlength, "100");
+        let response = srv
+            .head("/tests/test.binary")
+            .header(http::header::RANGE, "bytes=10-20")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let content_range = response.headers().get(http::header::CONTENT_RANGE);
+        assert_eq!(
+            content_range.map(|v| v.to_str().unwrap()),
+            Some("bytes 10-20/100")
+        );
+        let content_length = response.headers().get(http::header::CONTENT_LENGTH);
+        assert_eq!(content_length.map(|v| v.to_str().unwrap()), Some("11"));
+        let transfer_encoding = response.headers().get(http::header::TRANSFER_ENCODING);
+        assert!(transfer_encoding.is_none());
     }
 
     #[ntex::test]
