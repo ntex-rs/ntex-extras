@@ -1097,6 +1097,21 @@ mod tests {
     }
 
     #[ntex::test]
+    async fn test_named_file_ignores_unsupported_range_requests() {
+        for (method, range) in [(Method::GET, "items=0-9"), (Method::HEAD, "items=0-9")] {
+            let file = NamedFile::open("Cargo.toml").unwrap();
+            let req = TestRequest::default()
+                .method(method)
+                .header(http::header::RANGE, range)
+                .to_http_request();
+            let resp = test::respond_to(file, &req).await;
+
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(!resp.headers().contains_key(http::header::CONTENT_RANGE));
+        }
+    }
+
+    #[ntex::test]
     async fn test_named_file_content_range_headers() {
         let srv = test::init_service(
             App::new().service(Files::new("/test", ".").index_file("tests/test.binary")),

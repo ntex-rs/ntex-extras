@@ -437,12 +437,17 @@ impl NamedFile {
         let mut length = self.md.len();
         let mut offset = 0;
 
+        // a range unit other than "bytes" is ignored (RFC 9110 section 14.2)
+        let ranges = req.headers().get(&http::header::RANGE).filter(|ranges| {
+            ranges
+                .to_str()
+                .ok()
+                .and_then(|value| value.split_once('='))
+                .is_none_or(|(unit, _)| unit.eq_ignore_ascii_case("bytes"))
+        });
+
         // check for range header
-        if let Some(ranges) = req
-            .headers()
-            .get(&http::header::RANGE)
-            .filter(|_| range_allowed)
-        {
+        if let Some(ranges) = ranges.filter(|_| range_allowed) {
             if let Ok(rangesheader) = ranges.to_str() {
                 if let Ok(rangesvec) = HttpRange::parse(rangesheader, length) {
                     length = rangesvec[0].length;
