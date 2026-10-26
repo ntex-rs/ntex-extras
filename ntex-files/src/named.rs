@@ -451,11 +451,7 @@ impl NamedFile {
         });
 
         // check for range header
-        if let Some(ranges) = req
-            .headers()
-            .get(&http::header::RANGE)
-            .filter(|_| range_allowed)
-        {
+        if let Some(ranges) = ranges.filter(|_| range_allowed) {
             if let Ok(rangesheader) = ranges.to_str() {
                 if let Ok(rangesvec) = HttpRange::parse(rangesheader, length) {
                     length = rangesvec[0].length;
