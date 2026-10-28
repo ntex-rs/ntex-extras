@@ -1,5 +1,18 @@
 # Changes
 
+## [4.2.0] - 2026-10-28
+
+* NamedFile: let the caller set the ETag - #41
+
+* NamedFile: send Content-Length on 206 Partial Content - #40
+
+* NamedFile: support If-Range - #39
+
+* NamedFile: evaluate preconditions before Range - #38
+
+* NamedFile: no panic on pre-epoch modification times or on an empty or degenerate Range - #37
+#37
+
 ## [3.2.0] - 2026-03-15
 
 * Cleanup
