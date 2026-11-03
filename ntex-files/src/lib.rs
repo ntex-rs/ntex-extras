@@ -24,7 +24,7 @@ use ntex::web::guard::Guard;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse, State, WebRequest, WebResponse};
 use ntex::{Ctx, IntoServiceFactory, Service, ServiceFactory, util::Bytes};
 use percent_encoding::{CONTROLS, utf8_percent_encode};
-use v_htmlescape::escape as escape_html_entity;
+use v_htmlescape::escape_fmt;
 
 mod error;
 pub mod header;
@@ -152,7 +152,7 @@ macro_rules! encode_file_url {
 // " -- &quot;  & -- &amp;  ' -- &#x27;  < -- &lt;  > -- &gt;  / -- &#x2f;
 macro_rules! encode_file_name {
     ($entry:ident) => {
-        escape_html_entity(&$entry.file_name().to_string_lossy())
+        escape_fmt(&$entry.file_name().to_string_lossy())
     };
 }
 

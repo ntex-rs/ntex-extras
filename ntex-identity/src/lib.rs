@@ -260,6 +260,7 @@ where
 
     ntex::forward_ready!(St, service);
     ntex::forward_shutdown!(St, service);
+    ntex::forward_bind!(St, service);
 
     async fn call(
         &self,
