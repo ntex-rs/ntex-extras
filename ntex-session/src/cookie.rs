@@ -315,7 +315,8 @@ where
 
     ntex::forward_ready!(St, service);
     ntex::forward_shutdown!(St, service);
-
+    ntex::forward_bind!(St, service);
+    
     /// On first request, a new session cookie is returned in response, regardless
     /// of whether any session state is set.  With subsequent requests, if the
     /// session state changes, then set-cookie is returned in response.  As
