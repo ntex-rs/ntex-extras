@@ -27,7 +27,7 @@ ntex = "4.5"
 ntex-http = "2.1"
 ntex-util = "4.6"
 
-ntex-files = "4.2.0"
+ntex-files = "4.3.0"
 ntex-multipart = "4.1.0"
 ntex-multipart-derive = "4.1.0"
 
@@ -60,4 +60,4 @@ thiserror = "2"
 time = { version = "0.3.54", default-features = false, features = ["std"] }
 v_htmlescape = "0.17.0"
 unicase = "2.6"
-urly = "1.1.0"
+urly = "1.2.0"
