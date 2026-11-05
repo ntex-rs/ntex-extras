@@ -98,7 +98,7 @@ impl PayloadBuffer {
     /// Read until specified ending
     pub(crate) fn read_until(&mut self, line: &[u8]) -> Result<Option<Bytes>, MultipartError> {
         let res =
-            twoway::find_bytes(&self.buf, line).map(|idx| self.buf.split_to(idx + line.len()));
+            memchr::memmem::find(&self.buf, line).map(|idx| self.buf.split_to(idx + line.len()));
 
         if res.is_none() && self.eof {
             Err(MultipartError::Incomplete)

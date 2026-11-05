@@ -28,7 +28,7 @@ httparse = { workspace = true }
 futures = { workspace = true }
 log = { workspace = true }
 mime = { workspace = true }
-twoway = { workspace = true }
+memchr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_plain = { workspace = true }

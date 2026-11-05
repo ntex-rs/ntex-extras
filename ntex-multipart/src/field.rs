@@ -208,7 +208,7 @@ impl InnerField {
         }
 
         loop {
-            return if let Some(idx) = twoway::find_bytes(&payload.buf[pos..], b"\r") {
+            return if let Some(idx) = memchr::memchr(b'\r', &payload.buf[pos..]) {
                 let cur = pos + idx;
 
                 // check if we have enough data for boundary detection
