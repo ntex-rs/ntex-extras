@@ -1,8 +1,24 @@
 # Changes
 
+## [Unreleased]
+
+* Replace the deprecated `twoway` dependency with `memchr`
+
+## [4.1.0] - 2026-10-05
+
+* Update the `ntex` apis
+
+## [4.0.0] - 2026-09-14
+
+* Update the `ntex` to 4.0
+
 ## [3.2.0] - 2026-03-15
 
 * Add support for multipart/form-data parsing #26
+
+## [3.1.0] - 2026-02-02
+
+* Update the `ntex` to 3.0 release
 
 ## [3.0.0] - 2025-11-27
 

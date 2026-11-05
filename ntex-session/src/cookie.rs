@@ -20,7 +20,7 @@ use std::{collections::HashMap, convert::Infallible, rc::Rc};
 use cookie::{Cookie, CookieJar, Key, SameSite};
 use derive_more::{Display, From};
 use ntex::http::{HttpMessage, header::HeaderValue, header::SET_COOKIE};
-use ntex::service::{Ctx, Middleware, Service};
+use ntex::service::{BindCtx, Ctx, Middleware, Service};
 use ntex::web::{DefaultError, State, WebRequest, WebResponse, WebResponseError};
 use serde_json::error::Error as JsonError;
 use time::{Duration, OffsetDateTime};
@@ -313,9 +313,20 @@ where
     type Res = WebResponse;
     type Error = S::Error;
 
-    ntex::forward_ready!(St, service);
-    ntex::forward_shutdown!(St, service);
-    ntex::forward_bind!(St, service);
+    #[inline]
+    fn bind(&self, ctx: BindCtx<'_>) {
+        ctx.bind(&self.service);
+    }
+
+    #[inline]
+    async fn ready(&self, ctx: Ctx<'_, Self, St>) -> Result<(), Self::Error> {
+        ctx.ready(&self.service).await
+    }
+
+    #[inline]
+    async fn shutdown(&self, ctx: Ctx<'_, Self, St>) {
+        ctx.shutdown(&self.service).await;
+    }
 
     /// On first request, a new session cookie is returned in response, regardless
     /// of whether any session state is set.  With subsequent requests, if the

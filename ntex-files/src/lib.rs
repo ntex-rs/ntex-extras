@@ -256,9 +256,7 @@ impl<St: State, In> Clone for Files<St, In> {
 impl<St: State, In: 'static> Files<St, In> {
     /// Create new `Files` instance for specified base directory.
     ///
-    /// `File` uses `ThreadPool` for blocking filesystem operations.
-    /// By default pool with 5x threads of available cpus is used.
-    /// Pool size can be changed by setting ACTIX_THREADPOOL environment variable.
+    /// Filesystem operations run on the worker thread that handles the request.
     pub fn new<T: Into<PathBuf>>(path: &str, dir: T) -> Self {
         let orig_dir = dir.into();
         let dir = match orig_dir.canonicalize() {

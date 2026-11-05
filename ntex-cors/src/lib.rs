@@ -53,7 +53,7 @@ use derive_more::Display;
 use ntex::error::{ErrorDiagnostic, Failure, IntoFailure};
 use ntex::http::header::{self, HeaderName, HeaderValue};
 use ntex::http::{HeaderMap, Method, RequestHead, StatusCode, error::HttpError};
-use ntex::service::{Ctx, Middleware, Service};
+use ntex::service::{BindCtx, Ctx, Middleware, Service};
 use ntex::url::{InvalidUrl, Url};
 use ntex::util::{ByteString, Either};
 use ntex::web::{DefaultError, HttpResponse, State, WebRequest, WebResponse, WebResponseError};
@@ -797,9 +797,20 @@ where
         }
     }
 
-    ntex::forward_ready!(St, service);
-    ntex::forward_shutdown!(St, service);
-    ntex::forward_bind!(St, service);
+    #[inline]
+    fn bind(&self, ctx: BindCtx<'_>) {
+        ctx.bind(&self.service);
+    }
+
+    #[inline]
+    async fn ready(&self, ctx: Ctx<'_, Self, St>) -> Result<(), Self::Error> {
+        ctx.ready(&self.service).await
+    }
+
+    #[inline]
+    async fn shutdown(&self, ctx: Ctx<'_, Self, St>) {
+        ctx.shutdown(&self.service).await;
+    }
 }
 
 #[cfg(test)]

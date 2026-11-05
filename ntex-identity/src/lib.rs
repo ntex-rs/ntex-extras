@@ -53,7 +53,7 @@ use time::Duration;
 
 use ntex::http::header::{self, HeaderValue};
 use ntex::http::{HttpMessage, Payload, error::HttpError};
-use ntex::service::{Ctx, Middleware, Service};
+use ntex::service::{BindCtx, Ctx, Middleware, Service};
 use ntex::util::Extensions;
 use ntex::web::{
     DefaultError, FromRequest, HttpRequest, State, WebRequest, WebResponse, WebResponseError,
@@ -258,9 +258,20 @@ where
     type Res = WebResponse;
     type Error = S::Error;
 
-    ntex::forward_ready!(St, service);
-    ntex::forward_shutdown!(St, service);
-    ntex::forward_bind!(St, service);
+    #[inline]
+    fn bind(&self, ctx: BindCtx<'_>) {
+        ctx.bind(&self.service);
+    }
+
+    #[inline]
+    async fn ready(&self, ctx: Ctx<'_, Self, St>) -> Result<(), Self::Error> {
+        ctx.ready(&self.service).await
+    }
+
+    #[inline]
+    async fn shutdown(&self, ctx: Ctx<'_, Self, St>) {
+        ctx.shutdown(&self.service).await;
+    }
 
     async fn call(
         &self,
