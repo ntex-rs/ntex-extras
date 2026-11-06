@@ -1,5 +1,11 @@
 # Changes
 
+## [4.3.0] - 2026-11-06
+
+* Check the 4096-byte cookie size limit after signing or encryption and encoding
+
+* Keep `Secure`, `HttpOnly` and `SameSite` on the session removal cookie
+
 ## [4.2.0] - 2026-11-03
 
 * Update the `ntex` to 4.5
