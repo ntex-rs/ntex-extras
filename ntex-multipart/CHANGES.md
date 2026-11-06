@@ -1,6 +1,16 @@
 # Changes
 
-## ## [4.2.0] - 2026-11-06
+## [Unreleased]
+
+* Apply the 16 KiB header size limit when the terminator arrives in the same chunk
+
+* Return `NotConsumed` instead of hanging when a field outlives its `Multipart`
+
+* Accept a closing boundary without trailing CRLF in a body with no fields
+
+* Treat a boundary followed by anything but CRLF or `--` as field data
+
+## [4.2.0] - 2026-11-06
 
 * Replace the deprecated `twoway` dependency with `memchr`
 

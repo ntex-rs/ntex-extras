@@ -100,19 +100,19 @@ impl PayloadBuffer {
 
     /// Read until specified ending
     ///
-    /// Fails if the ending is not found within `MAX_LINE_SIZE` bytes.
+    /// Fails if the ending, including itself, is not found within `MAX_LINE_SIZE` bytes.
     pub(crate) fn read_until(&mut self, line: &[u8]) -> Result<Option<Bytes>, MultipartError> {
-        let res =
-            memchr::memmem::find(&self.buf, line).map(|idx| self.buf.split_to(idx + line.len()));
-
-        if res.is_none() {
-            if self.buf.len() > MAX_LINE_SIZE {
-                return Err(MultipartError::Payload(PayloadError::Overflow));
-            } else if self.eof {
-                return Err(MultipartError::Incomplete);
+        match memchr::memmem::find(&self.buf, line) {
+            Some(idx) if idx + line.len() > MAX_LINE_SIZE => {
+                Err(MultipartError::Payload(PayloadError::Overflow))
             }
+            Some(idx) => Ok(Some(self.buf.split_to(idx + line.len()))),
+            None if self.buf.len() > MAX_LINE_SIZE => {
+                Err(MultipartError::Payload(PayloadError::Overflow))
+            }
+            None if self.eof => Err(MultipartError::Incomplete),
+            None => Ok(None),
         }
-        Ok(res)
     }
 
     /// Read bytes until new line delimiter
@@ -235,5 +235,77 @@ mod tests {
             payload.read_until(b"2").unwrap()
         );
         assert_eq!(payload.buf.len(), 0);
+    }
+
+    /// STATEMENT: Fragmented lines and restored unread bytes retain their order through payload EOF.
+    ///
+    /// HOW:
+    /// - Feed a line split across its CRLF, then close the stream after a trailing fragment.
+    /// - Read the line, put a partially read suffix back, and confirm EOF returns the complete suffix without duplication.
+    #[ntex::test]
+    async fn fragmented_lines_and_unprocessed_bytes_survive_eof() {
+        let (sender, stream) = bstream::channel();
+        let mut payload = PayloadBuffer::new(stream);
+        sender.feed_data(Bytes::from_static(b"head\r"));
+        lazy(|cx| payload.poll_stream(cx)).await.unwrap();
+        assert!(payload.readline().unwrap().is_none());
+        sender.feed_data(Bytes::from_static(b"\ntail"));
+        sender.feed_eof();
+        lazy(|cx| payload.poll_stream(cx)).await.unwrap();
+
+        assert_eq!(payload.readline().unwrap().unwrap(), "head\r\n");
+        let prefix = payload.read_max(2).unwrap().unwrap();
+        assert_eq!(prefix, "ta");
+        payload.unprocessed(prefix);
+        assert_eq!(payload.readline_or_eof().unwrap().unwrap(), "tail");
+        assert!(payload.readline_or_eof().unwrap().unwrap().is_empty());
+        assert!(matches!(
+            payload.read_max(1),
+            Err(MultipartError::Incomplete)
+        ));
+    }
+
+    /// STATEMENT: Shared payload access transfers to the live field token and returns to the parent after that token is dropped.
+    ///
+    /// HOW:
+    /// - Clone the parent's `Safety` for an active field and read a prefix using the field's shared payload reference.
+    /// - Confirm the parent cannot borrow while the field is live, then drop the field token and read the remaining bytes through the parent.
+    #[ntex::test]
+    async fn shared_payload_access_tracks_field_lifetime() {
+        let (sender, stream) = bstream::channel();
+        let payload = PayloadRef::new(PayloadBuffer::new(stream));
+        let parent = Safety::new();
+        sender.feed_data(Bytes::from_static(b"firstsecond"));
+        sender.feed_eof();
+        lazy(|cx| payload.get_mut(&parent).unwrap().poll_stream(cx))
+            .await
+            .unwrap();
+
+        let field = lazy(|cx| parent.clone(cx)).await;
+        let shared = payload.clone();
+        assert!(payload.get_mut(&parent).is_none());
+        assert_eq!(
+            shared
+                .get_mut(&field)
+                .unwrap()
+                .read_max(5)
+                .unwrap()
+                .unwrap(),
+            "first"
+        );
+        drop(field);
+        assert_eq!(
+            payload
+                .get_mut(&parent)
+                .unwrap()
+                .read_max(6)
+                .unwrap()
+                .unwrap(),
+            "second"
+        );
+        assert!(matches!(
+            payload.get_mut(&parent).unwrap().read_max(1),
+            Err(MultipartError::Incomplete)
+        ));
     }
 }

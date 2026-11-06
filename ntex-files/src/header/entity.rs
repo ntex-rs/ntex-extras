@@ -248,4 +248,30 @@ mod tests {
         assert!(!etag1.strong_ne(&etag2));
         assert!(!etag1.weak_ne(&etag2));
     }
+
+    /// STATEMENT: Updating an `EntityTag` changes its validator while rejecting invalid replacements atomically.
+    ///
+    /// HOW:
+    /// - Parse a strong revision tag, replace its opaque value with Unicode and punctuation, and reparse its formatting.
+    /// - Check old and weak validators compare correctly, then reject spaces, quotes, and control bytes without changing the tag.
+    #[test]
+    fn updating_entity_tags_preserves_validation_and_comparison() {
+        let original: EntityTag = "\"revision-1\"".parse().unwrap();
+        let mut updated = original.clone();
+        updated.set_tag("révision!#~\\".into());
+        let reparsed: EntityTag = updated.to_string().parse().unwrap();
+        assert_eq!(reparsed, updated);
+        assert!(updated.strong_ne(&original));
+        assert!(updated.weak_ne(&original));
+        assert!(updated.strong_eq(&EntityTag::strong("révision!#~\\".into())));
+        assert!(updated.weak_eq(&EntityTag::weak("révision!#~\\".into())));
+        assert!(!updated.strong_eq(&EntityTag::weak("révision!#~\\".into())));
+        for invalid in ["has space", "has\"quote", "has\tcontrol", "has\u{7f}delete"] {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                updated.set_tag(invalid.into());
+            }));
+            assert!(result.is_err(), "{invalid:?}");
+            assert_eq!(updated, reparsed);
+        }
+    }
 }

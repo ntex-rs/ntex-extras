@@ -277,8 +277,8 @@ impl Header for ContentDisposition {
         parsing::from_one_raw_str(raw).and_then(|s: String| {
             let mut sections = parsing::split_unquoted(&s, ';', true);
             let disposition = match sections.next() {
-                Some(s) => s.trim(),
-                None => return Err(error::Error::Header),
+                Some(s) if parsing::is_token(s.trim()) => s.trim(),
+                _ => return Err(error::Error::Header),
             };
 
             let mut cd = ContentDisposition {
@@ -292,7 +292,7 @@ impl Header for ContentDisposition {
                 let key = if let Some(key) = parts.next() {
                     let key_trimmed = key.trim();
 
-                    if key_trimmed.is_empty() || key_trimmed == "*" {
+                    if !parsing::is_token(key_trimmed) || key_trimmed == "*" {
                         return Err(error::Error::Header);
                     }
 
@@ -318,30 +318,35 @@ impl Header for ContentDisposition {
                 } else {
                     let val = if val.starts_with('\"') {
                         // quoted-string: defined in RFC 6266 -> RFC 2616 Section 3.6
-                        let mut escaping = false;
                         let mut quoted_string = vec![];
+                        let mut chars = val.as_bytes()[1..].iter();
+                        let mut closed = false;
 
                         // search for closing quote
-                        for &c in val.as_bytes().iter().skip(1) {
-                            if escaping {
-                                escaping = false;
-                                quoted_string.push(c);
-                            } else if c == 0x5c {
-                                // backslash
-                                escaping = true;
-                            } else if c == 0x22 {
-                                // double quote
-                                break;
-                            } else {
-                                quoted_string.push(c);
+                        while let Some(&c) = chars.next() {
+                            match c {
+                                b'\\' => match chars.next() {
+                                    Some(&c) => quoted_string.push(c),
+                                    None => break,
+                                },
+                                b'"' => {
+                                    closed = true;
+                                    break;
+                                }
+                                c => quoted_string.push(c),
                             }
+                        }
+
+                        // the value must end with the closing quote
+                        if !closed || chars.next().is_some() {
+                            return Err(error::Error::Header);
                         }
 
                         // In fact, it should not be Err if the above code is correct.
                         String::from_utf8(quoted_string).map_err(|_| error::Error::Header)?
                     } else {
-                        if val.is_empty() {
-                            // quoted-string can be empty, but token cannot be empty
+                        // quoted-string can be empty, but token cannot be empty
+                        if !parsing::is_token(val) {
                             return Err(error::Error::Header);
                         }
 
@@ -421,7 +426,9 @@ impl fmt::Display for DispositionParam {
             LazyLock::new(|| Regex::new("[\x00-\x08\x10-\x1F\x7F\"\\\\]").unwrap());
 
         match self {
-            DispositionParam::Name(value) => write!(f, "name={}", value),
+            DispositionParam::Name(value) => {
+                write!(f, "name=\"{}\"", RE.replace_all(value, "\\$0").as_ref())
+            }
 
             DispositionParam::Filename(value) => {
                 write!(f, "filename=\"{}\"", RE.replace_all(value, "\\$0").as_ref())
@@ -535,6 +542,282 @@ mod tests {
             "attachment; filename=\"colourful.csv\"".to_owned(),
             display_rendered
         );
+    }
+
+    /// STATEMENT: Disposition types and recognized parameter names are case-insensitive.
+    ///
+    /// HOW:
+    /// - Parse mixed-case types and parameter names with surrounding whitespace.
+    /// - Check the resulting variants, preserved extension spelling, and literal `%20` filename.
+    #[test]
+    fn disposition_types_and_parameter_names_are_case_insensitive() {
+        for (token, disposition) in [
+            ("InLiNe", DispositionType::Inline),
+            ("ATTACHMENT", DispositionType::Attachment),
+            ("Form-Data", DispositionType::FormData),
+            ("X-Archive", DispositionType::Ext("X-Archive".to_owned())),
+        ] {
+            let raw = Raw::from(format!(
+                " \t{token} ; NaMe = upload ; FiLeNaMe = file%20name.txt \t"
+            ));
+            assert_eq!(
+                ContentDisposition::parse_header(&raw).unwrap(),
+                ContentDisposition {
+                    disposition,
+                    parameters: vec![
+                        DispositionParam::Name("upload".to_owned()),
+                        DispositionParam::Filename("file%20name.txt".to_owned()),
+                    ],
+                },
+                "{token}"
+            );
+        }
+    }
+
+    /// STATEMENT: Extended parameters retain their charset, language, and decoded octets.
+    ///
+    /// HOW:
+    /// - Parse a fallback filename, mixed-case `filename*`, and regular and extended unknown parameters.
+    /// - Check case-insensitive lookup and decoded bytes, then format and reparse the whole header.
+    #[test]
+    fn extended_parameters_preserve_metadata_and_round_trip() {
+        let raw = Raw::from(
+            "attachment; note=first; FiLeNaMe=fallback.txt; \
+             X-Note*=x-vendor'fr'%FF%20note; \
+             FILENAME*=utf-8'en-US'r%C3%A9sum%C3%A9%2Bdraft%3F.txt",
+        );
+        let parsed = ContentDisposition::parse_header(&raw).unwrap();
+        assert_eq!(parsed.get_filename(), Some("fallback.txt"));
+        assert_eq!(parsed.get_unknown("NOTE"), Some("first"));
+        assert_eq!(parsed.get_unknown("absent"), None);
+        assert_eq!(parsed.get_name(), None);
+        assert_eq!(
+            parsed.get_filename_ext(),
+            Some(&ExtendedValue {
+                charset: Charset::Ext("UTF-8".to_owned()),
+                language_tag: Some("en-US".parse().unwrap()),
+                value: "résumé+draft?.txt".as_bytes().to_vec(),
+            })
+        );
+        assert_eq!(
+            parsed.get_unknown_ext("x-NOTE"),
+            Some(&ExtendedValue {
+                charset: Charset::Ext("X-VENDOR".to_owned()),
+                language_tag: Some("fr".parse().unwrap()),
+                value: b"\xff note".to_vec(),
+            })
+        );
+        assert_eq!(parsed.get_unknown_ext("absent"), None);
+        let rendered = parsed.to_string();
+        assert!(rendered.contains("X-Note*=X-VENDOR'fr'%FF%20note"));
+        assert!(rendered.contains("filename*=UTF-8'en-US'r%C3%A9sum%C3%A9+draft%3F.txt"));
+        assert_eq!(
+            ContentDisposition::parse_header(&Raw::from(rendered)).unwrap(),
+            parsed
+        );
+    }
+
+    /// STATEMENT: Quoted parameters accept empty values and unescape quoted pairs.
+    ///
+    /// HOW:
+    /// - Parse an empty `name`, escaped backslash and separators, and a quoted unknown parameter.
+    /// - Check that escapes are removed without losing separators or embedded quotes.
+    #[test]
+    fn quoted_parameters_handle_empty_and_escaped_values() {
+        let raw = Raw::from(r#"form-data; name=""; filename="a\\b\;c\=d"; CoMmEnT="say \"hi\"""#);
+        let parsed = ContentDisposition::parse_header(&raw).unwrap();
+        assert_eq!(parsed.get_name(), Some(""));
+        assert_eq!(parsed.get_filename(), Some(r"a\b;c=d"));
+        assert_eq!(parsed.get_unknown("comment"), Some(r#"say "hi""#));
+    }
+
+    /// STATEMENT: Formatting escapes quoted filenames and unknown values reversibly.
+    ///
+    /// HOW:
+    /// - Format headers containing Unicode, quotes, backslashes, separators, and control bytes.
+    /// - Check the escaped representation and that parsing recovers every original parameter.
+    #[test]
+    fn formatted_parameters_escape_and_round_trip() {
+        for disposition in [
+            DispositionType::FormData,
+            DispositionType::Ext("x-file".into()),
+        ] {
+            let original = ContentDisposition {
+                disposition,
+                parameters: vec![
+                    DispositionParam::Name("upload".into()),
+                    DispositionParam::Filename("café\\\";notes.txt".into()),
+                    DispositionParam::Unknown("comment".into(), "a\0\u{1}\u{1f}\u{7f}\\\"b".into()),
+                ],
+            };
+            let rendered = original.to_string();
+            assert!(rendered.contains(r#"filename="café\\\";notes.txt""#));
+            assert!(rendered.contains("comment=\"a\\\0\\\u{1}\\\u{1f}\\\u{7f}\\\\\\\"b\""));
+            assert_eq!(
+                ContentDisposition::parse_header(&Raw::from(rendered)).unwrap(),
+                original
+            );
+        }
+    }
+
+    /// STATEMENT: Missing parameter keys or values and invalid raw headers fail parsing.
+    ///
+    /// HOW:
+    /// - Parse empty, malformed, non-UTF-8, and repeated header values.
+    /// - Check that each produces an error rather than a partial disposition.
+    #[test]
+    fn malformed_parameters_and_raw_headers_are_rejected() {
+        let mut cases = [
+            "inline;",
+            "inline; =value",
+            "inline; *=value",
+            "inline; filename",
+            "inline; filename= \t",
+            "attachment; filename*=UTF-8",
+            "attachment; filename*=UTF-8'fr",
+        ]
+        .map(Raw::from)
+        .to_vec();
+        cases.push(Raw::from(Vec::<Vec<u8>>::new()));
+        cases.push(Raw::from(b"attachment; filename=\xff".as_slice()));
+        cases.push(Raw::from(vec![b"inline".to_vec(), b"attachment".to_vec()]));
+        for raw in cases {
+            assert!(ContentDisposition::parse_header(&raw).is_err(), "{raw:?}");
+        }
+    }
+
+    /// STATEMENT: Malformed quoted filenames must not be silently accepted.
+    ///
+    /// HOW:
+    /// - Parse a missing closing quote, a dangling quoted escape, and trailing text after a quote.
+    /// - Collect accepted inputs and require that all malformed inputs were rejected.
+    #[test]
+    fn malformed_quoted_filenames_are_rejected() {
+        let accepted: Vec<_> = [
+            "attachment; filename=\"unterminated",
+            "attachment; filename=\"dangling\\",
+            "attachment; filename=\"a\"trailing",
+        ]
+        .into_iter()
+        .filter(|value| ContentDisposition::parse_header(&Raw::from(*value)).is_ok())
+        .collect();
+        assert!(
+            accepted.is_empty(),
+            "accepted malformed headers: {accepted:?}"
+        );
+    }
+
+    /// STATEMENT: Formatting preserves quoted form field names containing separators or quotes.
+    ///
+    /// HOW:
+    /// - Parse quoted `name` values containing a semicolon and literal double quotes.
+    /// - Format and reparse each header, requiring the original parameters to be recovered.
+    #[test]
+    fn quoted_form_field_names_round_trip() {
+        let broken: Vec<_> = [
+            r#"form-data; name="a;b""#,
+            r#"form-data; name="\"quoted\"""#,
+        ]
+        .into_iter()
+        .filter(|value| {
+            let original = ContentDisposition::parse_header(&Raw::from(*value)).unwrap();
+            !ContentDisposition::parse_header(&Raw::from(original.to_string()))
+                .is_ok_and(|parsed| parsed == original)
+        })
+        .collect();
+        assert!(
+            broken.is_empty(),
+            "field names do not round trip: {broken:?}"
+        );
+    }
+
+    /// STATEMENT: Mixed-case dispositions and all parameter kinds survive canonical formatting and classification.
+    ///
+    /// HOW:
+    /// - Parse inline, attachment, form-data, and extension headers with escaped names and regular and extended metadata.
+    /// - Check case-insensitive type and parameter classification, decoded values, and equality after formatting and reparsing.
+    #[test]
+    fn mixed_dispositions_classify_and_round_trip_parameters() {
+        for token in ["InLiNe", "ATTACHMENT", "Form-Data", "X-Archive"] {
+            let raw = Raw::from(format!(
+                r#"{token}; name="a;b"; filename="a\"b.txt"; filename*=UTF-8'en'%C3%A9.txt; X-Note=first; X-Note*=ISO-8859-1'fr'%A3"#
+            ));
+            let parsed = ContentDisposition::parse_header(&raw).unwrap();
+            assert_eq!(parsed.is_inline(), token == "InLiNe");
+            assert_eq!(parsed.is_attachment(), token == "ATTACHMENT");
+            assert_eq!(parsed.is_form_data(), token == "Form-Data");
+            assert_eq!(parsed.is_ext("x-archive"), token == "X-Archive");
+            assert!(!parsed.is_ext("other"));
+            assert_eq!(parsed.get_name(), Some("a;b"));
+            assert_eq!(parsed.get_filename(), Some("a\"b.txt"));
+            assert_eq!(parsed.get_filename_ext().unwrap().value, "é.txt".as_bytes());
+            assert_eq!(parsed.get_unknown("x-note"), Some("first"));
+            assert_eq!(parsed.get_unknown_ext("X-NOTE").unwrap().value, b"\xa3");
+            for (index, param) in parsed.parameters.iter().enumerate() {
+                assert_eq!(param.is_name(), index == 0);
+                assert_eq!(param.is_filename(), index == 1);
+                assert_eq!(param.is_filename_ext(), index == 2);
+                assert_eq!(param.is_unknown("x-note"), index == 3);
+                assert_eq!(param.is_unknown_ext("X-NOTE"), index == 4);
+                assert!(!param.is_unknown("absent"));
+                assert!(!param.is_unknown_ext("absent"));
+            }
+            let reparsed =
+                ContentDisposition::parse_header(&Raw::from(parsed.to_string())).unwrap();
+            assert_eq!(reparsed, parsed);
+        }
+    }
+
+    /// STATEMENT: Disposition types, parameter names, and unquoted values must follow HTTP token syntax.
+    ///
+    /// HOW:
+    /// - Parse headers with an absent or malformed disposition, illegal parameter names, and unquoted separators.
+    /// - Require every invalid field to be rejected instead of retained as extension metadata.
+    #[test]
+    fn malformed_disposition_tokens_are_rejected() {
+        for value in [
+            " ",
+            "; filename=a.txt",
+            "two words; filename=a.txt",
+            "\"attachment\"; filename=a.txt",
+            "attachment; bad key=value",
+            "attachment; filename=two words.txt",
+            "attachment; filename=a/b.txt",
+            "attachment; filename=a\"b.txt",
+        ] {
+            assert!(
+                ContentDisposition::parse_header(&Raw::from(value)).is_err(),
+                "{value:?}"
+            );
+        }
+    }
+
+    /// STATEMENT: Extended disposition parameters permit only encoded octets or RFC 5987 attribute characters.
+    ///
+    /// HOW:
+    /// - Parse extended filenames containing raw spaces, asterisks, apostrophes, quotes, and non-ASCII bytes.
+    /// - Require rejection, while checking the percent-encoded equivalents preserve the original bytes.
+    #[test]
+    fn unescaped_extended_value_characters_are_rejected() {
+        for (invalid, encoded, expected) in [
+            ("two words", "two%20words", "two words"),
+            ("a*b", "a%2Ab", "a*b"),
+            ("a'b", "a%27b", "a'b"),
+            ("a\"b", "a%22b", "a\"b"),
+            ("é.txt", "%C3%A9.txt", "é.txt"),
+        ] {
+            let valid = Raw::from(format!("attachment; filename*=UTF-8''{encoded}"));
+            let parsed = ContentDisposition::parse_header(&valid).unwrap();
+            assert_eq!(
+                parsed.get_filename_ext().unwrap().value,
+                expected.as_bytes()
+            );
+            let invalid = Raw::from(format!("attachment; filename*=UTF-8''{invalid}"));
+            assert!(
+                ContentDisposition::parse_header(&invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
     }
 }
 

@@ -162,3 +162,51 @@ fn test_big5_name() {
     assert_eq!(Big5, "big5".parse().unwrap());
     assert_eq!("BIG5", format!("{}", Big5));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Charset::{self, *};
+
+    /// STATEMENT: Registered charset names parse case-insensitively and extensions normalize to uppercase.
+    ///
+    /// HOW:
+    /// - Parse mixed-case ISO, Asian, and Cyrillic charset names and a vendor extension.
+    /// - Check the selected variants and their canonical names survive reparsing.
+    #[test]
+    fn charset_names_normalize_and_round_trip() {
+        for (name, expected) in [
+            ("iSo-8859-2", Iso_8859_2),
+            ("iso-8859-3", Iso_8859_3),
+            ("iso-8859-4", Iso_8859_4),
+            ("iso-8859-5", Iso_8859_5),
+            ("iso-8859-6", Iso_8859_6),
+            ("iso-8859-7", Iso_8859_7),
+            ("iso-8859-8", Iso_8859_8),
+            ("iso-8859-9", Iso_8859_9),
+            ("iso-8859-10", Iso_8859_10),
+            ("sHiFt-JiS", Shift_Jis),
+            ("euc-jp", Euc_Jp),
+            ("iso-2022-kr", Iso_2022_Kr),
+            ("euc-kr", Euc_Kr),
+            ("iso-2022-jp", Iso_2022_Jp),
+            ("iso-2022-jp-2", Iso_2022_Jp_2),
+            ("iso-8859-6-e", Iso_8859_6_E),
+            ("iso-8859-6-i", Iso_8859_6_I),
+            ("iso-8859-8-e", Iso_8859_8_E),
+            ("iso-8859-8-i", Iso_8859_8_I),
+            ("gb2312", Gb2312),
+            ("kOi8-r", Koi8_R),
+            ("x-Vendor", Ext("X-VENDOR".into())),
+        ] {
+            let parsed: Charset = name.parse().unwrap();
+            assert_eq!(parsed, expected, "{name}");
+            let canonical = if parsed == Shift_Jis {
+                "Shift-JIS".into()
+            } else {
+                name.to_ascii_uppercase()
+            };
+            assert_eq!(parsed.to_string(), canonical, "{name}");
+            assert_eq!(parsed.to_string().parse::<Charset>().unwrap(), expected);
+        }
+    }
+}

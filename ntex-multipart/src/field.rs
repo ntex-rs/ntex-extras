@@ -198,13 +198,16 @@ impl InnerField {
 
             if let Some(b_len) = b_len {
                 let b_size = boundary.len() + b_len;
-                if len < b_size {
+                // the boundary must be followed by CRLF or by "--"
+                if len < b_size + 2 {
                     return if payload.eof {
                         Poll::Ready(Some(Err(MultipartError::Incomplete)))
                     } else {
                         Poll::Pending
                     };
-                } else if &payload.buf[b_len..b_size] == boundary.as_bytes() {
+                } else if &payload.buf[b_len..b_size] == boundary.as_bytes()
+                    && matches!(&payload.buf[b_size..b_size + 2], b"\r\n" | b"--")
+                {
                     // found boundary
                     return Poll::Ready(None);
                 }

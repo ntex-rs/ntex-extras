@@ -627,12 +627,18 @@ mod tests {
     use super::*;
     use ntex::web::test::{self, TestRequest};
     use ntex::web::{self, App, HttpResponse, WebError, error};
-    use ntex::{Pipeline, fn_service, http::Request, http::StatusCode, time};
+    use ntex::{Pipeline, fn_service, http::Request, http::StatusCode};
 
     const COOKIE_KEY_MASTER: [u8; 32] = [0; 32];
     const COOKIE_NAME: &str = "ntex_auth";
     const COOKIE_LOGIN: &str = "test";
 
+    /// STATEMENT: Identity login and logout update authentication, while anonymous logout is rejected.
+    ///
+    /// HOW:
+    /// - Request the index anonymously and assert `200`; request logout anonymously and assert `400` without a cookie.
+    /// - Log in, replay the returned cookie and assert the index returns `201`.
+    /// - Log out, replay the removal cookie and assert the index returns `200` without reissuing an identity.
     #[ntex::test]
     async fn test_identity() {
         let srv = test::init_service(
@@ -670,6 +676,10 @@ mod tests {
         let resp = test::call_service(&srv, TestRequest::with_uri("/index").to_request()).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
+        let resp = test::call_service(&srv, TestRequest::with_uri("/logout").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(!resp.headers().contains_key(header::SET_COOKIE));
+
         let resp = test::call_service(&srv, TestRequest::with_uri("/login").to_request()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let c = resp.cookies().next().unwrap().into_owned();
@@ -691,7 +701,14 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(resp.headers().contains_key(header::SET_COOKIE))
+        assert!(resp.headers().contains_key(header::SET_COOKIE));
+        let deleted = resp.cookies().next().unwrap().into_owned();
+        let resp = srv
+            .call(TestRequest::with_uri("/index").cookie(deleted).to_request())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!resp.headers().contains_key(header::SET_COOKIE));
     }
 
     #[ntex::test]
@@ -1103,6 +1120,12 @@ mod tests {
         assert!(resp.headers().contains_key(header::SET_COOKIE));
     }
 
+    /// STATEMENT: Identity middleware remains ready during an in-flight call and propagates inner errors.
+    ///
+    /// HOW:
+    /// - Hold an inner request on a channel and assert middleware readiness while it is pending.
+    /// - Release the request and assert the inner error is returned rather than rendered or persisted.
+    /// - Make a successful request and assert the policy writes its identity header to the response.
     #[ntex::test]
     async fn test_borrowed_mut_error() {
         struct Ident;
@@ -1121,30 +1144,327 @@ mod tests {
             async fn to_response(
                 &self,
                 _: &St,
-                _: Option<String>,
-                _: bool,
-                _: &mut WebResponse,
+                identity: Option<String>,
+                changed: bool,
+                response: &mut WebResponse,
             ) -> Result<(), Infallible> {
+                assert!(!changed);
+                response.headers_mut().insert(
+                    header::HeaderName::from_static("x-identity"),
+                    HeaderValue::from_str(&identity.unwrap()).unwrap(),
+                );
                 Ok(())
             }
         }
 
+        let (tx, rx) = futures::channel::oneshot::channel::<()>();
+        let rx = Rc::new(std::cell::RefCell::new(Some(rx)));
         let srv = IdentityServiceMiddleware {
             backend: Rc::new(Ident),
-            service: fn_service(|_: WebRequest<()>| async move {
-                time::sleep(time::Seconds(100)).await;
-                Err::<WebResponse, _>(error::ErrorBadRequest("error"))
+            service: fn_service(move |req: WebRequest<()>| {
+                let rx = rx.clone();
+                async move {
+                    if req.path() == "/blocked" {
+                        let receiver = rx.borrow_mut().take().unwrap();
+                        receiver.await.unwrap();
+                        Err(error::ErrorBadRequest("inner error"))
+                    } else {
+                        Ok(req.into_response(HttpResponse::Ok().build()))
+                    }
+                }
             }),
         }
         .pipeline(());
 
-        let srv2 = srv.bind();
-        let req = TestRequest::default().to_srv_request();
-        ntex::rt::spawn(async move {
-            let _ = srv2.call(req).await;
-        });
-        time::sleep(time::Millis(50)).await;
-
+        let mut pending =
+            std::pin::pin!(srv.call(TestRequest::with_uri("/blocked").to_srv_request()));
+        assert!(futures::poll!(pending.as_mut()).is_pending());
         srv.ready().await.expect("srv to be ready");
+        tx.send(()).unwrap();
+        assert_eq!(pending.await.unwrap_err().to_string(), "inner error");
+
+        let response = srv
+            .call(TestRequest::default().to_srv_request())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("x-identity").unwrap(), "test");
+    }
+
+    /// STATEMENT: Identity mutations are shared across request handles only when a policy initialized them.
+    ///
+    /// HOW:
+    /// - Extract `Identity` from requests with and without an initialized `IdentityItem` and clone the handle.
+    /// - Remember an identity and assert the clone and `RequestIdentity` observe it only on the initialized request.
+    /// - Forget through the clone and assert the original handle and request become anonymous.
+    #[ntex::test]
+    async fn identity_mutations_share_request_state() {
+        for initialized in [false, true] {
+            let (req, mut payload, state) = TestRequest::default().to_http_parts();
+            if initialized {
+                req.extensions_mut().insert(IdentityItem {
+                    id: None,
+                    changed: false,
+                });
+            }
+            let identity = Identity::from_request(&state, &req, &mut payload)
+                .await
+                .unwrap();
+            let clone = identity.clone();
+            assert_eq!(req.get_identity(), None);
+            identity.remember("alice".to_owned());
+            let expected = initialized.then(|| "alice".to_owned());
+            assert_eq!(clone.identity(), expected);
+            assert_eq!(req.get_identity(), expected);
+            clone.forget();
+            assert_eq!(identity.identity(), None);
+            assert_eq!(req.get_identity(), None);
+            if initialized {
+                assert!(req.extensions().get::<IdentityItem>().unwrap().changed);
+            } else {
+                assert!(req.extensions().get::<IdentityItem>().is_none());
+            }
+        }
+    }
+
+    /// STATEMENT: Policy errors are rendered at their respective stages, and removed identity state is not persisted.
+    ///
+    /// HOW:
+    /// - Use a recording policy that rejects loading or saving according to the request path.
+    /// - Assert load errors yield `403` without an inner call, and save errors yield `400` after an inner call.
+    /// - Remove `IdentityItem` in another inner call and assert `202` without a save; assert normal calls save and remove the item.
+    #[ntex::test]
+    async fn middleware_policy_errors_and_removed_identity() {
+        struct Policy(Rc<std::cell::RefCell<Vec<&'static str>>>);
+
+        impl IdentityPolicy<(), ()> for Policy {
+            type Error = WebError;
+
+            async fn from_request(
+                &self,
+                _: &(),
+                req: &mut WebRequest,
+            ) -> Result<Option<String>, WebError> {
+                self.0.borrow_mut().push("load");
+                if req.path() == "/load-error" {
+                    Err(WebError::from_err(error::ErrorForbidden("load denied")))
+                } else {
+                    Ok(Some("loaded".to_owned()))
+                }
+            }
+
+            async fn to_response(
+                &self,
+                _: &(),
+                id: Option<String>,
+                changed: bool,
+                res: &mut WebResponse,
+            ) -> Result<(), WebError> {
+                self.0.borrow_mut().push("save");
+                assert_eq!(id.as_deref(), Some("loaded"));
+                assert!(!changed);
+                if res.request().path() == "/save-error" {
+                    Err(WebError::from_err(error::ErrorBadRequest("save denied")))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        let events = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let inner_events = events.clone();
+        let service = IdentityService::new(Policy(events.clone()))
+            .create(
+                &(),
+                fn_service(move |req: WebRequest| {
+                    inner_events.borrow_mut().push("call");
+                    assert_eq!(req.get_identity().as_deref(), Some("loaded"));
+                    if req.path() == "/removed" {
+                        req.extensions_mut().remove::<IdentityItem>();
+                    }
+                    async move {
+                        Ok::<_, Infallible>(req.into_response(HttpResponse::Accepted().build()))
+                    }
+                }),
+            )
+            .pipeline(());
+
+        for (path, status, expected) in [
+            ("/load-error", StatusCode::FORBIDDEN, vec!["load"]),
+            (
+                "/save-error",
+                StatusCode::BAD_REQUEST,
+                vec!["load", "call", "save"],
+            ),
+            ("/removed", StatusCode::ACCEPTED, vec!["load", "call"]),
+            ("/ok", StatusCode::ACCEPTED, vec!["load", "call", "save"]),
+        ] {
+            events.borrow_mut().clear();
+            let response = service
+                .call(TestRequest::with_uri(path).to_srv_request())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            assert_eq!(*events.as_ref().borrow(), expected);
+            assert!(
+                response
+                    .request()
+                    .extensions()
+                    .get::<IdentityItem>()
+                    .is_none()
+            );
+        }
+    }
+
+    /// STATEMENT: Private identity cookies retain configured attributes when issued and removed.
+    ///
+    /// HOW:
+    /// - Remember an identity with custom scope, `SameSite::Strict`, `Secure` and `Max-Age`, alongside an unrelated cookie.
+    /// - Assert the unrelated cookie survives, the identity decrypts correctly and all configured attributes are present.
+    /// - Replay it without changes and assert an unrelated cookie survives without an identity cookie being reissued.
+    /// - Forget the identity; assert the removal cookie retains its attributes with empty value, zero `Max-Age` and past `Expires`.
+    #[ntex::test]
+    async fn identity_cookie_attributes_survive_logout() {
+        let srv = test::init_service(
+            App::new()
+                .middleware(IdentityService::new(
+                    CookieIdentityPolicy::new(&COOKIE_KEY_MASTER)
+                        .name(COOKIE_NAME)
+                        .path("/account")
+                        .domain("localhost")
+                        .secure(true)
+                        .same_site(SameSite::Strict)
+                        .max_age(120),
+                ))
+                .service(web::resource("/login").to(|id: Identity| async move {
+                    id.remember(COOKIE_LOGIN.to_owned());
+                    HttpResponse::Ok()
+                        .header(header::SET_COOKIE, "unrelated=kept")
+                        .build()
+                }))
+                .service(web::resource("/index").to(|id: Identity| async move {
+                    assert_eq!(id.identity().as_deref(), Some(COOKIE_LOGIN));
+                    HttpResponse::Ok()
+                        .header(header::SET_COOKIE, "unrelated=kept")
+                        .build()
+                }))
+                .service(web::resource("/logout").to(|id: Identity| async move {
+                    assert_eq!(id.identity().as_deref(), Some(COOKIE_LOGIN));
+                    id.forget();
+                    HttpResponse::Ok()
+                })),
+        )
+        .await;
+        let response = srv
+            .call(TestRequest::with_uri("/login").to_request())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .cookies()
+                .any(|c| c.name() == "unrelated" && c.value() == "kept")
+        );
+        let cookie = response
+            .cookies()
+            .find(|c| c.name() == COOKIE_NAME)
+            .unwrap()
+            .into_owned();
+        assert_eq!(cookie.path(), Some("/account"));
+        assert_eq!(cookie.domain(), Some("localhost"));
+        assert_eq!(cookie.secure(), Some(true));
+        assert_eq!(cookie.http_only(), Some(true));
+        assert_eq!(cookie.same_site(), Some(SameSite::Strict));
+        assert_eq!(cookie.max_age(), Some(Duration::seconds(120)));
+        let mut jar = CookieJar::new();
+        jar.add_original(cookie.clone());
+        let key = Key::derive_from(&COOKIE_KEY_MASTER);
+        assert_eq!(
+            jar.private(&key).get(COOKIE_NAME).unwrap().value(),
+            COOKIE_LOGIN
+        );
+
+        let mut unchanged = srv
+            .call(
+                TestRequest::with_uri("/index")
+                    .cookie(cookie.clone())
+                    .to_request(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged.status(), StatusCode::OK);
+        assert!(
+            unchanged
+                .cookies()
+                .any(|c| c.name() == "unrelated" && c.value() == "kept")
+        );
+        assert_no_login_cookie(&mut unchanged);
+
+        let response = srv
+            .call(TestRequest::with_uri("/logout").cookie(cookie).to_request())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let deleted = response
+            .cookies()
+            .find(|c| c.name() == COOKIE_NAME)
+            .unwrap();
+        assert_eq!(deleted.value(), "");
+        assert_eq!(deleted.path(), Some("/account"));
+        assert_eq!(deleted.domain(), Some("localhost"));
+        assert_eq!(deleted.secure(), Some(true));
+        assert_eq!(deleted.http_only(), Some(true));
+        assert_eq!(deleted.same_site(), Some(SameSite::Strict));
+        assert_eq!(deleted.max_age(), Some(Duration::ZERO));
+        assert!(deleted.expires().unwrap().datetime().unwrap() < ::time::OffsetDateTime::now_utc());
+    }
+
+    /// STATEMENT: A visit-only deadline refreshes authenticated cookies without adding a login timestamp.
+    ///
+    /// HOW:
+    /// - Configure only `visit_deadline` and replay a valid cookie with a day-old visit timestamp and no login timestamp.
+    /// - Assert the response keeps the identity and issues a cookie with a recent visit timestamp but no login timestamp.
+    #[ntex::test]
+    async fn visit_only_deadline_refreshes_identity() {
+        let srv = create_identity_server(|c| c.visit_deadline(Duration::days(90))).await;
+        let cookie = login_cookie(
+            COOKIE_LOGIN,
+            None,
+            Some(SystemTime::now() - Duration::days(1)),
+        );
+        let mut response = srv
+            .call(TestRequest::default().cookie(cookie).to_request())
+            .await
+            .unwrap();
+        assert_login_cookie(
+            &mut response,
+            COOKIE_LOGIN,
+            LoginTimestampCheck::Incorrect,
+            VisitTimeStampCheck::NewTimestamp,
+        );
+        assert_logged_in(response, Some(COOKIE_LOGIN)).await;
+    }
+
+    /// STATEMENT: Invalid cookie header configuration becomes a server error rather than panicking.
+    ///
+    /// HOW:
+    /// - Configure a cookie path containing a newline and remember an identity in the handler.
+    /// - Assert the middleware returns `500` without emitting an invalid `Set-Cookie` header.
+    #[ntex::test]
+    async fn invalid_identity_cookie_header_returns_error() {
+        let srv = test::init_service(
+            App::new()
+                .middleware(IdentityService::new(
+                    CookieIdentityPolicy::new(&COOKIE_KEY_MASTER).path("/invalid\npath"),
+                ))
+                .service(web::resource("/").to(|id: Identity| async move {
+                    id.remember(COOKIE_LOGIN.to_owned());
+                    HttpResponse::Ok()
+                })),
+        )
+        .await;
+        let response = srv.call(TestRequest::default().to_request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
     }
 }

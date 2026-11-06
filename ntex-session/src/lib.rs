@@ -330,21 +330,125 @@ mod tests {
         assert_eq!(res, Some("value".to_string()));
     }
 
+    /// STATEMENT: `Session::purge` removes all data and cannot be undone by later mutations.
+    ///
+    /// HOW:
+    /// - Store a value, purge the session, then attempt `set`, `remove`, `clear` and `renew`.
+    /// - Assert the value is absent and `get_changes` returns `Purged` with empty state.
     #[test]
     fn purge_session() {
         let req = test::TestRequest::default().to_srv_request();
-        let session = Session::get_session(&mut req.extensions_mut());
-        assert_eq!(session.0.borrow().status, SessionStatus::Unchanged);
+        let session = req.get_session();
+        session.set("key", "value").unwrap();
         session.purge();
-        assert_eq!(session.0.borrow().status, SessionStatus::Purged);
+        session.set("key", "replacement").unwrap();
+        session.remove("key");
+        session.clear();
+        session.renew();
+        assert_eq!(session.get::<String>("key").unwrap(), None);
+
+        let mut res = req.into_response(HttpResponse::Ok().build());
+        let (status, state) = Session::get_changes(&mut res);
+        assert_eq!(status, SessionStatus::Purged);
+        assert_eq!(state.unwrap().count(), 0);
     }
 
+    /// STATEMENT: `Session::renew` requests reissue without discarding loaded session data.
+    ///
+    /// HOW:
+    /// - Load a JSON-encoded value and renew the session without changing that value.
+    /// - Assert `get_changes` returns `Renewed` and the original key and encoded value.
     #[test]
     fn renew_session() {
         let req = test::TestRequest::default().to_srv_request();
-        let session = Session::get_session(&mut req.extensions_mut());
-        assert_eq!(session.0.borrow().status, SessionStatus::Unchanged);
-        session.renew();
-        assert_eq!(session.0.borrow().status, SessionStatus::Renewed);
+        Session::set_session([("key".to_owned(), "42".to_owned())].into_iter(), &req);
+        req.get_session().renew();
+
+        let mut res = req.into_response(HttpResponse::Ok().build());
+        let (status, state) = Session::get_changes(&mut res);
+        assert_eq!(status, SessionStatus::Renewed);
+        assert_eq!(
+            state.unwrap().collect::<Vec<_>>(),
+            [("key".to_owned(), "42".to_owned())]
+        );
+    }
+
+    /// STATEMENT: Request session handles share mutations, and `get_changes` drains their state.
+    ///
+    /// HOW:
+    /// - Assert an untouched response has no session changes, then obtain two handles from one `HttpRequest`.
+    /// - Set values through both handles, clear them, and store a replacement value.
+    /// - Assert both handles see the changes and the response drains the JSON-encoded replacement.
+    #[test]
+    fn shared_session_handles_clear_and_drain_state() {
+        let mut untouched =
+            test::TestRequest::default().to_srv_response(HttpResponse::Ok().build());
+        let (status, state) = Session::get_changes(&mut untouched);
+        assert_eq!(status, SessionStatus::Unchanged);
+        assert!(state.is_none());
+
+        let req = test::TestRequest::default().to_http_request();
+        let first = req.get_session();
+        let second = req.clone().get_session();
+        first.set("first", 1).unwrap();
+        second.set("second", 2).unwrap();
+        assert_eq!(second.get::<u32>("first").unwrap(), Some(1));
+        assert_eq!(first.get::<u32>("second").unwrap(), Some(2));
+        second.clear();
+        assert_eq!(first.get::<u32>("first").unwrap(), None);
+        assert_eq!(first.get::<u32>("second").unwrap(), None);
+        first.set("replacement", 3).unwrap();
+
+        let mut res = WebRequest::from_request(req).into_response(HttpResponse::Ok().build());
+        let (status, state) = Session::get_changes(&mut res);
+        assert_eq!(status, SessionStatus::Changed);
+        assert_eq!(
+            state.unwrap().collect::<Vec<_>>(),
+            [("replacement".to_owned(), "3".to_owned())]
+        );
+        assert_eq!(second.get::<u32>("replacement").unwrap(), None);
+    }
+
+    /// STATEMENT: Session JSON errors are returned without overwriting an existing value.
+    ///
+    /// HOW:
+    /// - Load invalid JSON and a valid integer, then deserialize the invalid value and the integer as a string.
+    /// - Attempt to replace the integer with a serializer that fails and assert all errors are returned.
+    /// - Assert the original integer still appears in the session and its response changes.
+    #[test]
+    fn session_json_errors_preserve_existing_values() {
+        struct Unserializable;
+
+        impl Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("cannot serialize session value"))
+            }
+        }
+
+        let req = test::TestRequest::default().to_srv_request();
+        Session::set_session(
+            [
+                ("bad".to_owned(), "not-json".to_owned()),
+                ("good".to_owned(), "42".to_owned()),
+            ]
+            .into_iter(),
+            &req,
+        );
+        let session = req.get_session();
+        assert!(session.get::<u32>("bad").is_err());
+        assert!(session.get::<String>("good").is_err());
+        assert!(
+            session
+                .set("good", Unserializable)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot serialize")
+        );
+        assert_eq!(session.get::<u32>("good").unwrap(), Some(42));
+
+        let mut res = req.into_response(HttpResponse::Ok().build());
+        let (_, state) = Session::get_changes(&mut res);
+        let state: HashMap<_, _> = state.unwrap().collect();
+        assert_eq!(state.get("good").map(String::as_str), Some("42"));
     }
 }
