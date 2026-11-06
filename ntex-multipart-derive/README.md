@@ -9,7 +9,7 @@
 
 ## Documentation & community resources
 
-* [User Guide](https://ntex.rs/docs)
+* [Framework guide](https://docs.ntex.rs/index.html)
 * [API Documentation](https://docs.rs/ntex-multipart-derive)
 * Cargo package: [ntex-multipart-derive](https://crates.io/crates/ntex-multipart-derive)
 * Minimum supported Rust version: 1.97 or later

@@ -9,7 +9,7 @@
 
 ## Documentation & community resources
 
-* [User Guide](https://ntex.rs/docs)
+* [Framework guide](https://docs.ntex.rs/index.html)
 * [API Documentation](https://docs.rs/ntex-multipart)
 * Cargo package: [ntex-multipart](https://crates.io/crates/ntex-multipart)
 * Minimum supported Rust version: 1.97 or later
