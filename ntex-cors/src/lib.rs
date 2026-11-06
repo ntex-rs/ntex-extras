@@ -474,7 +474,9 @@ impl Cors {
 
     /// Disable *preflight* request support.
     ///
-    /// When enabled cors middleware automatically handles *OPTIONS* request.
+    /// When enabled cors middleware automatically handles *OPTIONS* requests
+    /// that carry the `Access-Control-Request-Method` header. Other *OPTIONS*
+    /// requests are passed to the inner service.
     /// This is useful application level middleware.
     ///
     /// By default *preflight* support is enabled.
@@ -647,7 +649,12 @@ impl Inner {
     }
 
     fn preflight_check(&self, req: &RequestHead) -> Result<Either<HttpResponse, ()>, CorsError> {
-        if self.preflight && Method::OPTIONS == req.method {
+        if self.preflight
+            && Method::OPTIONS == req.method
+            && req
+                .headers
+                .contains_key(&header::ACCESS_CONTROL_REQUEST_METHOD)
+        {
             self.validate_origin(req)
                 .and_then(|_| self.validate_allowed_method(req))
                 .and_then(|_| self.validate_allowed_headers(req))?;
@@ -686,7 +693,7 @@ impl Inner {
             if self.supports_credentials {
                 res.header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
             }
-            let res = res
+            let mut res = res
                 .header(
                     header::ACCESS_CONTROL_ALLOW_METHODS,
                     &self
@@ -697,6 +704,7 @@ impl Inner {
                 )
                 .build()
                 .into_body();
+            self.add_vary(res.headers_mut());
 
             Ok(Either::Left(res))
         } else {
@@ -722,17 +730,40 @@ impl Inner {
                 HeaderValue::from_static("true"),
             );
         }
-        if self.vary_header {
-            let value = if let Some(hdr) = headers.get(&header::VARY) {
-                let mut val: Vec<u8> = Vec::with_capacity(hdr.as_bytes().len() + 8);
-                val.extend(hdr.as_bytes());
-                val.extend(b", Origin");
-                HeaderValue::try_from(&val[..]).unwrap()
-            } else {
-                HeaderValue::from_static("Origin")
-            };
-            headers.insert(header::VARY, value);
+        self.add_vary(headers);
+    }
+
+    /// Merge `Origin` into the `Vary` header unless it is already covered.
+    fn add_vary(&self, headers: &mut HeaderMap) {
+        if !self.vary_header {
+            return;
         }
+
+        let mut val: Vec<u8> = Vec::new();
+        for hdr in headers.get_all(&header::VARY) {
+            let covered = hdr.as_bytes().split(|b| *b == b',').any(|t| {
+                let t = t.trim_ascii();
+                t == b"*" || t.eq_ignore_ascii_case(b"origin")
+            });
+            if covered {
+                return;
+            }
+            if !val.is_empty() {
+                val.extend(b", ");
+            }
+            val.extend(hdr.as_bytes());
+        }
+
+        let value = if val.is_empty() {
+            HeaderValue::from_static("Origin")
+        } else {
+            val.extend(b", Origin");
+            match HeaderValue::try_from(&val[..]) {
+                Ok(value) => value,
+                Err(_) => return,
+            }
+        };
+        headers.insert(header::VARY, value);
     }
 }
 
@@ -790,6 +821,9 @@ where
 
                 if has_origin {
                     inner.handle_response(res.headers_mut(), allowed_origin);
+                } else {
+                    // response differs from the one for a cross-origin request
+                    inner.add_vary(res.headers_mut());
                 }
                 Ok(res)
             }
@@ -873,10 +907,11 @@ mod tests {
 
         let req = TestRequest::with_header("Origin", "https://www.example.com")
             .method(Method::OPTIONS)
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
             .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "X-Not-Allowed")
             .to_srv_request();
 
-        assert!(cors.inner.validate_allowed_method(req.head()).is_err());
+        assert!(cors.inner.validate_allowed_method(req.head()).is_ok());
         assert!(cors.inner.validate_allowed_headers(req.head()).is_err());
 
         let svc = cors.clone().pipeline(());
@@ -1211,5 +1246,132 @@ mod tests {
 
         let resp = cors.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// STATEMENT: An `OPTIONS` request without `Access-Control-Request-Method`
+    /// is not a preflight and reaches the inner service.
+    ///
+    /// HOW:
+    /// - Send `OPTIONS` with only an `Origin` header through a middleware with
+    ///   preflight enabled and an inner service that replies `204`.
+    /// - Check the status is `204` and the normal CORS response headers
+    ///   (`Access-Control-Allow-Origin`, `Vary`) are added.
+    #[ntex::test]
+    async fn options_without_request_method_is_not_preflight() {
+        let cors = Cors::new()
+            .build()
+            .create(
+                &(),
+                fn_service(async move |req: WebRequest<()>| {
+                    Ok::<_, Infallible>(req.into_response(HttpResponse::NoContent().build()))
+                }),
+            )
+            .pipeline(());
+
+        let req = TestRequest::with_header("Origin", "https://www.example.com")
+            .method(Method::OPTIONS)
+            .to_srv_request();
+        let resp = cors.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap()
+                .as_bytes(),
+            b"https://www.example.com"
+        );
+        assert_eq!(
+            resp.headers().get(header::VARY).unwrap().as_bytes(),
+            b"Origin"
+        );
+    }
+
+    /// STATEMENT: `Vary: Origin` is added to preflight responses and to responses
+    /// for requests without `Origin`, so shared caches keep them apart.
+    ///
+    /// HOW:
+    /// - Send a valid preflight and check its response has `Vary: Origin`.
+    /// - Send a `GET` without `Origin` and check the response has no
+    ///   `Access-Control-Allow-Origin` but does have `Vary: Origin`.
+    #[ntex::test]
+    async fn vary_is_set_for_preflight_and_requests_without_origin() {
+        let cors = Cors::new()
+            .build()
+            .create(&(), test::ok_service())
+            .pipeline(());
+
+        let req = TestRequest::with_header("Origin", "https://www.example.com")
+            .method(Method::OPTIONS)
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .to_srv_request();
+        let resp = cors.call(req).await.unwrap();
+        assert!(
+            resp.headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_METHODS)
+        );
+        assert_eq!(
+            resp.headers().get(header::VARY).unwrap().as_bytes(),
+            b"Origin"
+        );
+
+        let req = TestRequest::default().method(Method::GET).to_srv_request();
+        let resp = cors.call(req).await.unwrap();
+        assert!(
+            !resp
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
+        assert_eq!(
+            resp.headers().get(header::VARY).unwrap().as_bytes(),
+            b"Origin"
+        );
+    }
+
+    /// STATEMENT: `Origin` is merged into all existing `Vary` headers and is not
+    /// added when `Origin` or `*` is already listed.
+    ///
+    /// HOW:
+    /// - The inner service sets `Vary` headers based on the request path.
+    /// - `/two` sets two `Vary` headers; check they collapse into one value
+    ///   ending with `Origin`.
+    /// - `/origin` and `/star` already cover `Origin`; check `Vary` is unchanged.
+    #[ntex::test]
+    async fn vary_merges_existing_values() {
+        let cors = Cors::new()
+            .build()
+            .create(
+                &(),
+                fn_service(async move |req: WebRequest<()>| {
+                    let mut res = HttpResponse::Ok();
+                    match req.path() {
+                        "/two" => {
+                            res.header(header::VARY, "Accept");
+                            res.header(header::VARY, "Accept-Encoding");
+                        }
+                        "/origin" => {
+                            res.header(header::VARY, "Accept, origin");
+                        }
+                        _ => {
+                            res.header(header::VARY, "*");
+                        }
+                    }
+                    Ok::<_, Infallible>(req.into_response(res.build()))
+                }),
+            )
+            .pipeline(());
+
+        for (path, expected) in [
+            ("/two", &b"Accept, Accept-Encoding, Origin"[..]),
+            ("/origin", b"Accept, origin"),
+            ("/star", b"*"),
+        ] {
+            let req = TestRequest::with_uri(path)
+                .header("Origin", "https://www.example.com")
+                .to_srv_request();
+            let resp = cors.call(req).await.unwrap();
+            let vary: Vec<_> = resp.headers().get_all(header::VARY).collect();
+            assert_eq!(vary.len(), 1, "{path}");
+            assert_eq!(vary[0].as_bytes(), expected, "{path}");
+        }
     }
 }
