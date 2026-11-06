@@ -2,9 +2,9 @@
 //!
 //! [**CookieSession**](struct.CookieSession.html)
 //! uses cookies as session storage. `CookieSession` creates sessions
-//! which are limited to storing fewer than 4000 bytes of data, as the payload
-//! must fit into a single cookie. An internal server error is generated if a
-//! session contains more than 4000 bytes.
+//! which are limited in size, as the payload must fit into a single cookie.
+//! An internal server error is generated if the signed or encrypted and
+//! encoded session cookie is larger than 4096 bytes.
 //!
 //! A cookie may have a security policy of *signed* or *private*. Each has
 //! a respective `CookieSession` constructor.
@@ -27,13 +27,16 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{Session, SessionStatus};
 
-/// Errors that can occur during handling cookie session
+/// Browsers drop cookies whose `name=value` pair is larger than this.
+const MAX_COOKIE_SIZE: usize = 4096;
+
+/// Errors that can occur during handling cookie session.
 #[derive(Debug, From, Display, thiserror::Error)]
 pub enum CookieSessionError {
-    /// Size of the serialized session is greater than 4000 bytes.
-    #[display("Size of the serialized session is greater than 4000 bytes.")]
+    /// Size of the encoded session cookie is greater than 4096 bytes.
+    #[display("Size of the encoded session cookie is greater than 4096 bytes.")]
     Overflow,
-    /// Fail to serialize session.
+    /// Failed to serialize session state.
     #[display("Fail to serialize session")]
     Serialize(JsonError),
 }
@@ -81,29 +84,14 @@ impl CookieSessionInner {
     ) -> Result<(), CookieSessionError> {
         let state: HashMap<String, String> = state.collect();
         let value = serde_json::to_string(&state).map_err(CookieSessionError::Serialize)?;
-        if value.len() > 4064 {
-            return Err(CookieSessionError::Overflow);
-        }
 
-        let mut cookie = Cookie::new(self.name.clone(), value);
-        cookie.set_path(self.path.clone());
-        cookie.set_secure(self.secure);
-        cookie.set_http_only(self.http_only);
-
-        if let Some(ref domain) = self.domain {
-            cookie.set_domain(domain.clone());
-        }
-
+        let mut cookie = self.cookie(value);
         if let Some(expires_in) = self.expires_in {
             cookie.set_expires(OffsetDateTime::now_utc() + expires_in);
         }
 
         if let Some(max_age) = self.max_age {
             cookie.set_max_age(max_age);
-        }
-
-        if let Some(same_site) = self.same_site {
-            cookie.set_same_site(same_site);
         }
 
         let mut jar = CookieJar::new();
@@ -114,8 +102,13 @@ impl CookieSessionInner {
         }
 
         for cookie in jar.delta() {
-            let val = HeaderValue::from_str(&cookie.encoded().to_string()).unwrap();
-            res.headers_mut().append(SET_COOKIE, val);
+            let val = cookie.encoded().to_string();
+            // percent-encoded name and value never contain `;`
+            if val.split(';').next().map_or(0, str::len) > MAX_COOKIE_SIZE {
+                return Err(CookieSessionError::Overflow);
+            }
+            res.headers_mut()
+                .append(SET_COOKIE, HeaderValue::from_str(&val).unwrap());
         }
 
         Ok(())
@@ -123,20 +116,31 @@ impl CookieSessionInner {
 
     /// invalidates session cookie
     fn remove_cookie(&self, res: &mut WebResponse) -> Result<(), Infallible> {
-        let mut cookie = Cookie::from(self.name.clone());
-        cookie.set_value("");
+        // removal must carry the same attributes, browsers reject `__Secure-`
+        // and `__Host-` cookies without `Secure`
+        let mut cookie = self.cookie(String::new());
         cookie.set_max_age(Duration::ZERO);
         cookie.set_expires(OffsetDateTime::now_utc() - Duration::days(365));
-        cookie.set_path(&self.path);
 
-        if let Some(ref domain) = self.domain {
-            cookie.set_domain(domain);
-        }
-
-        let val = HeaderValue::from_str(&cookie.to_string()).unwrap();
+        let val = HeaderValue::from_str(&cookie.encoded().to_string()).unwrap();
         res.headers_mut().append(SET_COOKIE, val);
 
         Ok(())
+    }
+
+    fn cookie(&self, value: String) -> Cookie<'static> {
+        let mut cookie = Cookie::new(self.name.clone(), value);
+        cookie.set_path(self.path.clone());
+        cookie.set_secure(self.secure);
+        cookie.set_http_only(self.http_only);
+
+        if let Some(ref domain) = self.domain {
+            cookie.set_domain(domain.clone());
+        }
+        if let Some(same_site) = self.same_site {
+            cookie.set_same_site(same_site);
+        }
+        cookie
     }
 
     fn load<St>(&self, req: &WebRequest<St>) -> (bool, HashMap<String, String>) {
@@ -164,13 +168,12 @@ impl CookieSessionInner {
 
 /// Use cookies for session storage.
 ///
-/// `CookieSession` creates sessions which are limited to storing
-/// fewer than 4000 bytes of data (as the payload must fit into a single
-/// cookie). An Internal Server Error is generated if the session contains more
-/// than 4000 bytes.
+/// `CookieSession` creates sessions which are limited in size (as the payload
+/// must fit into a single cookie). An Internal Server Error is generated if
+/// the signed or encrypted and encoded session cookie is larger than 4096 bytes.
 ///
 /// A cookie may have a security policy of *signed* or *private*. Each has a
-/// respective `CookieSessionBackend` constructor.
+/// respective `CookieSession` constructor.
 ///
 /// A *signed* cookie is stored on the client as plaintext alongside
 /// a signature such that the cookie may be viewed but not modified by the
@@ -184,15 +187,22 @@ impl CookieSessionInner {
 /// all session data is lost. The constructors will panic if the key is less
 /// than 32 bytes in length.
 ///
+/// A new session cookie is sent on the first request of a client and whenever
+/// the session changes, is renewed, or (with [`expires_in`](Self::expires_in))
+/// on every response. [`Session::purge`](crate::Session::purge) removes the
+/// cookie.
+///
 /// The backend relies on `cookie` crate to create and read cookies.
-/// By default all cookies are percent encoded, but certain symbols may
-/// cause troubles when reading cookie, if they are not properly percent encoded.
+/// Cookie values are percent encoded.
+///
+/// Defaults: name `ntex-session`, path `/`, `Secure` and `HttpOnly` set, no
+/// domain, `SameSite`, `Max-Age` or `Expires`.
 ///
 /// # Example
 ///
 /// ```rust
 /// use ntex_session::CookieSession;
-/// use ntex::web::{self, App, HttpResponse, HttpServer};
+/// use ntex::web::{self, App, HttpResponse};
 ///
 /// let app = App::default().middleware(
 ///     CookieSession::signed(&[0; 32])
@@ -205,7 +215,9 @@ impl CookieSessionInner {
 pub struct CookieSession(Rc<CookieSessionInner>);
 
 impl CookieSession {
-    /// Construct new *signed* `CookieSessionBackend` instance.
+    /// Construct new *signed* `CookieSession` instance.
+    ///
+    /// The client can read but not modify the session state.
     ///
     /// Panics if key length is less than 32 bytes.
     pub fn signed(key: &[u8]) -> Self {
@@ -215,7 +227,9 @@ impl CookieSession {
         )))
     }
 
-    /// Construct new *private* `CookieSessionBackend` instance.
+    /// Construct new *private* `CookieSession` instance.
+    ///
+    /// The session state is encrypted, the client can neither read nor modify it.
     ///
     /// Panics if key length is less than 32 bytes.
     pub fn private(key: &[u8]) -> Self {
@@ -226,18 +240,26 @@ impl CookieSession {
     }
 
     /// Sets the `path` field in the session cookie being built.
+    ///
+    /// Default is `/`.
     pub fn path<S: Into<String>>(mut self, value: S) -> Self {
         Rc::get_mut(&mut self.0).unwrap().path = value.into();
         self
     }
 
     /// Sets the `name` field in the session cookie being built.
+    ///
+    /// Default is `ntex-session`. Names with the `__Secure-` prefix require
+    /// [`secure`](Self::secure); `__Host-` also requires path `/` and no
+    /// [`domain`](Self::domain).
     pub fn name<S: Into<String>>(mut self, value: S) -> Self {
         Rc::get_mut(&mut self.0).unwrap().name = value.into();
         self
     }
 
     /// Sets the `domain` field in the session cookie being built.
+    ///
+    /// Not set by default, the cookie is sent only to the origin host.
     pub fn domain<S: Into<String>>(mut self, value: S) -> Self {
         Rc::get_mut(&mut self.0).unwrap().domain = Some(value.into());
         self
@@ -246,41 +268,56 @@ impl CookieSession {
     /// Sets the `secure` field in the session cookie being built.
     ///
     /// If the `secure` field is set, a cookie will only be transmitted when the
-    /// connection is secure - i.e. `https`
+    /// connection is secure - i.e. `https`. Default is `true`, set it to
+    /// `false` to use sessions over plain `http`.
     pub fn secure(mut self, value: bool) -> Self {
         Rc::get_mut(&mut self.0).unwrap().secure = value;
         self
     }
 
     /// Sets the `http_only` field in the session cookie being built.
+    ///
+    /// If set, the cookie is not available to client side scripts. Default
+    /// is `true`.
     pub fn http_only(mut self, value: bool) -> Self {
         Rc::get_mut(&mut self.0).unwrap().http_only = value;
         self
     }
 
     /// Sets the `same_site` field in the session cookie being built.
+    ///
+    /// Not set by default.
     pub fn same_site(mut self, value: SameSite) -> Self {
         Rc::get_mut(&mut self.0).unwrap().same_site = Some(value);
         self
     }
 
-    /// Sets the `max-age` field in the session cookie being built.
+    /// Sets the `max-age` field in the session cookie being built, in seconds.
+    ///
+    /// Not set by default, the cookie expires when the browser session ends.
     pub fn max_age(self, seconds: i64) -> Self {
         self.max_age_time(Duration::seconds(seconds))
     }
 
     /// Sets the `max-age` field in the session cookie being built.
+    ///
+    /// Same as [`max_age`](Self::max_age), but takes a `time::Duration`.
     pub fn max_age_time(mut self, value: time::Duration) -> Self {
         Rc::get_mut(&mut self.0).unwrap().max_age = Some(value);
         self
     }
 
-    /// Sets the `expires` field in the session cookie being built.
+    /// Sets the `expires` field to the given number of seconds from now.
+    ///
+    /// The cookie is re-sent on every response, so the expiration is extended
+    /// on each request. Not set by default.
     pub fn expires_in(self, seconds: i64) -> Self {
         self.expires_in_time(Duration::seconds(seconds))
     }
 
-    /// Sets the `expires` field in the session cookie being built.
+    /// Sets the `expires` field to the given duration from now.
+    ///
+    /// Same as [`expires_in`](Self::expires_in), but takes a `time::Duration`.
     pub fn expires_in_time(mut self, value: Duration) -> Self {
         Rc::get_mut(&mut self.0).unwrap().expires_in = Some(value);
         self
@@ -298,7 +335,7 @@ impl<S, St> Middleware<S, St> for CookieSession {
     }
 }
 
-/// Cookie session middleware
+/// Cookie session middleware service, created by [`CookieSession`].
 pub struct CookieSessionMiddleware<S> {
     service: S,
     inner: Rc<CookieSessionInner>,
@@ -331,7 +368,7 @@ where
     /// On first request, a new session cookie is returned in response, regardless
     /// of whether any session state is set.  With subsequent requests, if the
     /// session state changes, then set-cookie is returned in response.  As
-    /// a user logs out, call session.purge() to set SessionStatus accordingly
+    /// a user logs out, call `session.purge()` to set `SessionStatus` accordingly
     /// and this will trigger removal of the session cookie in the response.
     async fn call(
         &self,
@@ -517,5 +554,83 @@ mod tests {
         assert!(
             expires_2.datetime().unwrap() - expires_1.datetime().unwrap() >= Duration::seconds(1)
         );
+    }
+
+    /// STATEMENT: The size limit applies to the encoded cookie, so a session whose
+    /// JSON is small but grows past 4096 bytes after signing and encoding is
+    /// rejected instead of being silently dropped by the browser.
+    ///
+    /// HOW:
+    /// - Store 1000 `"` characters: about 2 KB of JSON, but every `"` becomes
+    ///   `%5C%22` (6 bytes) in the cookie.
+    /// - Check the response is `500` and carries no `Set-Cookie`.
+    /// - Store 1000 plain characters and check the cookie is still set.
+    #[ntex::test]
+    async fn size_limit_applies_to_encoded_cookie() {
+        let app = test::init_service(
+            App::new()
+                .middleware(CookieSession::signed(&[0; 32]).secure(false))
+                .service(web::resource("/quotes").to(|ses: Session| async move {
+                    let _ = ses.set("v", "\"".repeat(1000));
+                    "test"
+                }))
+                .service(web::resource("/plain").to(|ses: Session| async move {
+                    let _ = ses.set("v", "a".repeat(1000));
+                    "test"
+                })),
+        )
+        .await;
+
+        let request = test::TestRequest::with_uri("/quotes").to_request();
+        let response = app.call(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            ntex::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(!response.headers().contains_key(SET_COOKIE));
+
+        let request = test::TestRequest::with_uri("/plain").to_request();
+        let response = app.call(request).await.unwrap();
+        assert!(response.status().is_success());
+        assert!(response.cookies().any(|c| c.name() == "ntex-session"));
+    }
+
+    /// STATEMENT: The purge cookie carries the same `Secure`, `HttpOnly` and
+    /// `SameSite` attributes as the session cookie, so browsers accept it for
+    /// `__Host-` prefixed names.
+    ///
+    /// HOW:
+    /// - Configure a `__Host-session` cookie with `SameSite::Strict` and call
+    ///   `purge()` in the handler.
+    /// - Parse the `Set-Cookie` header and check the name, empty value, zero
+    ///   `Max-Age`, `Secure`, `HttpOnly`, `SameSite=Strict` and path `/`.
+    #[ntex::test]
+    async fn purge_cookie_keeps_security_attributes() {
+        let app = test::init_service(
+            App::new()
+                .middleware(
+                    CookieSession::signed(&[0; 32])
+                        .name("__Host-session")
+                        .same_site(SameSite::Strict),
+                )
+                .service(web::resource("/").to(|ses: Session| async move {
+                    ses.purge();
+                    "test"
+                })),
+        )
+        .await;
+
+        let request = test::TestRequest::get().to_request();
+        let response = app.call(request).await.unwrap();
+        let cookie = response
+            .cookies()
+            .find(|c| c.name() == "__Host-session")
+            .unwrap();
+        assert_eq!(cookie.value(), "");
+        assert_eq!(cookie.max_age(), Some(Duration::ZERO));
+        assert_eq!(cookie.secure(), Some(true));
+        assert_eq!(cookie.http_only(), Some(true));
+        assert_eq!(cookie.same_site(), Some(SameSite::Strict));
+        assert_eq!(cookie.path(), Some("/"));
     }
 }
