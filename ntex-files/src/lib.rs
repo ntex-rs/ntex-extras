@@ -2289,4 +2289,293 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
         assert!(reader.next().await.is_none());
     }
+
+    /// STATEMENT: Listings hide dot entries, escape ampersands, and mark visible directories with a slash.
+    ///
+    /// HOW:
+    /// - Serve a directory containing a visible file, a named subdirectory, and hidden file and directory entries.
+    /// - Check visible links and escaped directory text, then require direct hidden-file requests to fail.
+    #[ntex::test]
+    async fn listings_hide_dot_entries_and_mark_subdirectories() {
+        let root = tempfile::tempdir_in(".").unwrap();
+        fs::write(root.path().join("shown.txt"), b"visible").unwrap();
+        fs::write(root.path().join(".secret"), b"hidden").unwrap();
+        fs::create_dir(root.path().join("sub&dir")).unwrap();
+        fs::create_dir(root.path().join(".hidden-dir")).unwrap();
+        let srv = test::init_service(
+            App::new().service(Files::new("/static", root.path()).show_files_listing()),
+        )
+        .await;
+        let resp = test::call_service(&srv, TestRequest::with_uri("/static/").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+        assert!(body.contains("href=\"/static/shown.txt\""), "{body}");
+        assert!(
+            body.contains("href=\"/static/sub&amp;dir\">sub&amp;dir/</a>"),
+            "{body}"
+        );
+        assert!(!body.contains(".secret"), "{body}");
+        assert!(!body.contains(".hidden-dir"), "{body}");
+        for uri in ["/static/.secret", "/static/.hidden-dir/"] {
+            let resp = test::call_service(&srv, TestRequest::with_uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    /// STATEMENT: Entries whose metadata disappeared are excluded from directory listings.
+    ///
+    /// HOW:
+    /// - Obtain a directory entry for a file, then remove the file before visibility checking.
+    /// - Check the formerly visible entry becomes invisible instead of causing a panic.
+    #[test]
+    fn disappeared_directory_entries_are_not_visible() {
+        let root = tempfile::tempdir_in(".").unwrap();
+        let path = root.path().join("gone.txt");
+        fs::write(&path, b"gone").unwrap();
+        let entry = root.path().read_dir().unwrap().next().unwrap();
+        let directory = Directory::new(root.path().into(), root.path().into());
+        assert!(directory.is_visible(&entry));
+        fs::remove_file(path).unwrap();
+        assert!(!directory.is_visible(&entry));
+    }
+
+    /// STATEMENT: A custom listing renderer controls directory responses but not regular files.
+    ///
+    /// HOW:
+    /// - Configure successful and failing renderers and request the root directory and a regular file.
+    /// - Check the custom body or `404` error body for directories and unchanged bytes for the file.
+    #[ntex::test]
+    async fn custom_listing_renderer_handles_success_and_errors() {
+        for fail in [false, true] {
+            let files = Files::new("/static", "tests")
+                .show_files_listing()
+                .files_listing_renderer(move |_, req| {
+                    if fail {
+                        Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "listing denied",
+                        ))
+                    } else {
+                        Ok(WebResponse::new(
+                            HttpResponse::Ok().body("custom listing"),
+                            req.clone(),
+                        ))
+                    }
+                });
+            let srv = test::init_service(App::new().service(files)).await;
+            let resp =
+                test::call_service(&srv, TestRequest::with_uri("/static/").to_request()).await;
+            assert_eq!(
+                resp.status(),
+                if fail {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::OK
+                }
+            );
+            let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+            if fail {
+                assert!(body.contains("listing denied"), "{body}");
+            } else {
+                assert_eq!(body, "custom listing");
+            }
+            let resp = test::call_service(
+                &srv,
+                TestRequest::with_uri("/static/test.binary").to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(
+                test::read_body(resp).await.as_ref(),
+                fs::read("tests/test.binary").unwrap()
+            );
+        }
+    }
+
+    /// STATEMENT: Cloned `Files` configurations preserve guards, index serving, and disabled response headers in scopes.
+    ///
+    /// HOW:
+    /// - Register a configured `Files` instance and its clone at root and nested scope mounts.
+    /// - Check POST serves index bytes without disabled headers and GET is rejected at both mounts.
+    #[ntex::test]
+    async fn cloned_files_preserve_configuration_in_scopes() {
+        let files = Files::new("/assets", "tests")
+            .index_file("test.binary")
+            .use_guards(guard::Post())
+            .use_etag(false)
+            .use_last_modified(false)
+            .disable_content_disposition();
+        let srv = test::init_service(
+            App::new()
+                .service(files.clone())
+                .service(web::scope("/nested").service(files)),
+        )
+        .await;
+        for uri in ["/assets/", "/nested/assets/"] {
+            let req = TestRequest::with_uri(uri).method(Method::POST).to_request();
+            let resp = test::call_service(&srv, req).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            for name in [
+                http::header::ETAG,
+                http::header::LAST_MODIFIED,
+                http::header::CONTENT_DISPOSITION,
+            ] {
+                assert!(!resp.headers().contains_key(name.clone()), "{uri}: {name}");
+            }
+            assert_eq!(
+                test::read_body(resp).await.as_ref(),
+                fs::read("tests/test.binary").unwrap()
+            );
+            let resp = test::call_service(&srv, TestRequest::with_uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "{uri}");
+        }
+    }
+
+    /// STATEMENT: Directory visibility rejects unreadable entries and Unix sockets while keeping ordinary files visible.
+    ///
+    /// HOW:
+    /// - Create a visible file and a bound Unix-domain socket, and provide an entry error.
+    /// - Check visibility for each and require the served listing to contain only the ordinary file.
+    #[cfg(unix)]
+    #[ntex::test]
+    async fn directory_listings_exclude_entry_errors_and_sockets() {
+        let root = tempfile::tempdir_in(".").unwrap();
+        fs::write(root.path().join("visible.txt"), b"visible").unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(root.path().join("socket")).unwrap();
+        let directory = Directory::new(root.path().into(), root.path().into());
+        assert!(!directory.is_visible(&Err(io::Error::from(io::ErrorKind::PermissionDenied))));
+        for entry in root.path().read_dir().unwrap() {
+            let entry = entry.unwrap();
+            let visible = entry.file_name() == "visible.txt";
+            assert_eq!(directory.is_visible(&Ok(entry)), visible);
+        }
+        let srv = test::init_service(
+            App::new().service(Files::new("/", root.path()).show_files_listing()),
+        )
+        .await;
+        let resp = test::call_service(&srv, TestRequest::with_uri("/").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+        assert!(body.contains("href=\"/visible.txt\""));
+        assert!(!body.contains("socket"));
+    }
+
+    /// STATEMENT: Listing links escape significant HTML characters in the mounted request path.
+    ///
+    /// HOW:
+    /// - Mount a directory under a path containing quotes, apostrophes, angle brackets, and an ampersand.
+    /// - Request its listing and check the link prefix is attribute-escaped and the file link remains usable.
+    #[ntex::test]
+    async fn directory_listing_escapes_mount_path_attributes() {
+        let root = tempfile::tempdir_in(".").unwrap();
+        fs::write(root.path().join("shown.txt"), b"shown").unwrap();
+        let mount = "/\"'<&>";
+        let srv = test::init_service(
+            App::new().service(Files::new(mount, root.path()).show_files_listing()),
+        )
+        .await;
+        let resp = test::call_service(
+            &srv,
+            TestRequest::with_uri(&format!("{mount}/")).to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+        assert!(
+            body.contains("href=\"/&quot;&#x27;&lt;&amp;&gt;/shown.txt\">shown.txt</a>"),
+            "{body}"
+        );
+        let resp = test::call_service(
+            &srv,
+            TestRequest::with_uri(&format!("{mount}/shown.txt")).to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(test::read_body(resp).await.as_ref(), b"shown");
+    }
+
+    /// STATEMENT: Failing default-handler initialization prevents creation of the `Files` service.
+    ///
+    /// HOW:
+    /// - Configure a fallback factory that fails to initialize with an I/O error.
+    /// - Attempt to build the pipeline and require failure rather than serving without the configured fallback.
+    #[ntex::test]
+    async fn default_handler_initialization_errors_propagate() {
+        struct FailingFactory;
+        impl ServiceFactory<(), WebRequest<()>> for FailingFactory {
+            type Res = WebResponse;
+            type Error = Infallible;
+            type Service = boxed::BoxService<(), WebRequest<()>, WebResponse, Infallible>;
+            type InitError = io::Error;
+
+            async fn create(&self, _: &()) -> Result<Self::Service, Self::InitError> {
+                Err(io::Error::other("fallback initialization failed"))
+            }
+        }
+        let result = Files::new("/", "tests")
+            .default_handler(FailingFactory)
+            .pipeline(())
+            .await;
+        assert!(result.is_err());
+    }
+
+    /// STATEMENT: Serving a `Range` with additional hyphens rejects the malformed byte-range specification.
+    ///
+    /// HOW:
+    /// - Request a file with extra components after a closed or open byte range.
+    /// - Require `416 Range Not Satisfiable` with the complete representation size in `Content-Range`.
+    #[ntex::test]
+    async fn malformed_ranges_with_extra_components_are_rejected() {
+        for range in [
+            "bytes=0-1-2",
+            "bytes=1--2",
+            "bytes=-1-2",
+            "bytes=0-1-garbage",
+        ] {
+            let req = TestRequest::default()
+                .header(http::header::RANGE, range)
+                .to_http_request();
+            let resp = NamedFile::open("tests/test.binary")
+                .unwrap()
+                .into_response(&req);
+            assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE, "{range}");
+            assert_eq!(
+                resp.headers().get(http::header::CONTENT_RANGE).unwrap(),
+                "bytes */100"
+            );
+        }
+    }
+
+    /// STATEMENT: Updating a parsed date header changes the file precondition from failed to satisfied.
+    ///
+    /// HOW:
+    /// - Parse an `IfUnmodifiedSince` date before the file modification time and send it to the file.
+    /// - Advance the wrapped date past the modification time and check `412` becomes `200` with the full body.
+    #[ntex::test]
+    async fn editing_parsed_date_headers_changes_conditional_responses() {
+        use header::Header;
+
+        let mut condition =
+            header::IfUnmodifiedSince::parse_header(&header::Raw::from(http_date(PAST))).unwrap();
+        let req = TestRequest::default()
+            .header(IF_UNMODIFIED_SINCE, condition.to_string())
+            .to_http_request();
+        let resp = NamedFile::open("tests/test.binary")
+            .unwrap()
+            .into_response(&req);
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        assert!(test::read_body(resp).await.is_empty());
+        *condition = (SystemTime::from(*condition) + Duration::from_secs(FUTURE - PAST)).into();
+        let req = TestRequest::default()
+            .header(IF_UNMODIFIED_SINCE, condition.to_string())
+            .to_http_request();
+        let resp = NamedFile::open("tests/test.binary")
+            .unwrap()
+            .into_response(&req);
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            test::read_body(resp).await.as_ref(),
+            fs::read("tests/test.binary").unwrap()
+        );
+    }
 }

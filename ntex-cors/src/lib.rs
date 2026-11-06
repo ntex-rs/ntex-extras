@@ -993,20 +993,72 @@ mod tests {
     //    cors.start(&req).unwrap();
     // }
 
+    /// STATEMENT: Actual requests reject malformed or disallowed `Origin` values,
+    /// while same-origin requests without `Origin` still reach the application.
+    ///
+    /// HOW:
+    /// - Configure one allowed origin and an inner service that counts calls and replies `204`.
+    /// - Send unknown, differently cased, and non-ASCII origins; assert `400`, no
+    ///   `Access-Control-Allow-Origin`, and no calls to the inner service.
+    /// - Send requests without `Origin` and with the allowed origin; assert `204`,
+    ///   the appropriate absence or presence of the allow-origin header, and two inner calls.
     #[ntex::test]
-    #[should_panic(expected = "OriginNotAllowed")]
     async fn test_validate_not_allowed_origin() {
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let count = calls.clone();
         let cors = Cors::new()
             .allowed_origin("https://www.example.com")
             .build()
-            .create(&(), test::ok_service::<(), ()>());
+            .create(
+                &(),
+                fn_service(async move |req: WebRequest<()>| {
+                    count.set(count.get() + 1);
+                    Ok::<_, Infallible>(req.into_response(HttpResponse::NoContent().build()))
+                }),
+            )
+            .pipeline(());
 
-        let req = TestRequest::with_header("Origin", "https://www.unknown.com")
-            .method(Method::GET)
-            .to_srv_request();
-        cors.inner.validate_origin(req.head()).unwrap();
-        cors.inner.validate_allowed_method(req.head()).unwrap();
-        cors.inner.validate_allowed_headers(req.head()).unwrap();
+        for origin in [
+            &b"https://www.unknown.com"[..],
+            b"https://WWW.example.com",
+            b"\xff",
+        ] {
+            let req = TestRequest::default()
+                .header(header::ORIGIN, HeaderValue::try_from(origin).unwrap())
+                .to_srv_request();
+            let resp = cors.call(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert!(
+                !resp
+                    .headers()
+                    .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            );
+        }
+        assert_eq!(calls.get(), 0);
+
+        let resp = cors
+            .call(TestRequest::default().to_srv_request())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(
+            !resp
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
+        assert_eq!(resp.headers().get(header::VARY).unwrap(), "Origin");
+
+        let req =
+            TestRequest::with_header(header::ORIGIN, "https://www.example.com").to_srv_request();
+        let resp = cors.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "https://www.example.com"
+        );
+        assert_eq!(calls.get(), 2);
     }
 
     #[ntex::test]
@@ -1232,9 +1284,17 @@ mod tests {
         );
     }
 
+    /// STATEMENT: Setting `allowed_origin("*")` replaces an existing allowlist
+    /// and echoes an origin that was not previously permitted.
+    ///
+    /// HOW:
+    /// - Restrict the builder to one origin, then set `allowed_origin("*")`.
+    /// - Send a request from another origin and assert `200` and its echoed
+    ///   `Access-Control-Allow-Origin` value.
     #[ntex::test]
     async fn test_set_allowed_origin_to_all() {
         let cors = Cors::new()
+            .allowed_origin("https://previous.example.com")
             .allowed_origin("*")
             .build()
             .create(&(), test::ok_service())
@@ -1246,6 +1306,12 @@ mod tests {
 
         let resp = cors.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "https://www.example.com"
+        );
     }
 
     /// STATEMENT: An `OPTIONS` request without `Access-Control-Request-Method`
@@ -1373,5 +1439,499 @@ mod tests {
             assert_eq!(vary.len(), 1, "{path}");
             assert_eq!(vary[0].as_bytes(), expected, "{path}");
         }
+    }
+
+    /// STATEMENT: Invalid origins, methods, and header names make `Cors::build`
+    /// panic, and subsequent valid builder calls cannot erase that configuration error.
+    ///
+    /// HOW:
+    /// - Supply an invalid origin, method, allowed header, allowed-header list, or exposed-header list.
+    /// - Catch the build panic for each configuration, then rebuild after calling
+    ///   the other setters with valid values and assert the same error is retained.
+    #[test]
+    fn builder_rejects_invalid_configuration_and_retains_errors() {
+        let configurations: [fn() -> Cors; 5] = [
+            || Cors::new().allowed_origin("http://["),
+            || Cors::new().allowed_methods(["GET", "BAD METHOD", "POST"]),
+            || Cors::new().allowed_header("bad header"),
+            || Cors::new().allowed_headers(["authorization", "bad header", "accept"]),
+            || Cors::new().expose_headers(["x-response", "bad header", "accept"]),
+        ];
+        for configuration in configurations {
+            let panic_message = |builder: Cors| {
+                let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    builder.build::<()>()
+                }))
+                .err()
+                .expect("invalid CORS configuration must panic");
+                *error
+                    .downcast::<String>()
+                    .expect("configuration error message")
+            };
+            let original = panic_message(configuration());
+            assert!(!original.is_empty());
+            let retained = panic_message(
+                configuration()
+                    .allowed_origin("https://example.com")
+                    .allowed_methods([Method::GET])
+                    .allowed_header(header::AUTHORIZATION)
+                    .allowed_headers([header::ACCEPT])
+                    .expose_headers(["x-response"])
+                    .max_age(60)
+                    .send_wildcard()
+                    .supports_credentials()
+                    .disable_vary_header()
+                    .disable_preflight(),
+            );
+            assert_eq!(retained, original);
+        }
+    }
+
+    /// STATEMENT: Credentialed CORS echoes the client origin and advertises the
+    /// configured permissions on preflights, but only exposes headers on actual cross-origin responses.
+    ///
+    /// HOW:
+    /// - Configure credentials, two methods, two allowed headers, an exposed header,
+    ///   and a cache age for both unrestricted and explicitly allowed origins.
+    /// - Send preflights with mixed-case repeated header names and without requested headers;
+    ///   assert echoed origins, credentials, permissions, cache age, and no inner calls.
+    /// - Send actual requests with and without `Origin`; assert the application's `204`,
+    ///   CORS headers only for the cross-origin request, merged `Vary`, and two inner calls.
+    #[ntex::test]
+    async fn credentialed_preflight_and_actual_responses() {
+        for builder in [
+            Cors::new().supports_credentials(),
+            Cors::new()
+                .allowed_origin("https://example.com")
+                .send_wildcard()
+                .supports_credentials(),
+        ] {
+            let calls = Rc::new(std::cell::Cell::new(0));
+            let count = calls.clone();
+            let cors = builder
+                .allowed_methods([Method::GET, Method::POST])
+                .allowed_header(header::AUTHORIZATION)
+                .allowed_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+                .expose_headers(["x-response"])
+                .max_age(600)
+                .build()
+                .create(
+                    &(),
+                    fn_service(async move |req: WebRequest<()>| {
+                        count.set(count.get() + 1);
+                        Ok::<_, Infallible>(
+                            req.into_response(
+                                HttpResponse::NoContent()
+                                    .header(header::VARY, "Accept-Encoding")
+                                    .build(),
+                            ),
+                        )
+                    }),
+                )
+                .pipeline(());
+
+            for requested_headers in [Some(" Authorization , CONTENT-TYPE, authorization "), None] {
+                let mut req = TestRequest::with_header(header::ORIGIN, "https://example.com")
+                    .method(Method::OPTIONS)
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST");
+                if let Some(headers) = requested_headers {
+                    req = req.header(header::ACCESS_CONTROL_REQUEST_HEADERS, headers);
+                }
+                let resp = cors.call(req.to_srv_request()).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                assert_eq!(
+                    resp.headers()
+                        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                        .unwrap(),
+                    "https://example.com"
+                );
+                assert_eq!(
+                    resp.headers()
+                        .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                        .unwrap(),
+                    "true"
+                );
+                assert_eq!(
+                    resp.headers().get(header::ACCESS_CONTROL_MAX_AGE).unwrap(),
+                    "600"
+                );
+                let headers: HashSet<_> = resp
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .split(',')
+                    .map(str::trim)
+                    .collect();
+                assert_eq!(headers, HashSet::from(["authorization", "content-type"]));
+                let methods: HashSet<_> = resp
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .split(',')
+                    .map(str::trim)
+                    .collect();
+                assert_eq!(methods, HashSet::from(["GET", "POST"]));
+                assert_eq!(resp.headers().get(header::VARY).unwrap(), "Origin");
+                assert!(
+                    !resp
+                        .headers()
+                        .contains_key(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+                );
+            }
+            assert_eq!(calls.get(), 0);
+
+            for origin in [Some("https://example.com"), None] {
+                let mut req = TestRequest::default();
+                if let Some(origin) = origin {
+                    req = req.header(header::ORIGIN, origin);
+                }
+                let resp = cors.call(req.to_srv_request()).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+                if origin.is_some() {
+                    assert_eq!(
+                        resp.headers()
+                            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                            .unwrap(),
+                        "https://example.com"
+                    );
+                    assert_eq!(
+                        resp.headers()
+                            .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                            .unwrap(),
+                        "true"
+                    );
+                    assert_eq!(
+                        resp.headers()
+                            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+                            .unwrap(),
+                        "x-response"
+                    );
+                } else {
+                    for name in [
+                        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                        header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+                        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                    ] {
+                        assert!(!resp.headers().contains_key(name));
+                    }
+                }
+                assert!(
+                    !resp
+                        .headers()
+                        .contains_key(header::ACCESS_CONTROL_ALLOW_METHODS)
+                );
+                assert!(!resp.headers().contains_key(header::ACCESS_CONTROL_MAX_AGE));
+                assert_eq!(
+                    resp.headers().get(header::VARY).unwrap(),
+                    "Accept-Encoding, Origin"
+                );
+            }
+            assert_eq!(calls.get(), 2);
+        }
+    }
+
+    /// STATEMENT: Unrestricted preflights echo requested headers verbatim and
+    /// choose a wildcard or the supplied origin according to `send_wildcard`.
+    ///
+    /// HOW:
+    /// - Build unrestricted middleware with and without `send_wildcard` and an inner service replying `204`.
+    /// - Send preflights with and without `Origin` and requested headers; assert `200`,
+    ///   the exact echoed or absent headers, the appropriate allow-origin value, and `Vary: Origin`.
+    /// - Send an actual request with `Origin` and assert the inner service's `204`,
+    ///   confirming that only preflight requests are intercepted.
+    #[ntex::test]
+    async fn unrestricted_preflight_echoes_requested_headers() {
+        for wildcard in [false, true] {
+            let builder = if wildcard {
+                Cors::new().send_wildcard()
+            } else {
+                Cors::new()
+            };
+            let cors = builder
+                .build()
+                .create(
+                    &(),
+                    fn_service(async move |req: WebRequest<()>| {
+                        Ok::<_, Infallible>(req.into_response(HttpResponse::NoContent().build()))
+                    }),
+                )
+                .pipeline(());
+            for with_headers in [false, true] {
+                let mut req = TestRequest::default()
+                    .method(Method::OPTIONS)
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET");
+                if with_headers {
+                    req = req.header(header::ORIGIN, "https://example.com").header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "X-Custom, Content-Type",
+                    );
+                }
+                let resp = cors.call(req.to_srv_request()).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                let allowed_origin = resp.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN);
+                if wildcard {
+                    assert_eq!(allowed_origin.unwrap(), "*");
+                } else if with_headers {
+                    assert_eq!(allowed_origin.unwrap(), "https://example.com");
+                } else {
+                    assert!(allowed_origin.is_none());
+                }
+                let allowed_headers = resp.headers().get(header::ACCESS_CONTROL_ALLOW_HEADERS);
+                if with_headers {
+                    assert_eq!(allowed_headers.unwrap(), "X-Custom, Content-Type");
+                } else {
+                    assert!(allowed_headers.is_none());
+                }
+                assert!(
+                    !resp
+                        .headers()
+                        .contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                );
+                assert!(!resp.headers().contains_key(header::ACCESS_CONTROL_MAX_AGE));
+                assert_eq!(resp.headers().get(header::VARY).unwrap(), "Origin");
+            }
+            let req =
+                TestRequest::with_header(header::ORIGIN, "https://example.com").to_srv_request();
+            let resp = cors.call(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            assert!(
+                !resp
+                    .headers()
+                    .contains_key(header::ACCESS_CONTROL_ALLOW_METHODS)
+            );
+        }
+    }
+
+    /// STATEMENT: Malformed or disallowed preflight origins, methods, and requested
+    /// header names produce their respective `CorsError` and a `400` without calling the application.
+    ///
+    /// HOW:
+    /// - Restrict origins, methods, and headers, and count calls to the inner service.
+    /// - Send preflights with missing, malformed, case-mismatched, or forbidden origins,
+    ///   malformed or forbidden methods, and malformed, empty, or forbidden header lists.
+    /// - Assert each error variant, the middleware's `400`, no allow-origin header, and zero inner calls.
+    /// - Send a valid actual request as a control and assert `204` and one inner call.
+    #[ntex::test]
+    async fn preflight_rejects_invalid_origin_method_and_headers() {
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let count = calls.clone();
+        let cors = Cors::new()
+            .allowed_origin("https://example.com")
+            .allowed_methods([Method::GET])
+            .allowed_header(header::AUTHORIZATION)
+            .build()
+            .create(
+                &(),
+                fn_service(async move |req: WebRequest<()>| {
+                    count.set(count.get() + 1);
+                    Ok::<_, Infallible>(req.into_response(HttpResponse::NoContent().build()))
+                }),
+            );
+        let inner = cors.inner.clone();
+        let cors = cors.pipeline(());
+        let cases: &[(&str, Option<&[u8]>, &[u8], Option<&[u8]>, CorsError)] = &[
+            (
+                "missing origin",
+                None,
+                b"GET",
+                None,
+                CorsError::MissingOrigin,
+            ),
+            (
+                "malformed origin",
+                Some(b"\xff"),
+                b"GET",
+                None,
+                CorsError::BadOrigin,
+            ),
+            (
+                "forbidden origin",
+                Some(b"https://other.com"),
+                b"GET",
+                None,
+                CorsError::OriginNotAllowed,
+            ),
+            (
+                "case-mismatched origin",
+                Some(b"https://EXAMPLE.com"),
+                b"GET",
+                None,
+                CorsError::OriginNotAllowed,
+            ),
+            (
+                "malformed method",
+                Some(b"https://example.com"),
+                b"GET POST",
+                None,
+                CorsError::BadRequestMethod,
+            ),
+            (
+                "non-ASCII method",
+                Some(b"https://example.com"),
+                b"\xff",
+                None,
+                CorsError::BadRequestMethod,
+            ),
+            (
+                "forbidden method",
+                Some(b"https://example.com"),
+                b"DELETE",
+                None,
+                CorsError::MethodNotAllowed,
+            ),
+            (
+                "malformed header name",
+                Some(b"https://example.com"),
+                b"GET",
+                Some(b"bad header"),
+                CorsError::BadRequestHeaders,
+            ),
+            (
+                "non-ASCII header name",
+                Some(b"https://example.com"),
+                b"GET",
+                Some(b"\xff"),
+                CorsError::BadRequestHeaders,
+            ),
+            (
+                "empty header list",
+                Some(b"https://example.com"),
+                b"GET",
+                Some(b""),
+                CorsError::BadRequestHeaders,
+            ),
+            (
+                "empty trailing header name",
+                Some(b"https://example.com"),
+                b"GET",
+                Some(b"authorization,"),
+                CorsError::BadRequestHeaders,
+            ),
+            (
+                "forbidden header",
+                Some(b"https://example.com"),
+                b"GET",
+                Some(b"authorization, x-forbidden"),
+                CorsError::HeadersNotAllowed,
+            ),
+        ];
+        for (name, origin, method, headers, expected) in cases {
+            let mut req = TestRequest::default().method(Method::OPTIONS).header(
+                header::ACCESS_CONTROL_REQUEST_METHOD,
+                HeaderValue::try_from(*method).unwrap(),
+            );
+            if let Some(origin) = *origin {
+                req = req.header(header::ORIGIN, HeaderValue::try_from(origin).unwrap());
+            }
+            if let Some(headers) = *headers {
+                req = req.header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    HeaderValue::try_from(headers).unwrap(),
+                );
+            }
+            let req = req.to_srv_request();
+            let error = inner.preflight_check(req.head()).expect_err(name);
+            assert_eq!(
+                std::mem::discriminant(&error),
+                std::mem::discriminant(expected),
+                "{name}"
+            );
+            let resp = cors.call(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{name}");
+            assert!(
+                !resp
+                    .headers()
+                    .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+                "{name}"
+            );
+        }
+        assert_eq!(calls.get(), 0);
+        let req = TestRequest::with_header(header::ORIGIN, "https://example.com").to_srv_request();
+        let resp = cors.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// STATEMENT: Disabling preflight delegates `OPTIONS` to the application without
+    /// validating requested permissions, while retaining origin checks and respecting disabled `Vary` support.
+    ///
+    /// HOW:
+    /// - Disable preflight and `Vary`, restrict methods and headers, and configure an inner
+    ///   service that verifies the incoming `OPTIONS` headers and returns `202` with `Vary: Accept`.
+    /// - Request a forbidden method and header from an allowed origin; assert `202`, normal
+    ///   allow-origin, unchanged `Vary`, no preflight-only headers, and one inner call.
+    /// - Repeat with a forbidden origin; assert `400` and no additional inner call.
+    #[ntex::test]
+    async fn disabled_preflight_preserves_application_response() {
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let count = calls.clone();
+        let cors = Cors::new()
+            .allowed_origin("https://example.com")
+            .allowed_methods([Method::GET])
+            .allowed_header(header::AUTHORIZATION)
+            .max_age(600)
+            .disable_preflight()
+            .disable_vary_header()
+            .build()
+            .create(
+                &(),
+                fn_service(async move |req: WebRequest<()>| {
+                    count.set(count.get() + 1);
+                    assert_eq!(req.method(), Method::OPTIONS);
+                    assert_eq!(
+                        req.headers()
+                            .get(header::ACCESS_CONTROL_REQUEST_METHOD)
+                            .unwrap(),
+                        "DELETE"
+                    );
+                    assert_eq!(
+                        req.headers()
+                            .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+                            .unwrap(),
+                        "X-Forbidden"
+                    );
+                    Ok::<_, Infallible>(
+                        req.into_response(
+                            HttpResponse::Accepted()
+                                .header(header::VARY, "Accept")
+                                .build(),
+                        ),
+                    )
+                }),
+            )
+            .pipeline(());
+        for (origin, expected) in [
+            ("https://example.com", StatusCode::ACCEPTED),
+            ("https://other.com", StatusCode::BAD_REQUEST),
+        ] {
+            let req = TestRequest::with_header(header::ORIGIN, origin)
+                .method(Method::OPTIONS)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "DELETE")
+                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "X-Forbidden")
+                .to_srv_request();
+            let resp = cors.call(req).await.unwrap();
+            assert_eq!(resp.status(), expected);
+            if expected == StatusCode::ACCEPTED {
+                assert_eq!(
+                    resp.headers()
+                        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                        .unwrap(),
+                    origin
+                );
+                assert_eq!(resp.headers().get(header::VARY).unwrap(), "Accept");
+            }
+            for name in [
+                header::ACCESS_CONTROL_ALLOW_METHODS,
+                header::ACCESS_CONTROL_ALLOW_HEADERS,
+                header::ACCESS_CONTROL_MAX_AGE,
+            ] {
+                assert!(!resp.headers().contains_key(name));
+            }
+        }
+        assert_eq!(calls.get(), 1);
     }
 }

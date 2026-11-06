@@ -522,3 +522,81 @@ macro_rules! header {
         $crate::__tm__! { $id, $tm { $($tf)* }}
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ETag, EntityTag, Header, HeaderValue, IfMatch, IfNoneMatch, Raw};
+
+    /// STATEMENT: Typed headers parse HTTP values and list serialization preserves entity-tag boundaries.
+    ///
+    /// HOW:
+    /// - Parse a whitespace-padded weak `ETag` and round-trip wildcard `IfNoneMatch` through `HeaderValue`.
+    /// - Format a three-tag `IfMatch` list and parse it back through `HeaderValue`.
+    #[test]
+    fn http_values_parse_typed_headers_and_round_trip_lists() {
+        let value = HeaderValue::from_static(" \tW/\"version\" \t");
+        assert_eq!(
+            ETag::parse_header(&&value).unwrap().0,
+            EntityTag::weak("version".into())
+        );
+        let wildcard = HeaderValue::from_static("*");
+        assert_eq!(
+            IfNoneMatch::parse_header(&&wildcard).unwrap(),
+            IfNoneMatch::Any
+        );
+        let rendered = IfNoneMatch::parse_header(&&wildcard).unwrap().to_string();
+        let value = HeaderValue::from_str(&rendered).unwrap();
+        assert_eq!(
+            IfNoneMatch::parse_header(&&value).unwrap(),
+            IfNoneMatch::Any
+        );
+        let original = IfMatch::Items(vec![
+            EntityTag::strong("one".into()),
+            EntityTag::weak("two".into()),
+            EntityTag::strong("three".into()),
+        ]);
+        let serialized = original.to_string();
+        assert_eq!(serialized, "\"one\", W/\"two\", \"three\"");
+        let value = HeaderValue::from_str(&serialized).unwrap();
+        assert_eq!(IfMatch::parse_header(&&value).unwrap(), original);
+    }
+
+    /// STATEMENT: Comma-delimited header formatting propagates an output error without silently completing the list.
+    ///
+    /// HOW:
+    /// - Format a parsed three-tag `IfMatch` through writers that fail before the first, second, and third tag.
+    /// - Check each write fails and only the successfully written prefix remains, then verify unrestricted formatting reparses.
+    #[test]
+    fn list_formatting_propagates_output_errors() {
+        use std::fmt::Write;
+
+        struct LimitedWriter {
+            remaining: usize,
+            written: String,
+        }
+        impl std::fmt::Write for LimitedWriter {
+            fn write_str(&mut self, value: &str) -> std::fmt::Result {
+                if value.len() > self.remaining {
+                    return Err(std::fmt::Error);
+                }
+                self.remaining -= value.len();
+                self.written.push_str(value);
+                Ok(())
+            }
+        }
+        let raw = Raw::from("\"one\", \"two\", \"three\"");
+        let parsed = IfMatch::parse_header(&raw).unwrap();
+        for (limit, expected) in [(0, ""), (7, "\"one\", "), (14, "\"one\", \"two\", ")] {
+            let mut writer = LimitedWriter {
+                remaining: limit,
+                written: String::new(),
+            };
+            assert!(write!(writer, "{parsed}").is_err());
+            assert_eq!(writer.written, expected);
+        }
+        assert_eq!(
+            IfMatch::parse_header(&Raw::from(parsed.to_string())).unwrap(),
+            parsed
+        );
+    }
+}

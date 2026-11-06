@@ -633,4 +633,203 @@ mod tests {
         assert_eq!(cookie.same_site(), Some(SameSite::Strict));
         assert_eq!(cookie.path(), Some("/"));
     }
+
+    fn protected_session_cookie(private: bool, key: &[u8], value: String) -> Cookie<'static> {
+        let mut jar = CookieJar::new();
+        let cookie = Cookie::new("ntex-session", value);
+        let key = Key::derive_from(key);
+        if private {
+            jar.private_mut(&key).add(cookie);
+        } else {
+            jar.signed_mut(&key).add(cookie);
+        }
+        jar.get("ntex-session").unwrap().clone()
+    }
+
+    /// STATEMENT: Signed and private sessions preserve values through renewal and reject invalid cookies.
+    ///
+    /// HOW:
+    /// - For each security policy, store a counter with custom cookie attributes and replay the cookie.
+    /// - Assert unchanged requests read the counter without reissuing cookies, while renewal preserves it and the attributes.
+    /// - Replay tampered, wrong-key, authenticated invalid JSON and malformed cookie headers; assert empty sessions and replacement cookies.
+    /// - Purge a valid session and assert the deletion retains its scope and security attributes with an expired lifetime.
+    #[ntex::test]
+    async fn protected_sessions_roundtrip_renew_reject_and_purge() {
+        for private in [false, true] {
+            let policy = if private {
+                CookieSession::private(&[0; 32])
+            } else {
+                CookieSession::signed(&[0; 32])
+            };
+            let app = test::init_service(
+                App::new()
+                    .middleware(
+                        policy
+                            .path("/account")
+                            .domain("localhost")
+                            .http_only(false)
+                            .same_site(SameSite::Strict)
+                            .max_age(120),
+                    )
+                    .service(web::resource("/write").to(|ses: Session| async move {
+                        ses.set("counter", 42).unwrap();
+                        "stored"
+                    }))
+                    .service(web::resource("/read").to(|ses: Session| async move {
+                        web::types::Json(ses.get::<u32>("counter").unwrap())
+                    }))
+                    .service(web::resource("/renew").to(|ses: Session| async move {
+                        ses.renew();
+                        web::types::Json(ses.get::<u32>("counter").unwrap())
+                    }))
+                    .service(web::resource("/purge").to(|ses: Session| async move {
+                        ses.purge();
+                        "purged"
+                    })),
+            )
+            .await;
+
+            let response = app
+                .call(test::TestRequest::with_uri("/write").to_request())
+                .await
+                .unwrap();
+            let cookie = response.cookies().next().unwrap().into_owned();
+            let response = app
+                .call(
+                    test::TestRequest::with_uri("/read")
+                        .cookie(cookie.clone())
+                        .to_request(),
+                )
+                .await
+                .unwrap();
+            assert!(!response.headers().contains_key(SET_COOKIE));
+            assert_eq!(test::read_body(response).await.as_ref(), b"42");
+
+            let response = app
+                .call(
+                    test::TestRequest::with_uri("/renew")
+                        .cookie(cookie.clone())
+                        .to_request(),
+                )
+                .await
+                .unwrap();
+            let renewed = response.cookies().next().unwrap().into_owned();
+            assert_eq!(renewed.path(), Some("/account"));
+            assert_eq!(renewed.domain(), Some("localhost"));
+            assert_eq!(renewed.secure(), Some(true));
+            assert_ne!(renewed.http_only(), Some(true));
+            assert_eq!(renewed.same_site(), Some(SameSite::Strict));
+            assert_eq!(renewed.max_age(), Some(Duration::seconds(120)));
+            assert_eq!(test::read_body(response).await.as_ref(), b"42");
+            let response = app
+                .call(
+                    test::TestRequest::with_uri("/read")
+                        .cookie(renewed)
+                        .to_request(),
+                )
+                .await
+                .unwrap();
+            assert!(!response.headers().contains_key(SET_COOKIE));
+            assert_eq!(test::read_body(response).await.as_ref(), b"42");
+
+            let mut tampered = cookie.clone();
+            tampered.set_value(format!("{}tampered", tampered.value()));
+            let invalid = [
+                tampered,
+                protected_session_cookie(private, &[1; 32], r#"{"counter":"42"}"#.to_owned()),
+                protected_session_cookie(private, &[0; 32], "not-json".to_owned()),
+                protected_session_cookie(private, &[0; 32], r#"{"counter":42}"#.to_owned()),
+            ];
+            for invalid in invalid {
+                let response = app
+                    .call(
+                        test::TestRequest::with_uri("/read")
+                            .cookie(Cookie::new("unrelated", "value"))
+                            .cookie(invalid)
+                            .to_request(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(response.status().is_success());
+                assert!(response.cookies().any(|c| c.name() == "ntex-session"));
+                assert_eq!(test::read_body(response).await.as_ref(), b"null");
+            }
+            let response = app
+                .call(
+                    test::TestRequest::with_uri("/read")
+                        .header(
+                            ntex::http::header::COOKIE,
+                            HeaderValue::from_bytes(b"\xff").unwrap(),
+                        )
+                        .to_request(),
+                )
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+            assert!(response.cookies().any(|c| c.name() == "ntex-session"));
+            assert_eq!(test::read_body(response).await.as_ref(), b"null");
+
+            let response = app
+                .call(
+                    test::TestRequest::with_uri("/purge")
+                        .cookie(cookie)
+                        .to_request(),
+                )
+                .await
+                .unwrap();
+            let deleted = response.cookies().next().unwrap();
+            assert_eq!(deleted.value(), "");
+            assert_eq!(deleted.path(), Some("/account"));
+            assert_eq!(deleted.domain(), Some("localhost"));
+            assert_eq!(deleted.secure(), Some(true));
+            assert_ne!(deleted.http_only(), Some(true));
+            assert_eq!(deleted.same_site(), Some(SameSite::Strict));
+            assert_eq!(deleted.max_age(), Some(Duration::ZERO));
+            assert!(deleted.expires().unwrap().datetime().unwrap() < OffsetDateTime::now_utc());
+        }
+    }
+
+    /// STATEMENT: Cookie size errors become server-error responses even without session mutations.
+    ///
+    /// HOW:
+    /// - Replay an authenticated oversized session to a policy with sliding expiration and no handler mutations.
+    /// - Request a new session with a cookie name exceeding the size limit.
+    /// - Assert both responses are `500` without `Set-Cookie` headers.
+    #[ntex::test]
+    async fn unchanged_sessions_report_cookie_size_errors() {
+        let app = test::init_service(
+            App::new()
+                .middleware(CookieSession::signed(&[0; 32]).expires_in(60))
+                .service(web::resource("/").to(|| async { "unchanged" })),
+        )
+        .await;
+        let state = HashMap::from([("large", serde_json::to_string(&"a".repeat(4096)).unwrap())]);
+        let cookie =
+            protected_session_cookie(false, &[0; 32], serde_json::to_string(&state).unwrap());
+        let response = app
+            .call(test::TestRequest::get().cookie(cookie).to_request())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            ntex::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(!response.headers().contains_key(SET_COOKIE));
+
+        let app = test::init_service(
+            App::new()
+                .middleware(CookieSession::signed(&[0; 32]).name("a".repeat(4096)))
+                .service(web::resource("/").to(|| async { "unchanged" })),
+        )
+        .await;
+        let response = app
+            .call(test::TestRequest::get().to_request())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            ntex::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(!response.headers().contains_key(SET_COOKIE));
+    }
 }

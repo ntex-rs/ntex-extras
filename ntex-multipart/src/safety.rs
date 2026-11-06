@@ -51,7 +51,7 @@ impl Drop for Safety {
     fn drop(&mut self) {
         // parent task is dead
         if Rc::strong_count(&self.payload) != self.level {
-            self.clean.set(true);
+            self.clean.set(false);
         }
         if let Some(task) = self.task.take() {
             task.wake()

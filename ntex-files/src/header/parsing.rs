@@ -135,8 +135,8 @@ pub fn parse_extended_value(val: &str) -> error::Result<ExtendedValue> {
 
     // Interpret the first piece as a Charset
     let charset: Charset = match parts.next() {
-        None => return Err(error::Error::Header),
-        Some(n) => FromStr::from_str(n)?,
+        Some(n) if !n.is_empty() && n.bytes().all(is_mime_charset_char) => FromStr::from_str(n)?,
+        _ => return Err(error::Error::Header),
     };
 
     // Interpret the second piece as a language tag
@@ -152,7 +152,10 @@ pub fn parse_extended_value(val: &str) -> error::Result<ExtendedValue> {
     // Interpret the third piece as a sequence of value characters
     let value: Vec<u8> = match parts.next() {
         None => return Err(error::Error::Header),
-        Some(v) => percent_encoding::percent_decode(v.as_bytes()).collect(),
+        Some(v) if is_valid_value_chars(v.as_bytes()) => {
+            percent_encoding::percent_decode(v.as_bytes()).collect()
+        }
+        _ => return Err(error::Error::Header),
     };
 
     Ok(ExtendedValue {
@@ -160,6 +163,40 @@ pub fn parse_extended_value(val: &str) -> error::Result<ExtendedValue> {
         language_tag: lang,
         value,
     })
+}
+
+fn is_mime_charset_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || b"!#$%&+-^_`{}~".contains(&c)
+}
+
+/// Checks `value-chars = *( pct-encoded / attr-char )`.
+fn is_valid_value_chars(v: &[u8]) -> bool {
+    let mut i = 0;
+    while i < v.len() {
+        if v[i] == b'%' {
+            if !v
+                .get(i + 1..i + 3)
+                .is_some_and(|h| h.iter().all(u8::is_ascii_hexdigit))
+            {
+                return false;
+            }
+            i += 3;
+        } else if is_attr_char(v[i]) {
+            i += 1;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_attr_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&c)
+}
+
+/// Checks `token` as defined in RFC 9110, Section 5.6.2.
+pub(crate) fn is_token(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|c| is_attr_char(c) || b"%'*".contains(&c))
 }
 
 impl Display for ExtendedValue {
@@ -314,6 +351,84 @@ mod tests {
         assert_eq!(
             "UTF-8''%C2%A3%20and%20%E2%82%AC%20rates",
             format!("{}", extended_value)
+        );
+    }
+
+    /// STATEMENT: Single-value parsing trims whitespace but rejects empty, repeated, and invalid values.
+    ///
+    /// HOW:
+    /// - Parse an integer from a one-line vector containing surrounding whitespace.
+    /// - Try absent, empty, repeated, non-UTF-8, and nonnumeric lines and require errors.
+    #[test]
+    fn single_value_parsing_validates_sources() {
+        let raw = Raw::from(vec![b" \t42\t ".to_vec()]);
+        assert_eq!(super::from_one_raw_str::<_, u32>(&raw).unwrap(), 42);
+        for raw in [
+            Raw::from(Vec::<Vec<u8>>::new()),
+            Raw::from(""),
+            Raw::from(" \t "),
+            Raw::from(vec![b"1".to_vec(), b"2".to_vec()]),
+            Raw::from(b"\xff".as_slice()),
+            Raw::from("not-a-number"),
+        ] {
+            assert!(super::from_one_raw_str::<_, u32>(&raw).is_err(), "{raw:?}");
+        }
+    }
+
+    /// STATEMENT: Comma-delimited parsing merges lines and skips invalid items but rejects invalid UTF-8.
+    ///
+    /// HOW:
+    /// - Parse integers from multiple lines containing whitespace, empty items, and an invalid number.
+    /// - Check the surviving order and that a later non-UTF-8 line fails the entire parse.
+    #[test]
+    fn comma_lists_merge_lines_and_validate_encoding() {
+        let mut raw = Raw::from(vec![b" 1, invalid, ,2 ".to_vec(), b",3,".to_vec()]);
+        assert_eq!(from_comma_delimited::<_, u32>(&raw).unwrap(), vec![1, 2, 3]);
+        raw.push(b"\xff".as_slice());
+        assert!(from_comma_delimited::<_, u32>(&raw).is_err());
+    }
+
+    /// STATEMENT: Extended-value parsing validates language tags while retaining arbitrary encoded octets.
+    ///
+    /// HOW:
+    /// - Parse an ISO-8859-1 value without a language and an empty value with a valid language.
+    /// - Check decoded octets and empty data, then require malformed language tags to fail.
+    #[test]
+    fn extended_values_validate_language_and_preserve_octets() {
+        let parsed = parse_extended_value("ISO-8859-1''%00%fF+").unwrap();
+        assert_eq!(parsed.charset, Charset::Iso_8859_1);
+        assert_eq!(parsed.language_tag, None);
+        assert_eq!(parsed.value, b"\0\xff+");
+        let empty = parse_extended_value("UTF-8'zh-Hant'").unwrap();
+        assert_eq!(empty.language_tag, Some("zh-Hant".parse().unwrap()));
+        assert!(empty.value.is_empty());
+        for language in ["en_US", "en--US", "1234", "en US"] {
+            assert!(
+                parse_extended_value(&format!("UTF-8'{language}'value")).is_err(),
+                "{language}"
+            );
+        }
+    }
+
+    /// STATEMENT: Extended values must have a nonempty token charset and well-formed percent escapes.
+    ///
+    /// HOW:
+    /// - Parse an empty charset, a charset with spaces, and malformed percent-encoded values.
+    /// - Collect accepted inputs and require all invalid RFC 5987 syntax to be rejected.
+    #[test]
+    fn malformed_extended_value_syntax_is_rejected() {
+        let accepted: Vec<_> = [
+            "''file.txt",
+            "UTF 8''file.txt",
+            "UTF-8''bad%ZZ",
+            "UTF-8''bad%A",
+        ]
+        .into_iter()
+        .filter(|value| parse_extended_value(value).is_ok())
+        .collect();
+        assert!(
+            accepted.is_empty(),
+            "accepted malformed extended values: {accepted:?}"
         );
     }
 }

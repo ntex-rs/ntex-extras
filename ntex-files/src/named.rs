@@ -660,4 +660,216 @@ mod tests {
         assert!(resp.headers().get(http::header::ETAG).is_some());
         assert!(resp.headers().get(http::header::LAST_MODIFIED).is_none());
     }
+
+    /// STATEMENT: `NamedFile::from_file` rejects paths that cannot supply a filename.
+    ///
+    /// HOW:
+    /// - Associate an existing open file with empty, root, and parent-only paths.
+    /// - Check each construction fails with `InvalidInput` rather than inventing a filename.
+    #[test]
+    fn from_file_requires_a_filename() {
+        for path in ["", "/", ".", ".."] {
+            let error =
+                NamedFile::from_file(File::open("tests/test.binary").unwrap(), path).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{path:?}");
+        }
+    }
+
+    /// STATEMENT: A supplied filename determines MIME and disposition independently of the opened file.
+    ///
+    /// HOW:
+    /// - Associate the same binary file with script, JSON, Wasm, XHTML, media, message, and unknown extensions.
+    /// - Check response MIME and parsed disposition, including the supplied filename.
+    #[ntex::test]
+    async fn supplied_filename_selects_mime_and_disposition() {
+        use crate::header::{ContentDisposition, DispositionType, Header, Raw};
+
+        for (filename, mime, disposition) in [
+            ("script.js", "text/javascript", DispositionType::Inline),
+            ("data.json", "application/json", DispositionType::Inline),
+            ("module.wasm", "application/wasm", DispositionType::Inline),
+            (
+                "page.xhtml",
+                "application/xhtml+xml",
+                DispositionType::Inline,
+            ),
+            ("sound.mp3", "audio/mpeg", DispositionType::Inline),
+            ("movie.mp4", "video/mp4", DispositionType::Inline),
+            ("mail.eml", "message/rfc822", DispositionType::Attachment),
+            (
+                "archive.zip",
+                "application/zip",
+                DispositionType::Attachment,
+            ),
+            (
+                "file.unregistered-extension",
+                "application/octet-stream",
+                DispositionType::Attachment,
+            ),
+        ] {
+            let file =
+                NamedFile::from_file(File::open("tests/test.binary").unwrap(), filename).unwrap();
+            let req = TestRequest::default().to_http_request();
+            let resp = file.into_response(&req);
+            assert_eq!(resp.status(), StatusCode::OK, "{filename}");
+            assert_eq!(
+                resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+                mime,
+                "{filename}"
+            );
+            let raw = Raw::from(
+                resp.headers()
+                    .get(http::header::CONTENT_DISPOSITION)
+                    .unwrap()
+                    .as_bytes(),
+            );
+            let parsed = ContentDisposition::parse_header(&raw).unwrap();
+            assert_eq!(parsed.disposition, disposition, "{filename}");
+            assert_eq!(parsed.get_filename(), Some(filename));
+        }
+    }
+
+    /// STATEMENT: Unicode filenames retain their original octets in `filename*` while line breaks are sanitized.
+    ///
+    /// HOW:
+    /// - Respond from a file associated with a Unicode filename containing quotes and line-breaking controls.
+    /// - Parse the response disposition and check sanitized fallback text, UTF-8 extended bytes, and no raw line breaks.
+    #[ntex::test]
+    async fn unicode_and_control_filenames_are_encoded_safely() {
+        use crate::header::{Charset, ContentDisposition, Header, Raw};
+
+        let filename = "résumé\n\u{b}\u{c}\r\".txt";
+        let file =
+            NamedFile::from_file(File::open("tests/test.binary").unwrap(), filename).unwrap();
+        let req = TestRequest::default().to_http_request();
+        let resp = file.into_response(&req);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let value = resp
+            .headers()
+            .get(http::header::CONTENT_DISPOSITION)
+            .unwrap();
+        assert!(
+            !value
+                .as_bytes()
+                .iter()
+                .any(|b| matches!(b, b'\n' | b'\r' | 0x0b | 0x0c))
+        );
+        let parsed = ContentDisposition::parse_header(&Raw::from(value.as_bytes())).unwrap();
+        assert_eq!(parsed.get_filename(), Some("résumé%0A%0B%0C%0D\".txt"));
+        let extended = parsed.get_filename_ext().unwrap();
+        assert_eq!(extended.charset, Charset::Ext("UTF-8".into()));
+        assert_eq!(extended.language_tag, None);
+        assert_eq!(extended.value, filename.as_bytes());
+        let encoded = std::str::from_utf8(value.as_bytes()).unwrap();
+        assert!(encoded.contains("filename*=UTF-8''r%C3%A9sum%C3%A9%0A%0B%0C%0D%22.txt"));
+    }
+
+    /// STATEMENT: A byte-range header with invalid text encoding returns `400` without a content range.
+    ///
+    /// HOW:
+    /// - Send a `Range` field containing a non-ASCII byte to a named file.
+    /// - Check the response is `BadRequest` and does not advertise a selected range.
+    #[ntex::test]
+    async fn invalid_range_encoding_returns_bad_request() {
+        let value = http::header::HeaderValue::from_bytes(b"bytes=\xff").unwrap();
+        let req = TestRequest::default()
+            .header(http::header::RANGE, value)
+            .to_http_request();
+        let resp = NamedFile::open("tests/test.binary")
+            .unwrap()
+            .into_response(&req);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(!resp.headers().contains_key(http::header::CONTENT_RANGE));
+    }
+
+    /// STATEMENT: An explicit non-OK file response preserves configured MIME, encoding, and bytes while bypassing conditional and range evaluation.
+    ///
+    /// HOW:
+    /// - Respond with `202 Accepted`, a custom MIME type, identity encoding, disabled disposition, and failing request preconditions and range.
+    /// - Check the selected status and encoding, omitted validator and range headers, and the complete file body.
+    #[ntex::test]
+    async fn custom_status_preserves_representation_and_ignores_preconditions() {
+        let file = NamedFile::open("tests/test.binary")
+            .unwrap()
+            .set_status_code(StatusCode::ACCEPTED)
+            .set_content_type(mime::TEXT_PLAIN)
+            .set_content_encoding(ContentEncoding::Identity)
+            .disable_content_disposition();
+        let req = TestRequest::default()
+            .header(http::header::IF_MATCH, "\"other\"")
+            .header(http::header::IF_NONE_MATCH, "*")
+            .header(http::header::RANGE, "bytes=999-")
+            .to_http_request();
+        let resp = file.into_response(&req);
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert_eq!(resp.get_encoding(), Some(ContentEncoding::Identity));
+        assert_eq!(
+            resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/plain"
+        );
+        for name in [
+            http::header::ETAG,
+            http::header::LAST_MODIFIED,
+            http::header::CONTENT_DISPOSITION,
+            http::header::CONTENT_RANGE,
+        ] {
+            assert!(!resp.headers().contains_key(name));
+        }
+        let body = test::read_body(resp).await;
+        assert_eq!(body.as_ref(), std::fs::read("tests/test.binary").unwrap());
+    }
+
+    /// STATEMENT: Streaming a write-only file reports the underlying I/O error instead of returning an empty successful body.
+    ///
+    /// HOW:
+    /// - Write bytes to a write-only file and associate its open handle with a named response.
+    /// - Check response construction succeeds, then body collection fails with a downcastable I/O error.
+    #[ntex::test]
+    async fn unreadable_file_body_reports_io_error() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir_in(".").unwrap();
+        let path = root.path().join("write-only.txt");
+        let mut file = File::create(&path).unwrap();
+        file.write_all(b"not readable").unwrap();
+        let file = NamedFile::from_file(file, path).unwrap();
+        let mut resp = file.into_response(&TestRequest::default().to_http_request());
+        assert_eq!(resp.status(), StatusCode::OK);
+        let error = test::load_stream(resp.take_body()).await.unwrap_err();
+        assert!(error.downcast_ref::<io::Error>().is_some(), "{error}");
+    }
+
+    /// STATEMENT: Disabled entity-tag validators cannot satisfy tag lists, but wildcard preconditions still reflect the existing representation.
+    ///
+    /// HOW:
+    /// - Supply a custom `ETag`, disable its use, and send listed and wildcard `IfMatch` and `IfNoneMatch` conditions.
+    /// - Check the expected `412`, `304`, or `200` status, omitted `ETag`, empty conditional bodies, and complete successful bodies.
+    #[ntex::test]
+    async fn disabled_etags_preserve_wildcard_preconditions() {
+        for (name, value, status) in [
+            (
+                http::header::IF_MATCH,
+                "\"revision\"",
+                StatusCode::PRECONDITION_FAILED,
+            ),
+            (http::header::IF_MATCH, "*", StatusCode::OK),
+            (http::header::IF_NONE_MATCH, "\"revision\"", StatusCode::OK),
+            (http::header::IF_NONE_MATCH, "*", StatusCode::NOT_MODIFIED),
+        ] {
+            let file = NamedFile::open("tests/test.binary")
+                .unwrap()
+                .set_etag(header::EntityTag::strong("revision".into()))
+                .use_etag(false);
+            let req = TestRequest::default().header(name, value).to_http_request();
+            let resp = file.into_response(&req);
+            assert_eq!(resp.status(), status, "{value}");
+            assert!(!resp.headers().contains_key(http::header::ETAG));
+            let body = test::read_body(resp).await;
+            if status == StatusCode::OK {
+                assert_eq!(body.as_ref(), std::fs::read("tests/test.binary").unwrap());
+            } else {
+                assert!(body.is_empty());
+            }
+        }
+    }
 }

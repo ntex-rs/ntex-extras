@@ -333,3 +333,163 @@ impl<'a> Iterator for RawLines<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Raw, RawLike};
+    use crate::header::{EntityTag, Header, IfMatch};
+    use ntex::util::Bytes;
+
+    /// STATEMENT: Appending raw values preserves line order without joining header fields.
+    ///
+    /// HOW:
+    /// - Append single, multiple, and empty groups to an initial entity-tag line.
+    /// - Check raw boundaries, iterator exhaustion, and the combined typed `IfMatch` list.
+    #[test]
+    fn appending_values_preserves_header_lines() {
+        let mut raw = Raw::from("\"first\"");
+        raw.push(vec![b"W/\"second\"".to_vec(), b"\"third\"".to_vec()]);
+        raw.push(String::from("\"fourth\""));
+        raw.push(Vec::<Vec<u8>>::new());
+        assert_eq!(raw.len(), 4);
+        assert_eq!(raw.one(), None);
+        assert_eq!(&raw[1], b"W/\"second\"");
+        let expected: Vec<&[u8]> = vec![b"\"first\"", b"W/\"second\"", b"\"third\"", b"\"fourth\""];
+        assert_eq!((&raw).into_iter().collect::<Vec<_>>(), expected);
+        let mut iter = raw.iter();
+        for line in expected {
+            assert_eq!(iter.next(), Some(line));
+        }
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+        assert_eq!(
+            IfMatch::parse_header(&raw).unwrap(),
+            IfMatch::Items(vec![
+                EntityTag::strong("first".into()),
+                EntityTag::weak("second".into()),
+                EntityTag::strong("third".into()),
+                EntityTag::strong("fourth".into()),
+            ])
+        );
+    }
+
+    /// STATEMENT: Empty groups can grow into a single parsed value before becoming multiline.
+    ///
+    /// HOW:
+    /// - Start from an empty vector, append an entity tag as `Bytes`, then append another group.
+    /// - Check single-value parsing succeeds only before the second line and empty iteration ends.
+    #[test]
+    fn empty_groups_grow_without_losing_single_value_semantics() {
+        let mut raw = Raw::from(Vec::<Vec<u8>>::new());
+        assert!(raw.iter().next().is_none());
+        assert!(crate::header::ETag::parse_header(&raw).is_err());
+        raw.push(Bytes::from_static(b"\"one\""));
+        assert_eq!(
+            crate::header::ETag::parse_header(&raw).unwrap().0,
+            EntityTag::strong("one".into())
+        );
+        raw.push(vec![b"\"two\"".to_vec()]);
+        assert!(crate::header::ETag::parse_header(&raw).is_err());
+        assert_eq!(
+            raw.iter().collect::<Vec<_>>(),
+            vec![b"\"one\"".as_slice(), b"\"two\"".as_slice()]
+        );
+    }
+
+    /// STATEMENT: Raw storage preserves literal-looking and arbitrary binary bytes exactly.
+    ///
+    /// HOW:
+    /// - Store optimized literals, same-length non-literals, whitespace, and non-UTF-8 bytes.
+    /// - Check borrowed, owned, and `Bytes` inputs retain their exact bytes through append and iteration.
+    #[test]
+    fn storage_preserves_literals_and_binary_values() {
+        let values: &[&[u8]] = &[
+            b"*",
+            b"0",
+            b"x",
+            b"*/*",
+            b"abc",
+            b"gzip",
+            b"br  ",
+            b"close",
+            b"other",
+            b"chunked",
+            b"unknown",
+            b"keep-alive",
+            b"0123456789",
+            b" \t spaced \t ",
+            b"\0\xff\x80",
+        ];
+        let mut combined = Raw::from(Vec::<Vec<u8>>::new());
+        for &value in values {
+            let borrowed = Raw::from(value);
+            let owned = Raw::from(value.to_vec());
+            let bytes = Raw::from(Bytes::copy_from_slice(value));
+            assert_eq!(borrowed.one(), Some(value));
+            assert_eq!(owned, borrowed);
+            assert_eq!(bytes, borrowed);
+            combined.push(borrowed);
+        }
+        assert_eq!(combined.iter().collect::<Vec<_>>(), values);
+    }
+
+    /// STATEMENT: Equality compares raw line boundaries and ordering, not concatenated text.
+    ///
+    /// HOW:
+    /// - Build equivalent values by appending and by vector conversion.
+    /// - Compare them with reversed, shorter, and joined values and with byte and string line slices.
+    #[test]
+    fn equality_preserves_line_boundaries_and_order() {
+        let mut appended = Raw::from("first");
+        appended.push("second");
+        let grouped = Raw::from(vec![b"first".to_vec(), b"second".to_vec()]);
+        assert_eq!(appended, grouped);
+        assert_eq!(appended, appended.clone());
+        assert!(appended == ["first", "second"][..]);
+        assert!(appended == [String::from("first"), String::from("second")][..]);
+        assert!(appended == [b"first".as_slice(), b"second".as_slice()][..]);
+        assert!(appended == [b"first".to_vec(), b"second".to_vec()][..]);
+        assert_ne!(
+            appended,
+            Raw::from(vec![b"second".to_vec(), b"first".to_vec()])
+        );
+        assert_ne!(appended, Raw::from("first"));
+        assert!(appended != "firstsecond"[..]);
+        assert_ne!(Raw::from(""), Raw::from(Vec::<Vec<u8>>::new()));
+        assert_eq!(Raw::from(vec![b"first".to_vec()]), Raw::from("first"));
+    }
+
+    /// STATEMENT: Raw single-line equality and indexing retain entity-tag bytes without accepting extra header lines.
+    ///
+    /// HOW:
+    /// - Build equivalent borrowed, owned, and grouped raw entity tags, then parse each and check its formatted bytes.
+    /// - Check byte and string equality, reject out-of-range indexing, and require appending a second line to invalidate `ETag` parsing.
+    #[test]
+    fn single_line_storage_round_trips_and_rejects_extra_lines() {
+        let serialized = "W/\"révision\"";
+        let expected = EntityTag::weak("révision".into());
+        for mut raw in [
+            Raw::from(serialized),
+            Raw::from(serialized.as_bytes().to_vec()),
+            Raw::from(vec![serialized.as_bytes().to_vec()]),
+        ] {
+            let tag = crate::header::ETag::parse_header(&raw).unwrap();
+            assert_eq!(tag.0, expected);
+            assert_eq!(tag.to_string(), serialized);
+            assert_eq!(&raw[0], serialized.as_bytes());
+            assert_eq!(raw, Raw::from(serialized));
+            assert!(std::panic::catch_unwind(|| &raw[1]).is_err());
+            let mut iter = raw.iter();
+            assert_eq!(iter.next(), Some(serialized.as_bytes()));
+            assert_eq!(iter.next(), None);
+            raw.push("\"another\"");
+            assert!(crate::header::ETag::parse_header(&raw).is_err());
+            assert!(raw != serialized[..]);
+            assert!(raw != serialized.as_bytes()[..]);
+        }
+        let raw = Raw::from(serialized);
+        assert!(raw == serialized[..]);
+        assert!(raw == serialized.as_bytes()[..]);
+        assert!(raw != b"different"[..]);
+    }
+}

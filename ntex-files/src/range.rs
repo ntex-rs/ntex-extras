@@ -31,10 +31,8 @@ impl HttpRange {
             .map(|x| x.trim())
             .filter(|x| !x.is_empty())
             .map(|ra| {
-                let mut start_end_iter = ra.split('-');
-
-                let start_str = start_end_iter.next().ok_or(())?.trim();
-                let end_str = start_end_iter.next().ok_or(())?.trim();
+                let (start_str, end_str) = ra.split_once('-').ok_or(())?;
+                let (start_str, end_str) = (start_str.trim(), end_str.trim());
 
                 if start_str.is_empty() {
                     // If no start is specified, end specifies the
