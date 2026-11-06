@@ -1,5 +1,9 @@
 # Changes
 
+## [Unreleased]
+
+* Export `CookieSessionError` and `CookieSessionMiddleware`
+
 ## [4.3.0] - 2026-11-06
 
 * Check the 4096-byte cookie size limit after signing or encryption and encoding

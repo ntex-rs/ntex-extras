@@ -2,7 +2,7 @@
 
 # Static files support for ntex
 
-[![Version](https://img.shields.io/badge/rustc-1.65+-lightgray.svg)](https://blog.rust-lang.org/2022/11/03/Rust-1.65.0.html) 
+[![Version](https://img.shields.io/badge/rustc-1.97+-lightgray.svg)](https://releases.rs/docs/1.97.0/) 
 [![codecov](https://codecov.io/gh/ntex-rs/ntex-extras/branch/master/graph/badge.svg)](https://codecov.io/gh/ntex-rs/ntex-extras) 
 
 </div>
@@ -12,7 +12,7 @@
 * [User Guide](https://ntex.rs/docs)
 * [API Documentation](https://docs.rs/ntex-files)
 * Cargo package: [ntex-files](https://crates.io/crates/ntex-files)
-* Minimum supported Rust version: 1.65 or later
+* Minimum supported Rust version: 1.97 or later
 
 ## Build statuses
 

@@ -59,6 +59,9 @@ use ntex::web::{
     DefaultError, FromRequest, HttpRequest, State, WebRequest, WebResponse, WebResponseError,
 };
 
+/// Browsers drop cookies whose `name=value` pair is larger than this.
+const MAX_COOKIE_SIZE: usize = 4096;
+
 /// The extractor type to obtain your identity from a request.
 ///
 /// ```rust
@@ -389,7 +392,11 @@ impl CookieIdentityInner {
             jar.private_mut(key).remove(cookie);
         }
         for cookie in jar.delta() {
-            let val = HeaderValue::from_str(&cookie.to_string()).map_err(HttpError::from)?;
+            let val = cookie.to_string();
+            if val.split(';').next().map_or(0, str::len) > MAX_COOKIE_SIZE {
+                return Err(CookieIdentityPolicyError::Overflow);
+            }
+            let val = HeaderValue::from_str(&val).map_err(HttpError::from)?;
             resp.headers_mut().append(header::SET_COOKIE, val);
         }
         Ok(())
@@ -474,6 +481,8 @@ pub enum CookieIdentityPolicyError {
     Http(#[from] HttpError),
     #[error("Json error {0}")]
     Json(#[from] serde_json::error::Error),
+    #[error("Size of the identity cookie is greater than 4096 bytes")]
+    Overflow,
 }
 
 impl<St> WebResponseError<St, DefaultError> for CookieIdentityPolicyError {}
@@ -577,7 +586,7 @@ impl<St, In> IdentityPolicy<St, In> for CookieIdentityPolicy {
         changed: bool,
         res: &mut WebResponse,
     ) -> Result<(), Self::Error> {
-        let _ = if changed {
+        if changed {
             let login_timestamp = SystemTime::now();
             self.0.set_cookie(
                 res,
@@ -607,8 +616,7 @@ impl<St, In> IdentityPolicy<St, In> for CookieIdentityPolicy {
             )
         } else {
             Ok(())
-        };
-        Ok(())
+        }
     }
 }
 
@@ -1059,6 +1067,40 @@ mod tests {
             VisitTimeStampCheck::NewTimestamp,
         );
         assert_logged_in(resp, Some(COOKIE_LOGIN)).await;
+    }
+
+    /// STATEMENT: An identity cookie larger than 4096 bytes is reported as an error
+    /// instead of being silently dropped.
+    ///
+    /// HOW:
+    /// - Remember an identity long enough to push the encrypted cookie past
+    ///   `MAX_COOKIE_SIZE`.
+    /// - Confirm the response is a server error without a `Set-Cookie` header.
+    /// - Remember a short identity and confirm the cookie is still set.
+    #[ntex::test]
+    async fn oversized_identity_cookie_is_an_error() {
+        let srv = test::init_service(
+            App::new()
+                .middleware(IdentityService::new(
+                    CookieIdentityPolicy::new(&COOKIE_KEY_MASTER).name(COOKIE_NAME),
+                ))
+                .service(web::resource("/{len}").to(
+                    |id: Identity, len: web::types::Path<usize>| async move {
+                        id.remember("a".repeat(*len));
+                        HttpResponse::Ok()
+                    },
+                ))
+                .build(),
+        )
+        .await;
+
+        let resp = test::call_service(&srv, TestRequest::with_uri("/4096").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!resp.headers().contains_key(header::SET_COOKIE));
+
+        let resp = test::call_service(&srv, TestRequest::with_uri("/16").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().contains_key(header::SET_COOKIE));
     }
 
     #[ntex::test]
