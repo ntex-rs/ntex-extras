@@ -9,6 +9,9 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
+/// Maximum size of a boundary line or of a part's header block.
+pub(crate) const MAX_LINE_SIZE: usize = 16 * 1024;
+
 pub(crate) struct PayloadRef {
     payload: Rc<RefCell<PayloadBuffer>>,
 }
@@ -96,15 +99,20 @@ impl PayloadBuffer {
     }
 
     /// Read until specified ending
+    ///
+    /// Fails if the ending is not found within `MAX_LINE_SIZE` bytes.
     pub(crate) fn read_until(&mut self, line: &[u8]) -> Result<Option<Bytes>, MultipartError> {
         let res =
             memchr::memmem::find(&self.buf, line).map(|idx| self.buf.split_to(idx + line.len()));
 
-        if res.is_none() && self.eof {
-            Err(MultipartError::Incomplete)
-        } else {
-            Ok(res)
+        if res.is_none() {
+            if self.buf.len() > MAX_LINE_SIZE {
+                return Err(MultipartError::Payload(PayloadError::Overflow));
+            } else if self.eof {
+                return Err(MultipartError::Incomplete);
+            }
         }
+        Ok(res)
     }
 
     /// Read bytes until new line delimiter

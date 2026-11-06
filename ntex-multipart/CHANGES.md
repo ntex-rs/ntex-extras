@@ -1,8 +1,20 @@
 # Changes
 
-## [Unreleased]
+## ## [4.2.0] - 2026-11-06
 
 * Replace the deprecated `twoway` dependency with `memchr`
+
+* Export `MultipartFormConfig`
+
+* Fix panic on short preamble lines before the first boundary
+
+* Fix boundary detection when a chunk ends right after `\r\n--`
+
+* Return `Incomplete` instead of hanging when the body ends with `\r` inside a field
+
+* Limit boundary lines and field headers to 16KiB
+
+* Return an error when field data does not match its `Content-Length`
 
 ## [4.1.0] - 2026-10-05
 

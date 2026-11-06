@@ -266,8 +266,9 @@ pub fn impl_multipart_form(input: TokenStream) -> TokenStream {
         ));
     }
 
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let generation = quote! {
-        impl ::ntex_multipart::MultipartCollect for #name {
+        impl #impl_generics ::ntex_multipart::MultipartCollect for #name #ty_generics #where_clause {
             fn limit(field_name: &str) -> ::std::option::Option<usize> {
                 match field_name {
                     #limit_impl

@@ -12,4 +12,4 @@ pub(crate) mod safety;
 pub use self::error::MultipartError;
 pub use self::field::Field;
 pub use self::multipart::Multipart;
-pub use self::multipart_form::{MultipartCollect, MultipartForm};
+pub use self::multipart_form::{MultipartCollect, MultipartForm, MultipartFormConfig};

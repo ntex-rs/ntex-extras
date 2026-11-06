@@ -210,28 +210,19 @@ impl InnerMultipart {
         payload: &mut PayloadBuffer,
         boundary: &str,
     ) -> Result<Option<bool>, MultipartError> {
-        let mut eof = false;
         loop {
             match payload.readline()? {
                 Some(chunk) => {
-                    if chunk.is_empty() {
-                        return Err(MultipartError::Boundary);
-                    }
-                    if chunk.len() < boundary.len() {
-                        continue;
-                    }
-                    if &chunk[..2] == b"--" && &chunk[2..chunk.len() - 2] == boundary.as_bytes() {
-                        break;
-                    } else {
-                        if chunk.len() < boundary.len() + 2 {
-                            continue;
-                        }
-                        let b: &[u8] = boundary.as_ref();
-                        if &chunk[..boundary.len()] == b
-                            && &chunk[boundary.len()..boundary.len() + 2] == b"--"
-                        {
-                            eof = true;
-                            break;
+                    let line = chunk.strip_suffix(b"\n").unwrap_or(&chunk);
+                    let line = line.strip_suffix(b"\r").unwrap_or(line);
+                    if let Some(rest) = line
+                        .strip_prefix(b"--")
+                        .and_then(|l| l.strip_prefix(boundary.as_bytes()))
+                    {
+                        if rest.is_empty() {
+                            return Ok(Some(false));
+                        } else if rest == b"--" {
+                            return Ok(Some(true));
                         }
                     }
                 }
@@ -244,7 +235,6 @@ impl InnerMultipart {
                 }
             }
         }
-        Ok(Some(eof))
     }
 
     fn poll(
@@ -598,5 +588,135 @@ mod tests {
             None => (),
             _ => unreachable!(),
         }
+    }
+
+    fn form_data_headers(boundary: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::try_from(format!("multipart/form-data; boundary={boundary}")).unwrap(),
+        );
+        headers
+    }
+
+    /// STATEMENT: Preamble lines shorter than the boundary delimiter are skipped without panicking.
+    ///
+    /// HOW:
+    /// - Send a body for boundary `a` whose preamble contains `\n` and `--\n` lines.
+    /// - Confirm the single field is returned with its data and the stream then ends.
+    #[ntex::test]
+    async fn test_short_preamble_lines() {
+        let (sender, payload) = create_stream();
+        sender
+            .send(Ok(Bytes::from_static(
+                b"\n--\n--a\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nv\r\n--a--\r\n",
+            )))
+            .unwrap();
+        drop(sender);
+
+        let mut multipart = Multipart::new(&form_data_headers("a"), payload);
+        let mut field = multipart.next().await.unwrap().unwrap();
+        assert_eq!(get_whole_field(&mut field).await, "v");
+        drop(field);
+        assert!(multipart.next().await.is_none());
+    }
+
+    /// STATEMENT: A boundary split right after its leading `\r\n--` is still detected.
+    ///
+    /// HOW:
+    /// - Send a field followed by `\r\n--`, and read the first data chunk.
+    /// - Send the rest of the closing boundary.
+    /// - Confirm the field data excludes the delimiter and the stream then ends.
+    #[ntex::test]
+    async fn test_boundary_split_after_dashes() {
+        let (sender, payload) = create_stream();
+        sender
+            .send(Ok(Bytes::from_static(
+                b"--abc\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\ndata\r\n--",
+            )))
+            .unwrap();
+
+        let mut multipart = Multipart::new(&form_data_headers("abc"), payload);
+        let mut field = multipart.next().await.unwrap().unwrap();
+        assert_eq!(field.next().await.unwrap().unwrap(), "data");
+
+        sender.send(Ok(Bytes::from_static(b"abc--\r\n"))).unwrap();
+        drop(sender);
+        assert_eq!(get_whole_field(&mut field).await, "");
+        drop(field);
+        assert!(multipart.next().await.is_none());
+    }
+
+    /// STATEMENT: A body that ends with a lone `\r` inside a field reports `Incomplete`.
+    ///
+    /// HOW:
+    /// - Send a field whose data ends with `\r`, then close the stream.
+    /// - Confirm the data before `\r` is returned and the next read is `Incomplete`.
+    #[ntex::test]
+    async fn test_truncated_field_with_trailing_cr() {
+        let (sender, payload) = create_stream();
+        sender
+            .send(Ok(Bytes::from_static(
+                b"--abc\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\ndata\r",
+            )))
+            .unwrap();
+        drop(sender);
+
+        let mut multipart = Multipart::new(&form_data_headers("abc"), payload);
+        let mut field = multipart.next().await.unwrap().unwrap();
+        assert_eq!(field.next().await.unwrap().unwrap(), "data");
+        assert!(matches!(
+            field.next().await,
+            Some(Err(MultipartError::Incomplete))
+        ));
+    }
+
+    /// STATEMENT: Field headers without a terminator are rejected once they exceed `MAX_LINE_SIZE`.
+    ///
+    /// HOW:
+    /// - Keep the stream open and send a boundary followed by an unterminated oversized header.
+    /// - Confirm reading the field fails with `PayloadError::Overflow` instead of waiting for more data.
+    #[ntex::test]
+    async fn test_oversized_headers() {
+        let (sender, payload) = create_stream();
+        let mut body = b"--abc\r\nX-Big: ".to_vec();
+        body.resize(body.len() + crate::payload::MAX_LINE_SIZE + 1, b'a');
+        sender.send(Ok(Bytes::from(body))).unwrap();
+
+        let mut multipart = Multipart::new(&form_data_headers("abc"), payload);
+        assert!(matches!(
+            multipart.next().await,
+            Some(Err(MultipartError::Payload(PayloadError::Overflow)))
+        ));
+        drop(sender);
+    }
+
+    /// STATEMENT: Field data longer than its `Content-Length` is an error, not a silent truncation.
+    ///
+    /// HOW:
+    /// - Send a `multipart/mixed` field declaring `Content-Length: 2` with data `test`.
+    /// - Confirm the first two bytes are returned and the next read fails with `Boundary`.
+    #[ntex::test]
+    async fn test_field_longer_than_content_length() {
+        let (sender, payload) = create_stream();
+        sender
+            .send(Ok(Bytes::from_static(
+                b"--abc\r\nContent-Length: 2\r\n\r\ntest\r\n--abc--\r\n",
+            )))
+            .unwrap();
+        drop(sender);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("multipart/mixed; boundary=abc"),
+        );
+        let mut multipart = Multipart::new(&headers, payload);
+        let mut field = multipart.next().await.unwrap().unwrap();
+        assert_eq!(field.next().await.unwrap().unwrap(), "te");
+        assert!(matches!(
+            field.next().await,
+            Some(Err(MultipartError::Boundary))
+        ));
     }
 }
