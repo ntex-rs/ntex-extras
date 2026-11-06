@@ -135,8 +135,11 @@ struct ParsedField<'t> {
 /// [`bytesize`]: https://docs.rs/bytesize/2
 #[proc_macro_derive(MultipartForm, attributes(multipart))]
 pub fn impl_multipart_form(input: TokenStream) -> TokenStream {
-    let input: syn::DeriveInput = parse_macro_input!(input);
+    expand(parse_macro_input!(input)).into()
+}
 
+/// Expands the derive, or returns `compile_error!` tokens for invalid input.
+fn expand(input: syn::DeriveInput) -> proc_macro2::TokenStream {
     let name = &input.ident;
 
     let data_struct = match &input.data {
@@ -161,7 +164,7 @@ pub fn impl_multipart_form(input: TokenStream) -> TokenStream {
 
     let attrs = match MultipartFormAttrs::from_derive_input(&input) {
         Ok(attrs) => attrs,
-        Err(err) => return err.write_errors().into(),
+        Err(err) => return err.write_errors(),
     };
 
     // Parse the field attributes
@@ -196,7 +199,7 @@ pub fn impl_multipart_form(input: TokenStream) -> TokenStream {
                 ty: &field.ty,
             })
         })
-        .collect::<Result<Vec<_>, TokenStream>>()
+        .collect::<Result<Vec<_>, proc_macro2::TokenStream>>()
     {
         Ok(attrs) => attrs,
         Err(err) => return err,
@@ -293,10 +296,100 @@ pub fn impl_multipart_form(input: TokenStream) -> TokenStream {
 
         }
     };
-    generation.into()
+    generation
 }
 
 /// Transform a syn error into a token stream for returning.
-fn compile_err(err: syn::Error) -> TokenStream {
-    TokenStream::from(err.to_compile_error())
+fn compile_err(err: syn::Error) -> proc_macro2::TokenStream {
+    err.to_compile_error()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand;
+
+    /// Expands `input` and returns its `compile_error!` message tokens.
+    fn expand_error(input: syn::DeriveInput) -> String {
+        let output = expand(input).to_string();
+        assert!(
+            output.contains("compile_error"),
+            "expected an error, got: {output}"
+        );
+        output
+    }
+
+    /// STATEMENT: Only structs with named fields can derive `MultipartForm`.
+    ///
+    /// HOW:
+    /// - Expand the derive for an enum and for a tuple struct.
+    /// - Confirm each produces a `compile_error!` naming the unsupported shape.
+    #[test]
+    fn non_struct_and_unnamed_fields_are_rejected() {
+        let output = expand_error(syn::parse_quote! { enum Upload { A } });
+        assert!(
+            output.contains("can only be derived for structs"),
+            "{output}"
+        );
+
+        let output = expand_error(syn::parse_quote! { struct Upload(String); });
+        assert!(output.contains("struct with named fields"), "{output}");
+    }
+
+    /// STATEMENT: Invalid struct and field attributes are reported as compile errors.
+    ///
+    /// HOW:
+    /// - Expand with an unknown `duplicate_field` value and with an unknown field attribute.
+    /// - Confirm both outputs contain `compile_error!` mentioning the offending value or key.
+    #[test]
+    fn invalid_attributes_are_rejected() {
+        let output = expand_error(syn::parse_quote! {
+            #[multipart(duplicate_field = "bogus")]
+            struct Upload { a: String }
+        });
+        assert!(output.contains("bogus"), "{output}");
+
+        let output = expand_error(syn::parse_quote! {
+            struct Upload {
+                #[multipart(bogus = "x")]
+                a: String,
+            }
+        });
+        assert!(output.contains("bogus"), "{output}");
+    }
+
+    /// STATEMENT: An unparseable field `limit` is a compile error that quotes the value.
+    ///
+    /// HOW:
+    /// - Expand a field with `limit = "lots"`.
+    /// - Confirm the output is a `compile_error!` containing ``Could not parse size limit `lots` ``.
+    #[test]
+    fn unparseable_limits_are_rejected() {
+        let output = expand_error(syn::parse_quote! {
+            struct Upload {
+                #[multipart(limit = "lots")]
+                a: String,
+            }
+        });
+        assert!(
+            output.contains("Could not parse size limit `lots`"),
+            "{output}"
+        );
+    }
+
+    /// STATEMENT: Two fields that serialize to the same multipart name are rejected.
+    ///
+    /// HOW:
+    /// - Expand a struct whose second field is renamed to the first field's name.
+    /// - Confirm the output is a `compile_error!` containing ``Multiple fields named: `a` ``.
+    #[test]
+    fn duplicate_field_names_are_rejected() {
+        let output = expand_error(syn::parse_quote! {
+            struct Upload {
+                a: String,
+                #[multipart(rename = "a")]
+                b: String,
+            }
+        });
+        assert!(output.contains("Multiple fields named: `a`"), "{output}");
+    }
 }
