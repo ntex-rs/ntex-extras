@@ -1,5 +1,13 @@
 # Changes
 
+## [4.3.0] - 2026-11-06
+
+* Treat only `OPTIONS` requests with `Access-Control-Request-Method` as preflight requests
+
+* Add `Vary: Origin` to preflight responses and to responses for requests without `Origin`
+
+* Merge `Origin` into all existing `Vary` headers and skip it if `Origin` or `*` is already present
+
 ## [4.2.0] - 2026-11-03
 
 * Update the `ntex` to 4.5
