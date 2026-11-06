@@ -28,10 +28,14 @@ fn check_slice_validity(slice: &str) -> bool {
 ///            ; VCHAR except double quotes, plus obs-text
 /// ```
 ///
+/// # Errors
+///
+/// Parsing rejects invalid opaque-value characters, missing quotes, or a weak
+/// prefix other than the case-sensitive `W/`. Surrounding whitespace is not trimmed.
+///
 /// # Comparison
-/// To check if two entity tags are equivalent in an application always use the `strong_eq` or
-/// `weak_eq` methods based on the context of the Tag. Only use `==` to check if two tags are
-/// identical.
+/// Use [`Self::strong_eq`] or [`Self::weak_eq`] according to the conditional
+/// header being evaluated. `==` checks both the weakness flag and opaque value.
 ///
 /// The example below shows the results for a set of entity-tag pairs and
 /// both the weak and strong comparison function results:
@@ -44,43 +48,53 @@ fn check_slice_validity(slice: &str) -> bool {
 /// | `"1"`   | `"1"`   | match             | match           |
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EntityTag {
-    /// Weakness indicator for the tag
+    /// Whether the validator is weak; strong comparison rejects weak tags.
     pub weak: bool,
     /// The opaque string in between the DQUOTEs
     tag: String,
 }
 
 impl EntityTag {
-    /// Constructs a new EntityTag.
+    /// Constructs a tag from its weakness flag and unquoted opaque value.
+    ///
     /// # Panics
-    /// If the tag contains invalid characters.
+    ///
+    /// Panics if `tag` contains a double quote, space, ASCII control byte, or DEL.
+    /// Empty and non-ASCII values are allowed.
     pub fn new(weak: bool, tag: String) -> EntityTag {
         assert!(check_slice_validity(&tag), "Invalid tag: {:?}", tag);
         EntityTag { weak, tag }
     }
 
-    /// Constructs a new weak EntityTag.
+    /// Constructs a weak tag from an unquoted opaque value.
+    ///
     /// # Panics
-    /// If the tag contains invalid characters.
+    ///
+    /// Panics for the invalid characters described by [`Self::new`].
     pub fn weak(tag: String) -> EntityTag {
         EntityTag::new(true, tag)
     }
 
-    /// Constructs a new strong EntityTag.
+    /// Constructs a strong tag from an unquoted opaque value.
+    ///
     /// # Panics
-    /// If the tag contains invalid characters.
+    ///
+    /// Panics for the invalid characters described by [`Self::new`].
     pub fn strong(tag: String) -> EntityTag {
         EntityTag::new(false, tag)
     }
 
-    /// Get the tag.
+    /// Returns the opaque value without quotes or the weakness prefix.
     pub fn tag(&self) -> &str {
         self.tag.as_ref()
     }
 
-    /// Set the tag.
+    /// Replaces the unquoted opaque value without changing the weakness flag.
+    ///
     /// # Panics
-    /// If the tag contains invalid characters.
+    ///
+    /// Panics for the invalid characters described by [`Self::new`], leaving the
+    /// existing tag unchanged.
     pub fn set_tag(&mut self, tag: String) {
         assert!(check_slice_validity(&tag), "Invalid tag: {:?}", tag);
         self.tag = tag
@@ -99,12 +113,12 @@ impl EntityTag {
         self.tag == other.tag
     }
 
-    /// The inverse of `EntityTag.strong_eq()`.
+    /// Returns the inverse of [`Self::strong_eq`].
     pub fn strong_ne(&self, other: &EntityTag) -> bool {
         !self.strong_eq(other)
     }
 
-    /// The inverse of `EntityTag.weak_eq()`.
+    /// Returns the inverse of [`Self::weak_eq`].
     pub fn weak_ne(&self, other: &EntityTag) -> bool {
         !self.weak_eq(other)
     }

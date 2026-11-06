@@ -1,3 +1,25 @@
+//! Typed header values used for file responses and conditional requests.
+//!
+//! Parse values with [`Header::parse_header`](crate::header::Header::parse_header)
+//! using [`Raw`](crate::header::Raw) or another
+//! [`RawLike`](crate::header::RawLike) source. Format them with [`std::fmt::Display`];
+//! [`StandardHeader::http_header_name`](crate::header::StandardHeader::http_header_name)
+//! supplies the corresponding HTTP header name.
+//! Single-value headers reject repeated lines. Entity-tag lists merge lines,
+//! preserve quoted commas, and skip individual entries that fail to parse.
+//! Wildcard `*` is recognized only as the exact contents of a single raw line.
+//!
+//! ```
+//! use ntex_files::header::{EntityTag, Header, IfNoneMatch, Raw};
+//!
+//! let raw = Raw::from("W/\"revision-1\", \"revision-2\"");
+//! let parsed = IfNoneMatch::parse_header(&raw).unwrap();
+//! assert_eq!(parsed, IfNoneMatch::Items(vec![
+//!     EntityTag::weak("revision-1".into()),
+//!     EntityTag::strong("revision-2".into()),
+//! ]));
+//! ```
+
 #![allow(dead_code, clippy::useless_conversion)]
 
 mod charset;
@@ -20,43 +42,39 @@ pub use raw::{Raw, RawLike};
 
 use self::sealed::HeaderClone;
 
-/// A trait for any object that will represent a header field and value.
+/// Identification, parsing, and formatting of a typed header value.
 ///
-/// This trait represents the construction and identification of headers,
-/// and contains trait-object unsafe methods.
+/// Header names and parsing require a concrete sized type; formatting is also
+/// available through trait objects. Implementors must be [`Clone`], [`Send`],
+/// [`Sync`], and `'static`.
 pub trait Header: 'static + HeaderClone + Send + Sync {
-    /// Returns the name of the header field this belongs to.
-    ///
-    /// This will become an associated constant once available.
+    /// Returns the HTTP header field name, such as `Content-Disposition`.
     fn header_name() -> &'static str
     where
         Self: Sized;
 
-    /// Parse a header from a raw stream of bytes.
+    /// Parses raw field-value lines for a single header name.
     ///
-    /// It's possible that a request can include a header field more than once,
-    /// and in that case, the slice will have a length greater than 1. However,
-    /// it's not necessarily the case that a Header is *allowed* to have more
-    /// than one field value. If that's the case, you **should** return `None`
-    /// if `raw.len() > 1`.
+    /// Single-value implementations reject multiple lines. List implementations
+    /// may combine them; the accepted syntax depends on the header type.
+    ///
+    /// # Errors
+    ///
+    /// Returns a parsing error for invalid input or unsupported line counts.
+    /// Entity-tag lists skip invalid individual items, but reject invalid UTF-8.
     fn parse_header<'a, T>(raw: &'a T) -> error::Result<Self>
     where
         T: RawLike<'a>,
         Self: Sized;
 
-    /// Format a header to outgoing stream.
+    /// Formats the value using the supplied header formatter.
     ///
-    /// Most headers should be formatted on one line, and so a common pattern
-    /// would be to implement `std::fmt::Display` for this type as well, and
-    /// then just call `f.fmt_line(self)`.
+    /// Implementations typically delegate to [`Formatter::fmt_line`]. Multiple
+    /// calls represent multiple field-value lines.
     ///
-    /// ## Note
+    /// # Errors
     ///
-    /// This has the ability to format a header over multiple lines.
-    ///
-    /// The main example here is `Set-Cookie`, which requires that every
-    /// cookie being set be specified in a separate line. Almost every other
-    /// case should only format as 1 single line.
+    /// Returns [`std::fmt::Error`] if writing or formatting a value fails.
     fn fmt_header(&self, f: &mut Formatter) -> std::fmt::Result;
 }
 
@@ -88,17 +106,15 @@ enum Multi<'a, 'b: 'a> {
 }
 
 impl<'a, 'b> Formatter<'a, 'b> {
-    /// Format one 'line' of a header.
+    /// Formats one field-value line, replacing carriage returns and line feeds with spaces.
     ///
-    /// This writes the header name plus the `Display` value as a single line.
+    /// Depending on the formatter's output mode, writes a named header line,
+    /// joins values with `, `, or appends a raw value. Calling this repeatedly
+    /// supports headers that require separate lines.
     ///
-    /// ## Note
+    /// # Errors
     ///
-    /// This has the ability to format a header over multiple lines.
-    ///
-    /// The main example here is `Set-Cookie`, which requires that every
-    /// cookie being set be specified in a separate line. Almost every other
-    /// case should only format as 1 single line.
+    /// Returns [`std::fmt::Error`] if the output or the value's formatting fails.
     pub fn fmt_line(&mut self, line: &dyn std::fmt::Display) -> std::fmt::Result {
         use std::fmt::Write;
         match self.0 {
@@ -181,10 +197,9 @@ impl<'a, F: std::fmt::Write + 'a> std::fmt::Write for NewlineReplacer<'a, F> {
     }
 }
 
-/// A trait for the "standard" headers that have an associated `HeaderName`
-/// constant in the _http_ crate.
+/// A typed header with a corresponding [`http::header::HeaderName`] constant.
 pub trait StandardHeader: Header + Sized {
-    /// The `HeaderName` from the _http_ crate for this header.
+    /// Returns the [`http::header::HeaderName`] constant for this header.
     fn http_header_name() -> ::http::header::HeaderName;
 }
 
@@ -206,6 +221,7 @@ impl<'a> RawLike<'a> for &'a HeaderValue {
 
 #[doc(hidden)]
 #[macro_export]
+/// Implements [`StandardHeader`] for a typed header.
 macro_rules! standard_header {
     ($local:ident, $hname:ident) => {
         impl $crate::header::StandardHeader for $local {
@@ -219,6 +235,7 @@ macro_rules! standard_header {
 
 #[doc(hidden)]
 #[macro_export]
+/// Implements dereferencing for a tuple-style header wrapper.
 macro_rules! __deref__ {
     ($from:ty => $to:ty) => {
         impl ::std::ops::Deref for $from {
@@ -241,6 +258,7 @@ macro_rules! __deref__ {
 
 #[doc(hidden)]
 #[macro_export]
+/// Generates an internal header test module.
 macro_rules! __tm__ {
     ($id:ident, $tm:ident{$($tf:item)*}) => {
         #[allow(unused_imports)]
@@ -270,7 +288,10 @@ macro_rules! header {
     ($(#[$a:meta])*($id:ident, $n:expr) => ($item:ty)*) => {
         $(#[$a])*
         #[derive(Clone, Debug, PartialEq)]
-        pub struct $id(pub Vec<$item>);
+        pub struct $id(
+            /// The header's ordered values.
+            pub Vec<$item>
+        );
         $crate::__deref__!($id => Vec<$item>);
         impl $crate::header::Header for $id {
             fn header_name() -> &'static str {
@@ -299,7 +320,10 @@ macro_rules! header {
     ($(#[$a:meta])*($id:ident, $n:expr) => ($item:ty)+) => {
         $(#[$a])*
         #[derive(Clone, Debug, PartialEq)]
-        pub struct $id(pub Vec<$item>);
+        pub struct $id(
+            /// The header's ordered values.
+            pub Vec<$item>
+        );
         $crate::__deref__!($id => Vec<$item>);
         impl $crate::header::Header for $id {
             #[inline]
@@ -329,7 +353,10 @@ macro_rules! header {
     ($(#[$a:meta])*($id:ident, $n:expr) => [$value:ty]) => {
         $(#[$a])*
         #[derive(Clone, Debug, PartialEq)]
-        pub struct $id(pub $value);
+        pub struct $id(
+            /// The wrapped header value.
+            pub $value
+        );
         $crate::__deref__!($id => $value);
         impl $crate::header::Header for $id {
             #[inline]
@@ -359,7 +386,10 @@ macro_rules! header {
     ($(#[$a:meta])*($id:ident, $n:expr) => danger [$value:ty]) => {
         $(#[$a])*
         #[derive(Clone, Debug, PartialEq)]
-        pub struct $id(pub $value);
+        pub struct $id(
+            /// The wrapped header value.
+            pub $value
+        );
         $crate::__deref__!($id => $value);
         impl $crate::header::Header for $id {
             #[inline]
@@ -391,7 +421,7 @@ macro_rules! header {
         #[derive(Clone, Debug, PartialEq)]
         pub struct $id(::std::borrow::Cow<'static,$value>);
         impl $id {
-            /// Creates a new $id
+            /// Creates a header wrapper from an owned or borrowed value.
             pub fn new<I: Into<::std::borrow::Cow<'static,$value>>>(value: I) -> Self {
                 $id(value.into())
             }
@@ -432,9 +462,9 @@ macro_rules! header {
         $(#[$a])*
         #[derive(Clone, Debug, PartialEq)]
         pub enum $id {
-            /// Any value is a match
+            /// The wildcard `*`, testing whether a representation exists.
             Any,
-            /// Only the listed items are a match
+            /// The entity tags against which a representation is compared.
             Items(Vec<$item>),
         }
         impl $crate::header::Header for $id {

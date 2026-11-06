@@ -1,7 +1,12 @@
-/// HTTP Range header representation.
+/// A byte range selected from a `Range` header for a representation of known size.
+///
+/// [`Self::parse`] returns ranges in request order; [`crate::NamedFile`] serves
+/// only the first selected range, rather than a multipart range response.
 #[derive(Debug, Clone, Copy)]
 pub struct HttpRange {
+    /// Zero-based offset of the first selected byte.
     pub start: u64,
+    /// Number of selected bytes.
     pub length: u64,
 }
 
@@ -9,10 +14,32 @@ static PREFIX: &str = "bytes=";
 const PREFIX_LEN: usize = 6;
 
 impl HttpRange {
-    /// Parses Range HTTP header string as per RFC 2616.
+    /// Parses byte ranges, such as `bytes=0-9`, against the full size `size`.
     ///
-    /// `header` is HTTP Range header (e.g. `bytes=bytes=0-9`).
-    /// `size` is full size of response (file).
+    /// Accepts a case-insensitive `bytes=` prefix, comma-separated ranges, open
+    /// ends (`bytes=5-`), and suffix lengths (`bytes=-5`). Ends are inclusive
+    /// and clamped to the representation size. Oversized decimal values
+    /// saturate at [`u64::MAX`]. Empty headers or lists return an empty vector;
+    /// empty comma-separated entries are skipped.
+    ///
+    /// Non-overlapping ranges and zero-length suffixes are skipped when another
+    /// range is satisfiable. A nonzero suffix on an empty representation returns
+    /// a zero-length range; [`crate::NamedFile`] ignores that range.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(())` for an unsupported prefix, malformed positions in a
+    /// considered range (including extra `-` components such as `bytes=0-1-2`),
+    /// reversed bounds, or a nonempty set of entirely unsatisfiable ranges.
+    ///
+    /// ```
+    /// use ntex_files::HttpRange;
+    ///
+    /// let ranges = HttpRange::parse("bytes=0-9,-5", 100).unwrap();
+    /// assert_eq!((ranges[0].start, ranges[0].length), (0, 10));
+    /// assert_eq!((ranges[1].start, ranges[1].length), (95, 5));
+    /// assert!(HttpRange::parse("bytes=0-1-2", 100).is_err());
+    /// ```
     pub fn parse(header: &str, size: u64) -> Result<Vec<HttpRange>, ()> {
         if header.is_empty() {
             return Ok(Vec::new());
@@ -52,24 +79,23 @@ impl HttpRange {
                     }))
                 } else {
                     let start = parse_pos(start_str)?;
+                    let end = if end_str.is_empty() {
+                        None
+                    } else {
+                        let end = parse_pos(end_str)?;
+                        if start > end {
+                            return Err(());
+                        }
+                        Some(end)
+                    };
 
                     if start >= size {
                         no_overlap = true;
                         return Ok(None);
                     }
 
-                    let length = if end_str.is_empty() {
-                        // If no end is specified, range extends to end of the file.
-                        size - start
-                    } else {
-                        let end = parse_pos(end_str)?;
-
-                        if start > end {
-                            return Err(());
-                        }
-
-                        end.min(size - 1) - start + 1
-                    };
+                    // If no end is specified, range extends to end of the file.
+                    let length = end.map_or(size, |end| end.min(size - 1) + 1) - start;
 
                     Ok(Some(HttpRange { start, length }))
                 }
@@ -397,5 +423,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// STATEMENT: A range starting beyond the representation still has its end validated.
+    ///
+    /// HOW:
+    /// - Parse out-of-bounds ranges with a nonnumeric end and with a reversed end.
+    /// - Confirm both are rejected, while a well-formed out-of-bounds range is only unsatisfiable.
+    #[test]
+    fn out_of_bounds_ranges_validate_their_end() {
+        assert!(HttpRange::parse("bytes=200-abc", 100).is_err());
+        assert!(HttpRange::parse("bytes=200-150", 100).is_err());
+        assert!(HttpRange::parse("bytes=200-abc,0-1", 100).is_err());
+        let ranges = HttpRange::parse("bytes=200-300,0-1", 100).unwrap();
+        assert_eq!((ranges.len(), ranges[0].start, ranges[0].length), (1, 0, 2));
     }
 }

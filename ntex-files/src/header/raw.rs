@@ -2,16 +2,15 @@ use ntex::util::Bytes;
 use std::borrow::Cow;
 use std::fmt;
 
-/// Trait for raw bytes parsing access to header values (aka lines) for a single
-/// header name.
+/// Access to raw field-value lines for a single HTTP header name.
 pub trait RawLike<'a> {
-    /// The associated type of `Iterator` over values.
+    /// Iterator over borrowed field-value bytes.
     type IntoIter: Iterator<Item = &'a [u8]> + 'a;
 
-    /// Return the number of values (lines) in the headers.
+    /// Returns the number of field-value lines.
     fn len(&'a self) -> usize;
 
-    /// Return the bool if there are no values (lines) in the headers.
+    /// Returns `true` when there are no field-value lines.
     fn is_empty(&'a self) -> bool {
         self.len() == 0
     }
@@ -24,12 +23,22 @@ pub trait RawLike<'a> {
     fn iter(&'a self) -> Self::IntoIter;
 }
 
-/// A raw header value.
+/// Raw bytes for zero or more field-value lines of one header.
+///
+/// String and byte conversions store one line without validating its bytes;
+/// conversion from `Vec<Vec<u8>>` stores each element as a separate line.
+/// Use [`RawLike`] or iteration to access them.
+///
+/// # Panics
+///
+/// Indexing panics if the index is not less than the number of lines.
 #[derive(Clone, Debug)]
 pub struct Raw(Lines);
 
 impl Raw {
-    /// Append a line to this `Raw` header value.
+    /// Appends all lines from `val` without joining or validating their bytes.
+    ///
+    /// An empty group adds nothing; a single empty byte string adds one empty line.
     pub fn push<V: Into<Raw>>(&mut self, val: V) {
         let raw = val.into();
         match raw.0 {
@@ -302,6 +311,7 @@ impl<'a> IntoIterator for &'a Raw {
     }
 }
 
+/// Iterator over the field-value lines stored in a [`Raw`] header.
 pub struct RawLines<'a> {
     inner: &'a Lines,
     pos: usize,

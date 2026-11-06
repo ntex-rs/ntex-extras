@@ -82,24 +82,44 @@ pub fn fmt_comma_delimited<T: Display>(f: &mut fmt::Formatter, parts: &[T]) -> f
     Ok(())
 }
 
-/// An extended header parameter value (i.e., tagged with a character set and optionally,
-/// a language), as defined in [RFC 5987](https://tools.ietf.org/html/rfc5987#section-3.2).
+/// An RFC 5987 extended parameter: a charset label, optional language, and bytes.
+///
+/// Parsing validates `charset'language'value` syntax and percent-decodes bytes,
+/// but does not decode or validate them according to `charset`. Unknown charset
+/// labels are accepted. Formatting emits the charset, an empty or supplied
+/// language, and the byte value with percent encoding; direct construction
+/// does not validate the charset label.
+///
+/// # Formatting limitation
+///
+/// The current formatter leaves `@` and `=` unescaped in the byte value. Such
+/// output is not valid RFC 5987 syntax and is rejected when parsed again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtendedValue {
-    /// The character set that is used to encode the `value` to a string.
+    /// The declared charset of `value`; no charset decoding is performed.
     pub charset: Charset,
-    /// The human language details of the `value`, if available.
+    /// The optional language tag describing the parameter value.
     pub language_tag: Option<LanguageTag>,
-    /// The parameter value, as expressed in octets.
+    /// The percent-decoded octets, which need not be valid UTF-8.
     pub value: Vec<u8>,
 }
 
 /// Parses extended header parameter values (`ext-value`), as defined in
 /// [RFC 5987](https://tools.ietf.org/html/rfc5987#section-3.2).
 ///
-/// Extended values are denoted by parameter names that end with `*`.
+/// Takes the value only, without the parameter name or enclosing quotes.
+/// Parameter names ending in `*` select this syntax. Unknown syntactically valid
+/// MIME charset labels are accepted and normalized to ASCII uppercase.
+/// Percent-decoding preserves arbitrary octets, without charset conversion.
 ///
-/// ## ABNF
+/// # Errors
+///
+/// Rejects missing separators, an empty or malformed charset label, invalid
+/// language tags, malformed `%HH` escapes, and unescaped bytes outside
+/// `attr-char`, including spaces, non-ASCII bytes, `*`, and extra apostrophes.
+/// Empty language and value sections are valid.
+///
+/// # ABNF
 ///
 /// ```text
 /// ext-value     = charset  "'" [ language ] "'" value-chars
@@ -221,31 +241,23 @@ pub fn http_percent_encode(f: &mut fmt::Formatter, bytes: &[u8]) -> fmt::Result 
 }
 
 mod percent_encoding_http {
-    use percent_encoding::{AsciiSet, CONTROLS};
+    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
 
-    // This encode set is used for HTTP header values and is defined at
+    // Everything except `attr-char` from
     // https://tools.ietf.org/html/rfc5987#section-3.2
-    pub const HTTP_VALUE: &AsciiSet = &CONTROLS
-        .add(b' ')
-        .add(b'"')
-        .add(b'%')
-        .add(b'\'')
-        .add(b'(')
-        .add(b')')
-        .add(b'*')
-        .add(b',')
-        .add(b'/')
-        .add(b':')
-        .add(b';')
-        .add(b'<')
-        .add(b'-')
-        .add(b'>')
-        .add(b'?')
-        .add(b'[')
-        .add(b'\\')
-        .add(b']')
-        .add(b'{')
-        .add(b'}');
+    pub const HTTP_VALUE: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'!')
+        .remove(b'#')
+        .remove(b'$')
+        .remove(b'&')
+        .remove(b'+')
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'^')
+        .remove(b'_')
+        .remove(b'`')
+        .remove(b'|')
+        .remove(b'~');
 }
 
 #[cfg(test)]
@@ -430,5 +442,23 @@ mod tests {
             accepted.is_empty(),
             "accepted malformed extended values: {accepted:?}"
         );
+    }
+
+    /// STATEMENT: Formatting an extended value escapes every byte that is not an RFC 5987 `attr-char`.
+    ///
+    /// HOW:
+    /// - Format a value containing `@`, `=`, and `attr-char` punctuation.
+    /// - Confirm only the non-`attr-char` bytes are escaped and the output parses back to the same bytes.
+    #[test]
+    fn formatted_extended_values_round_trip() {
+        let value = b"a@b=c-d.e~!".to_vec();
+        let formatted = ExtendedValue {
+            charset: Charset::Ext("UTF-8".to_string()),
+            language_tag: None,
+            value: value.clone(),
+        }
+        .to_string();
+        assert_eq!(formatted, "UTF-8''a%40b%3Dc-d.e~!");
+        assert_eq!(parse_extended_value(&formatted).unwrap().value, value);
     }
 }

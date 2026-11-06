@@ -1,4 +1,13 @@
-//! Extract and process typed data from fields of a `multipart/form-data` request.
+//! Field readers for the typed [`MultipartForm`](struct@crate::MultipartForm) extractor.
+//!
+//! Use [`text::Text`] for UTF-8 plain-text values, [`json::Json`] for JSON,
+//! [`bytes::Bytes`] for raw in-memory data, and [`temp_file::TempFile`] for disk-backed
+//! uploads. Custom field types implement [`FieldReader`] and must debit [`Limits`]
+//! as they read body chunks. Readers run sequentially in the order parts arrive.
+//!
+//! Reader configuration is taken from request app state: [`text::TextConfig`],
+//! [`json::JsonConfig`], and [`temp_file::TempFileConfig`]. Global reader budgets
+//! are configured with [`MultipartFormConfig`](crate::MultipartFormConfig).
 use std::any::Any;
 
 use derive_more::{Deref, DerefMut};
@@ -11,19 +20,25 @@ pub mod text;
 
 use crate::{Field, MultipartError};
 
-/// Trait that data types to be used in a multipart form struct should implement.
+/// Converts a multipart field into a typed value asynchronously.
 ///
-/// It represents an asynchronous handler that processes a multipart field to produce `Self`.
+/// Implement this for custom field types used in a derived form. Read field body
+/// chunks and call [`Limits::try_consume_limits`] for each one before storing or
+/// processing it; the extractor does not enforce reader budgets independently.
+/// Readers are called sequentially, with shared total/memory budgets and the
+/// remaining budget for the current field name.
 pub trait FieldReader: Sized + Any {
-    /// The form will call this function to handle the field.
+    /// Reads one field, using the request and application state if needed.
+    ///
+    /// # Errors
+    ///
+    /// Propagate stream and limit errors. Reader-specific failures may be wrapped
+    /// in [`MultipartError::Field`] with the field name and an HTTP response.
     ///
     /// # Panics
     ///
-    /// When reading the `field` payload using its `Stream` implementation, polling (manually or via
-    /// `next()`/`try_next()`) may panic after the payload is exhausted. If this is a problem for
-    /// your implementation of this method, you should [`fuse()`] the `Field` first.
-    ///
-    /// [`fuse()`]: futures_util::stream::StreamExt::fuse()
+    /// Polling [`Field`] after EOF may panic. If your implementation polls beyond
+    /// `None`, use [`StreamExt::fuse`](futures::StreamExt::fuse) first.
     async fn read_field<St>(
         st: &St,
         req: &HttpRequest,
@@ -32,15 +47,32 @@ pub trait FieldReader: Sized + Any {
     ) -> Result<Self, MultipartError>;
 }
 
-/// Used to accumulate the state of the loaded fields.
+/// Type-erased values accumulated by field name while extracting a form.
 #[doc(hidden)]
 #[derive(Default, Deref, DerefMut)]
-pub struct State(pub HashMap<String, Box<dyn Any>>);
+pub struct State(
+    /// Values stored by field readers, keyed by the multipart field name.
+    pub HashMap<String, Box<dyn Any>>,
+);
 
-/// Trait that the field collection types implement, i.e. `Vec<T>`, `Option<T>`, or `T` itself.
+/// Collects fields into `T`, `Option<T>`, `Vec<T>`, or `Option<Vec<T>>`.
+///
+/// Scalar groups honor [`DuplicateField`]; vector groups always collect every
+/// occurrence in arrival order.
 #[doc(hidden)]
 pub trait FieldGroupReader: Sized + Any {
-    /// The form will call this function for each matching field.
+    /// Reads one matching part into the group's entry in `state`.
+    ///
+    /// # Errors
+    ///
+    /// Returns reader errors, or [`MultipartError::DuplicateField`] when a scalar
+    /// group already has a value and `duplicate_field` is [`DuplicateField::Deny`].
+    /// Ignored scalar duplicates are dropped without invoking the reader.
+    ///
+    /// # Panics
+    ///
+    /// Built-in vector groups panic if an existing entry has an incompatible type.
+    /// The `Option<Vec<T>>` implementation also requires a named field.
     async fn handle_field<St>(
         st: &St,
         req: &HttpRequest,
@@ -50,7 +82,18 @@ pub trait FieldGroupReader: Sized + Any {
         duplicate_field: DuplicateField,
     ) -> Result<(), MultipartError>;
 
-    /// Construct `Self` from the group of processed fields.
+    /// Removes the named entry from `state` and constructs the group.
+    ///
+    /// An absent entry gives `None` for optional groups and an empty vector for
+    /// `Vec<T>`.
+    ///
+    /// # Errors
+    ///
+    /// A required scalar `T` returns [`MultipartError::MissingField`] if absent.
+    ///
+    /// # Panics
+    ///
+    /// Built-in implementations panic if the stored value has an incompatible type.
     fn from_state(name: &str, state: &mut State) -> Result<Self, MultipartError>;
 }
 
@@ -197,26 +240,39 @@ where
     }
 }
 
+/// Policy for repeated scalar fields in a derived form; vector groups ignore it.
 #[doc(hidden)]
 pub enum DuplicateField {
-    /// Additional fields are not processed.
+    /// Keeps the first value; later occurrences bypass the reader and are drained.
     Ignore,
 
-    /// An error will be raised.
+    /// Rejects a second scalar occurrence with [`MultipartError::DuplicateField`].
     Deny,
 
-    /// All fields will be processed, the last one will replace all previous.
+    /// Reads every occurrence and retains only the last value.
     Replace,
 }
 
-/// Used to keep track of the remaining limits for the form and current field.
+/// Remaining byte budgets for a form and its current field name.
+///
+/// Readers must debit these with [`Self::try_consume_limits`]. The counters measure
+/// body bytes processed by readers, not framing, parser buffers, or deserialized
+/// allocations. Ignored parts are drained without debiting these counters.
 pub struct Limits {
+    /// Remaining body bytes across all processed fields, including disk-backed fields.
     pub total_limit_remaining: usize,
+    /// Remaining body bytes that readers may count as in-memory data.
     pub memory_limit_remaining: usize,
+    /// Remaining body bytes for this field name, shared across its processed occurrences.
+    ///
+    /// `None` means no field-specific limit; global budgets still apply.
     pub field_limit_remaining: Option<usize>,
 }
 
 impl Limits {
+    /// Creates byte budgets with no field-specific limit.
+    ///
+    /// Both arguments are byte counts; zero permits only empty processed bodies.
     pub fn new(total_limit: usize, memory_limit: usize) -> Self {
         Self {
             total_limit_remaining: total_limit,
@@ -225,13 +281,18 @@ impl Limits {
         }
     }
 
-    /// This function should be called within a [`FieldReader`] when reading each chunk of a field
-    /// to ensure that the form limits are not exceeded.
+    /// Debits `bytes` from the total and current field budgets, and from the memory
+    /// budget when `in_memory` is `true`.
     ///
-    /// # Arguments
+    /// Call this within a [`FieldReader`] for every chunk before accepting it.
+    /// [`TempFile`](temp_file::TempFile) passes `false`; in-memory readers pass `true`.
     ///
-    /// * `bytes` - The number of bytes being read from this chunk
-    /// * `in_memory` - Whether to consume from the memory limits
+    /// # Errors
+    ///
+    /// Returns [`MultipartError::Payload`] containing
+    /// [`PayloadError::Overflow`] if any applicable budget would be exceeded.
+    /// Debits are sequential (total, memory, field), not transactional: counters
+    /// already updated remain changed if a later budget fails.
     pub fn try_consume_limits(
         &mut self,
         bytes: usize,

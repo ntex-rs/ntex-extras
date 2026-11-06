@@ -18,12 +18,32 @@ use std::{convert::TryFrom, pin::Pin, rc::Rc};
 
 const MAX_HEADERS: usize = 32;
 
-/// The server-side implementation of `multipart/form-data` requests.
+/// Streaming parser for a `multipart/*` request body.
 ///
-/// This will parse the incoming stream into `MultipartItem` instances via its
-/// Stream implementation.
-/// `MultipartItem::Field` contains multipart field. `MultipartItem::Multipart`
-/// is used for nested multipart streams.
+/// Implements [`Stream`] with items of type `Result<Field, MultipartError>`, in
+/// wire order. Nested multipart fields are unsupported. For `multipart/form-data`,
+/// each part requires a `Content-Disposition: form-data` header and a `name`.
+/// Other multipart subtypes do not require these headers.
+///
+/// Consume and drop each [`Field`] before polling for the next. A live field keeps
+/// this stream pending, even if fully read. Dropping an unread field causes its
+/// remaining body to be drained on subsequent parent polls. If this parser is
+/// dropped first, polling the surviving field returns [`MultipartError::NotConsumed`].
+///
+/// Part-header blocks and boundary/preamble lines are limited to 16 KiB including
+/// delimiters; a part may have at most 32 headers. Field bodies have no aggregate
+/// size limit here; use [`MultipartForm`](struct@crate::MultipartForm) for reader-managed limits.
+/// In boundary-delimited bodies, a boundary prefix ends a field only when followed
+/// by CRLF or `--`. A closing boundary does not require a trailing CRLF.
+///
+/// # Errors
+///
+/// Stream items report [`MultipartError`] for invalid request or part headers,
+/// malformed boundaries, incomplete bodies, nested multipart fields, or payload
+/// errors. Oversized lines/header blocks produce [`MultipartError::Payload`]
+/// containing [`PayloadError::Overflow`], independent of chunking.
+///
+/// After an initial request-header error is returned, the stream ends.
 pub struct Multipart {
     safety: Safety,
     error: Option<MultipartError>,
@@ -56,7 +76,14 @@ struct InnerMultipart {
 }
 
 impl Multipart {
-    /// Create multipart instance for boundary.
+    /// Creates a parser from the request headers and a stream of body chunks.
+    ///
+    /// The `Content-Type` must be a parseable `multipart/*` media type with a
+    /// `boundary` parameter. Validation failures are stored, not returned here.
+    ///
+    /// The first stream item reports [`MultipartError::NoContentType`],
+    /// [`MultipartError::ParseContentType`], [`MultipartError::IncompatibleContentType`],
+    /// or [`MultipartError::Boundary`] if request-header validation fails.
     pub fn new<S>(headers: &HeaderMap, stream: S) -> Multipart
     where
         S: Stream<Item = Result<Bytes, PayloadError>> + Unpin + 'static,
@@ -122,6 +149,9 @@ impl Stream for Multipart {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         if let Some(err) = self.error.take() {
             Poll::Ready(Some(Err(err)))
+        } else if self.inner.is_none() {
+            // the content-type error has already been reported
+            Poll::Ready(None)
         } else if self.safety.current() {
             let this = self.get_mut();
             let mut inner = this.inner.as_mut().unwrap().borrow_mut();
@@ -1263,6 +1293,21 @@ mod tests {
         drop(sender);
         assert_eq!(get_whole_field(&mut field).await, "second");
         drop(field);
+        assert!(multipart.next().await.is_none());
+    }
+
+    /// STATEMENT: The stream ends after reporting a request content-type error.
+    ///
+    /// HOW:
+    /// - Create a `Multipart` without a `Content-Type` header.
+    /// - Confirm the first item is `NoContentType` and polling again yields `None` instead of panicking.
+    #[ntex::test]
+    async fn stream_ends_after_content_type_error() {
+        let mut multipart = Multipart::new(&HeaderMap::new(), futures::stream::empty());
+        assert!(matches!(
+            multipart.next().await,
+            Some(Err(MultipartError::NoContentType))
+        ));
         assert!(multipart.next().await.is_none());
     }
 }

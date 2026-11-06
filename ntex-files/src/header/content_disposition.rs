@@ -14,10 +14,13 @@ use regex::Regex;
 use std::fmt;
 use std::sync::LazyLock;
 
-/// The implied disposition of the content of the HTTP body.
+/// The intended processing of an HTTP body or multipart field.
+///
+/// Conversion from `&str` recognizes the standard types case-insensitively;
+/// unknown strings become [`Self::Ext`] without token validation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DispositionType {
-    /// Inline implies default processing
+    /// `inline`: process the body normally according to its media type.
     Inline,
 
     /// Attachment implies that the recipient should prompt the user to save the response locally,
@@ -29,7 +32,8 @@ pub enum DispositionType {
     /// optional filename.
     FormData,
 
-    /// Extension type.  Should be handled by recipients the same way as Attachment
+    /// An extension type, conventionally handled like [`Self::Attachment`].
+    /// The string is formatted unchanged and should be an HTTP token.
     Ext(String),
 }
 
@@ -47,38 +51,36 @@ impl<'a> From<&'a str> for DispositionType {
     }
 }
 
-/// A parameter to the disposition type.
+/// A `Content-Disposition` parameter.
+///
+/// Formatting quotes regular values, including `name`, `filename`, and unknown
+/// parameters, and escapes embedded quotes and backslashes. Extended parameters
+/// use the unquoted `charset'language'value` form. Direct construction does not
+/// validate parameter names or charset labels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DispositionParam {
-    /// For [`DispositionType::FormData`] (i.e. *multipart/form-data*), the name of an field from
-    /// the form.
+    /// The `name` of a [`DispositionType::FormData`] field, formatted as a quoted string.
     Name(String),
 
-    /// A plain file name.
+    /// A plain filename, formatted as a quoted string.
     ///
-    /// It is [not supposed](https://datatracker.ietf.org/doc/html/rfc6266#appendix-D) to contain
-    /// any non-ASCII characters when used in a *Content-Disposition* HTTP response header, where
-    /// [`FilenameExt`](DispositionParam::FilenameExt) with charset UTF-8 may be used instead
-    /// in case there are Unicode characters in file names.
+    /// For HTTP responses, an ASCII fallback paired with [`Self::FilenameExt`]
+    /// is recommended for Unicode names. This type also accepts non-ASCII text.
     Filename(String),
 
-    /// An extended file name. It must not exist for `ContentType::Formdata` according to
-    /// [RFC 7578 §4.2](https://datatracker.ietf.org/doc/html/rfc7578#section-4.2).
+    /// An RFC 5987 `filename*` value with a charset and optional language tag.
+    ///
+    /// [RFC 7578 §4.2](https://datatracker.ietf.org/doc/html/rfc7578#section-4.2)
+    /// prohibits this parameter in [`DispositionType::FormData`], but this type
+    /// and its parser do not enforce that restriction.
     FilenameExt(ExtendedValue),
 
-    /// An unrecognized regular parameter as defined in
-    /// [RFC 5987 §3.2.1](https://datatracker.ietf.org/doc/html/rfc5987#section-3.2.1) as
-    /// `reg-parameter`, in
-    /// [RFC 6266 §4.1](https://datatracker.ietf.org/doc/html/rfc6266#section-4.1) as
-    /// `token "=" value`. Recipients should ignore unrecognizable parameters.
+    /// An unrecognized regular parameter stored as `(name, value)`.
+    /// The value is formatted as a quoted string; the name should be a token.
     Unknown(String, String),
 
-    /// An unrecognized extended parameter as defined in
-    /// [RFC 5987 §3.2.1](https://datatracker.ietf.org/doc/html/rfc5987#section-3.2.1) as
-    /// `ext-parameter`, in
-    /// [RFC 6266 §4.1](https://datatracker.ietf.org/doc/html/rfc6266#section-4.1) as
-    /// `ext-token "=" ext-value`. The single trailing asterisk is not included. Recipients should
-    /// ignore unrecognizable parameters.
+    /// An unrecognized RFC 5987 parameter stored as `(name, extended_value)`.
+    /// The name excludes the trailing `*`, which formatting adds back.
     UnknownExt(String, ExtendedValue),
 }
 
@@ -101,21 +103,19 @@ impl DispositionParam {
         self.as_filename_ext().is_some()
     }
 
-    /// Returns `true` if the parameter is [`Unknown`](DispositionParam::Unknown) and the `name`
+    /// Returns `true` for [`Unknown`](DispositionParam::Unknown) with a case-insensitive name match.
     #[inline]
-    /// matches.
     pub fn is_unknown<T: AsRef<str>>(&self, name: T) -> bool {
         self.as_unknown(name).is_some()
     }
 
-    /// Returns `true` if the parameter is [`UnknownExt`](DispositionParam::UnknownExt) and the
-    /// `name` matches.
+    /// Returns `true` for [`UnknownExt`](DispositionParam::UnknownExt) with a case-insensitive name match.
     #[inline]
     pub fn is_unknown_ext<T: AsRef<str>>(&self, name: T) -> bool {
         self.as_unknown_ext(name).is_some()
     }
 
-    /// Returns the name if applicable.
+    /// Returns the form field name for [`Self::Name`], otherwise `None`.
     #[inline]
     pub fn as_name(&self) -> Option<&str> {
         match self {
@@ -124,7 +124,7 @@ impl DispositionParam {
         }
     }
 
-    /// Returns the filename if applicable.
+    /// Returns the plain filename for [`Self::Filename`], otherwise `None`.
     #[inline]
     pub fn as_filename(&self) -> Option<&str> {
         match self {
@@ -133,7 +133,7 @@ impl DispositionParam {
         }
     }
 
-    /// Returns the filename* if applicable.
+    /// Returns the extended `filename*` for [`Self::FilenameExt`], otherwise `None`.
     #[inline]
     pub fn as_filename_ext(&self) -> Option<&ExtendedValue> {
         match self {
@@ -142,8 +142,7 @@ impl DispositionParam {
         }
     }
 
-    /// Returns the value of the unrecognized regular parameter if it is
-    /// [`Unknown`](DispositionParam::Unknown) and the `name` matches.
+    /// Returns the [`Self::Unknown`] value when `name` matches case-insensitively.
     #[inline]
     pub fn as_unknown<T: AsRef<str>>(&self, name: T) -> Option<&str> {
         match self {
@@ -156,8 +155,8 @@ impl DispositionParam {
         }
     }
 
-    /// Returns the value of the unrecognized extended parameter if it is
-    /// [`Unknown`](DispositionParam::Unknown) and the `name` matches.
+    /// Returns the [`Self::UnknownExt`] value when `name` matches case-insensitively.
+    /// Pass the name without its trailing `*`.
     #[inline]
     pub fn as_unknown_ext<T: AsRef<str>>(&self, name: T) -> Option<&ExtendedValue> {
         match self {
@@ -171,40 +170,64 @@ impl DispositionParam {
     }
 }
 
-/// A `Content-Disposition` header, (re)defined in [RFC6266](https://tools.ietf.org/html/rfc6266).
+/// A `Content-Disposition` field value describing how to handle a body.
 ///
-/// The Content-Disposition response header field is used to convey
-/// additional information about how to process the response payload, and
-/// also can be used to attach additional metadata, such as the filename
-/// to use when saving the response payload locally.
+/// Defined for responses by [RFC 6266](https://datatracker.ietf.org/doc/html/rfc6266)
+/// and for multipart form fields by [RFC 7578](https://datatracker.ietf.org/doc/html/rfc7578).
+/// [`Header::parse_header`] takes the value only, without the header name.
+/// Disposition types and parameter names are case-insensitive. Duplicate
+/// parameters are retained in order; getters return the first matching value.
 ///
-/// # ABNF
+/// Regular values are tokens or quoted strings. Backslash escapes inside quoted
+/// strings are removed; plain values are not percent-decoded. Formatting always
+/// quotes regular values, including `name`. Extended values are percent-decoded
+/// to bytes, not decoded according to their declared charset.
+///
+/// # Errors
+///
+/// Parsing rejects empty or multiple raw lines, non-token disposition types or
+/// parameter names, a bare `*` parameter name, missing `=`, invalid unquoted
+/// values, unterminated quoted strings, and characters after a closing quote.
+/// Extended values require a nonempty syntactically valid MIME charset label,
+/// an optional valid language tag, well-formed percent escapes, and only RFC 5987
+/// `attr-char` bytes when unescaped. Unknown charset labels are accepted;
+/// the encoded bytes are not checked for validity in that charset.
+///
+/// # Value grammar
 ///
 /// ```text
-/// content-disposition = "Content-Disposition" ":"
-///                       disposition-type *( ";" disposition-parm )
-///
-/// disposition-type    = "inline" | "attachment" | disp-ext-type
-///                       ; case-insensitive
-///
-/// disp-ext-type       = token
-///
-/// disposition-parm    = filename-parm | disp-ext-parm
-///
-/// filename-parm       = "filename" "=" value
-///                     | "filename*" "=" ext-value
-///
-/// disp-ext-parm       = token "=" value
-///                     | ext-token "=" ext-value
-///
-/// ext-token           = <the characters in token, followed by "*">
+/// content-disposition = disposition-type *( ";" disposition-parm )
+/// disposition-type    = "inline" / "attachment" / "form-data" / token
+/// disposition-parm    = token "=" ( token / quoted-string )
+///                     / ext-token "=" ext-value
+/// ext-token           = token followed by "*"
+/// ext-value           = charset "'" [ language ] "'" *( pct-encoded / attr-char )
+/// pct-encoded         = "%" HEXDIG HEXDIG
 /// ```
 ///
+/// The parser permits surrounding whitespace at separators. `token` follows
+/// [RFC 9110 §5.6.2](https://datatracker.ietf.org/doc/html/rfc9110#section-5.6.2);
+/// `charset` and `attr-char` follow
+/// [RFC 5987 §3.2.1](https://datatracker.ietf.org/doc/html/rfc5987#section-3.2.1).
+///
+/// ```
+/// use ntex_files::header::{ContentDisposition, Header, Raw};
+///
+/// let raw = Raw::from("form-data; name=upload; filename=report.txt");
+/// let header = ContentDisposition::parse_header(&raw).unwrap();
+/// assert_eq!(header.get_name(), Some("upload"));
+/// assert_eq!(header.to_string(), "form-data; name=\"upload\"; filename=\"report.txt\"");
+///
+/// let raw = Raw::from("attachment; filename*=UTF-8''report%20%C3%A9.txt");
+/// let header = ContentDisposition::parse_header(&raw).unwrap();
+/// assert_eq!(header.get_filename_ext().unwrap().value, "report é.txt".as_bytes());
+/// assert!(ContentDisposition::parse_header(&Raw::from("attachment; filename=a b")).is_err());
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContentDisposition {
-    /// The disposition
+    /// The intended processing of the body.
     pub disposition: DispositionType,
-    /// Disposition parameters
+    /// Parameters in their original or constructed order; duplicates are retained.
     pub parameters: Vec<DispositionParam>,
 }
 
@@ -224,7 +247,7 @@ impl ContentDisposition {
         matches!(self.disposition, DispositionType::FormData)
     }
 
-    /// Returns `true` if type is [`Ext`](DispositionType::Ext) and the `disp_type` matches.
+    /// Returns `true` for [`DispositionType::Ext`] matching `disp_type` case-insensitively.
     pub fn is_ext(&self, disp_type: impl AsRef<str>) -> bool {
         matches!(
             self.disposition,
@@ -232,32 +255,33 @@ impl ContentDisposition {
         )
     }
 
-    /// Return the value of *name* if exists.
+    /// Returns the first `name` parameter, if present.
     pub fn get_name(&self) -> Option<&str> {
         self.parameters.iter().find_map(DispositionParam::as_name)
     }
 
-    /// Return the value of *filename* if exists.
+    /// Returns the first plain `filename` parameter, without preferring `filename*`.
     pub fn get_filename(&self) -> Option<&str> {
         self.parameters
             .iter()
             .find_map(DispositionParam::as_filename)
     }
 
-    /// Return the value of *filename\** if exists.
+    /// Returns the first extended `filename*` parameter, if present.
     pub fn get_filename_ext(&self) -> Option<&ExtendedValue> {
         self.parameters
             .iter()
             .find_map(DispositionParam::as_filename_ext)
     }
 
-    /// Return the value of the parameter which the `name` matches.
+    /// Returns the first unknown regular parameter matching `name` case-insensitively.
     pub fn get_unknown(&self, name: impl AsRef<str>) -> Option<&str> {
         let name = name.as_ref();
         self.parameters.iter().find_map(|p| p.as_unknown(name))
     }
 
-    /// Return the value of the extended parameter which the `name` matches.
+    /// Returns the first unknown extended parameter matching `name` case-insensitively.
+    /// Pass the name without its trailing `*`.
     pub fn get_unknown_ext(&self, name: impl AsRef<str>) -> Option<&ExtendedValue> {
         let name = name.as_ref();
         self.parameters.iter().find_map(|p| p.as_unknown_ext(name))

@@ -2,6 +2,8 @@
 
 ## [4.3.0] - 2026-11-06
 
+* Make `Default` for the `Cors` builder equivalent to `Cors::new()`; `build()` no longer panics
+
 * Treat only `OPTIONS` requests with `Access-Control-Request-Method` as preflight requests
 
 * Add `Vary: Origin` to preflight responses and to responses for requests without `Origin`

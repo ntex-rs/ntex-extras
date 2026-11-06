@@ -1,6 +1,6 @@
 //! User sessions for the ntex web framework.
 //!
-//! The crate provides a backend-independent [`Session`] api. A session
+//! The crate provides a backend-independent [`Session`] API. A session
 //! middleware loads the session state for each request and writes changes
 //! back to the response; handlers access the state through the [`Session`]
 //! extractor or the [`UserSession`] trait.
@@ -12,35 +12,24 @@
 //! default `cookie-session` feature). Other backends can be built on top of
 //! [`Session::set_session`] and [`Session::get_changes`].
 //!
-//! ```rust,no_run
-//! use ntex::web::{self, App, HttpResponse, WebError};
-//! use ntex_session::{Session, CookieSession};
-//! use serde_json::error::Error as JsonError;
+//! # Example
 //!
-//! fn index(session: Session) -> Result<&'static str, JsonError> {
-//!     // access session data
-//!     if let Some(count) = session.get::<i32>("counter")? {
-//!         println!("SESSION value: {}", count);
-//!         session.set("counter", count+1)?;
-//!     } else {
-//!         session.set("counter", 1)?;
-//!     }
+//! ```rust
+//! use ntex::web::{self, App};
+//! use ntex_session::{CookieSession, Session};
 //!
+//! async fn index(session: Session) -> Result<&'static str, serde_json::Error> {
+//!     let count = session.get::<u32>("counter")?.unwrap_or(0);
+//!     session.set("counter", count + 1)?;
 //!     Ok("Welcome!")
 //! }
 //!
-//! #[ntex::main]
-//! async fn main() -> std::io::Result<()> {
-//!     web::server(
-//!         async |_| App::new().middleware(
-//!               CookieSession::signed(&[0; 32]) // <- create cookie based session middleware
-//!                     .secure(false)
-//!              )
-//!             .service(web::resource("/").to(|| async { HttpResponse::Ok() })))
-//!         .bind("127.0.0.1:59880", ntex::SharedCfg::default())?
-//!         .run()
-//!         .await
-//! }
+//! let app = App::default()
+//!     .middleware(
+//!         // Use a secret, stable key in production; disable Secure only for local HTTP.
+//!         CookieSession::signed(&[0; 32]).secure(false),
+//!     )
+//!     .service(web::resource("/").to(index));
 //! ```
 use std::{cell::RefCell, convert::Infallible, rc::Rc};
 
@@ -59,10 +48,13 @@ pub use crate::cookie::{CookieSession, CookieSessionError, CookieSessionMiddlewa
 /// The high-level interface you use to read and modify session data.
 ///
 /// `Session` is an extractor, it can also be obtained with
-/// [`UserSession::get_session`] from an `HttpRequest`, `WebRequest` or
-/// `RequestHead`. All handles for the same request share the same state.
+/// [`UserSession::get_session`] from an [`HttpRequest`], [`WebRequest`] or
+/// [`RequestHead`]. All handles for the same request share the same state.
+/// Without session middleware, the state is not persisted between requests.
 ///
-/// Once the session is [purged](Session::purge), further changes are ignored.
+/// Once the session is [purged](Session::purge), further handler mutations
+/// through [`set`](Self::set), [`remove`](Self::remove), [`clear`](Self::clear),
+/// or [`renew`](Self::renew) are ignored.
 ///
 /// ```rust
 /// use ntex_session::Session;
@@ -113,7 +105,8 @@ impl UserSession for RequestHead {
 /// update the client.
 #[derive(PartialEq, Clone, Debug, Default)]
 pub enum SessionStatus {
-    /// Session state was modified with `set`, `remove` or `clear`.
+    /// A call to [`Session::set`], [`Session::remove`], or [`Session::clear`]
+    /// marked the state changed, even if it did not alter any stored value.
     Changed,
     /// Session was purged, the backend should remove it.
     Purged,
@@ -134,8 +127,11 @@ struct SessionInner {
 impl Session {
     /// Get a value from the session.
     ///
-    /// Returns `Ok(None)` if the key is not set, or an error if the stored
-    /// value cannot be deserialized into `T`.
+    /// Returns `Ok(None)` if the key is not set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stored JSON cannot be deserialized into `T`.
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, JsonError> {
         if let Some(s) = self.0.borrow().state.get(key) {
             Ok(Some(serde_json::from_str(s)?))
@@ -146,8 +142,13 @@ impl Session {
 
     /// Set a value in the session.
     ///
-    /// Returns an error if the value cannot be serialized. Ignored if the
-    /// session is purged.
+    /// Marks the session changed before serializing. Ignored if the session
+    /// is purged, in which case the value is not serialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the value cannot be serialized. The existing value
+    /// is preserved, but the session remains marked changed.
     pub fn set<T: Serialize>(&self, key: &str, value: T) -> Result<(), JsonError> {
         let mut inner = self.0.borrow_mut();
         if inner.status != SessionStatus::Purged {
@@ -183,17 +184,20 @@ impl Session {
 
     /// Remove the session, both client and server side.
     ///
-    /// All values are dropped and later changes in the same request are
-    /// ignored.
+    /// All values are dropped, and later calls to [`set`](Self::set),
+    /// [`remove`](Self::remove), [`clear`](Self::clear), and [`renew`](Self::renew)
+    /// in the same request are ignored. The backend performs the removal.
     pub fn purge(&self) {
         let mut inner = self.0.borrow_mut();
         inner.status = SessionStatus::Purged;
         inner.state.clear();
     }
 
-    /// Renew the session key, assigning existing session state to the new key.
+    /// Marks the session for reissue while preserving its existing state.
     ///
-    /// Ignored if the session is purged.
+    /// The backend chooses the renewal mechanism; [`CookieSession`] rewrites
+    /// the cookie without rotating its signing or encryption key. Ignored if
+    /// the session is purged.
     pub fn renew(&self) {
         let mut inner = self.0.borrow_mut();
         if inner.status != SessionStatus::Purged {
@@ -203,19 +207,22 @@ impl Session {
 
     /// Load session state into the request.
     ///
-    /// Used by session backends before calling the inner service. Values must
-    /// be JSON encoded, as returned by [`Session::get_changes`].
+    /// Used by session backends before calling the inner service. Extends the
+    /// current state, overwriting matching keys without changing the status.
+    /// Values must be JSON encoded, as returned by [`Session::get_changes`];
+    /// this method does not validate them.
     pub fn set_session<St>(data: impl Iterator<Item = (String, String)>, req: &WebRequest<St>) {
         let session = Session::get_session(&mut req.extensions_mut());
         let mut inner = session.0.borrow_mut();
         inner.state.extend(data);
     }
 
-    /// Take the session status and state from the response's request.
+    /// Drains the state from the response's request and returns its current status.
     ///
     /// Used by session backends after the inner service returns. The state is
-    /// moved out of the session. Returns `(SessionStatus::Unchanged, None)` if
-    /// the session was never accessed.
+    /// moved out of all shared handles, but the status is not reset. Returns
+    /// `None` for the state only if no session was created; otherwise returns
+    /// `Some`, even for empty or unchanged state.
     pub fn get_changes(
         res: &mut WebResponse,
     ) -> (

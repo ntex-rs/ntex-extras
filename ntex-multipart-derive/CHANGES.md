@@ -2,6 +2,8 @@
 
 ## [4.2.0] - 2026-11-06
 
+* Report size limits that do not fit in `usize` as a compile error instead of panicking
+
 * Support generic structs in `MultipartForm` derive
 
 ## [4.1.0] - 2026-10-05

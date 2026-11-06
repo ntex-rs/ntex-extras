@@ -32,7 +32,13 @@ impl Default for Flags {
     }
 }
 
-/// A file with an associated name.
+/// An opened file with a path used to select response headers.
+///
+/// Return this type from a web handler or call [`Self::into_response`] to stream
+/// the file. Metadata and modification time are captured at construction; they
+/// are not refreshed if the file later changes. This type dereferences to
+/// [`File`], but serving seeks to the selected offset rather than using its
+/// current cursor.
 #[derive(Debug)]
 pub struct NamedFile {
     path: PathBuf,
@@ -61,26 +67,42 @@ impl std::fmt::Debug for Flags {
 }
 
 impl NamedFile {
-    /// Creates an instance from a previously opened file.
+    /// Creates a response file from an already opened [`File`] and a display path.
     ///
-    /// The given `path` need not exist and is only used to determine the `ContentType` and
-    /// `ContentDisposition` headers.
+    /// `path` need not exist: it supplies the filename and extension used for
+    /// `Content-Disposition` and `Content-Type`, and is returned by [`Self::path`].
+    /// An unknown extension uses `application/octet-stream`.
+    ///
+    /// The default disposition is `inline` for `image/*`, `text/*`, `audio/*`,
+    /// `video/*`, and the application subtypes `javascript`, `json`, `wasm`, and
+    /// `xhtml`; all others use `attachment`. The filename is converted with
+    /// [`OsStr::to_string_lossy`](std::ffi::OsStr::to_string_lossy), and line feed,
+    /// vertical tab, form feed, and carriage return become `%0A`, `%0B`, `%0C`,
+    /// and `%0D` in the plain filename. Non-ASCII names also get a UTF-8
+    /// `filename*` parameter containing the original filename bytes after the
+    /// lossy conversion.
+    ///
+    /// The default status is `200 OK`; `Content-Disposition`, `ETag`, and
+    /// `Last-Modified` are enabled. Metadata is read from `file`, not `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::InvalidInput`] if `path` has no filename, or an
+    /// I/O error if metadata cannot be read. The file must support reading and
+    /// seeking when the response is streamed; this is not checked here.
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```no_run
+    /// use std::{fs::File, io};
     /// use ntex_files::NamedFile;
-    /// use std::io::{self, Write};
-    /// use std::env;
-    /// use std::fs::File;
     ///
-    /// fn main() -> io::Result<()> {
-    ///     let mut file = File::create("foo.txt")?;
-    ///     file.write_all(b"Hello, world!")?;
-    ///     let named_file = NamedFile::from_file(file, "bar.txt")?;
-    ///     # std::fs::remove_file("foo.txt");
-    ///     Ok(())
-    /// }
+    /// # fn main() -> io::Result<()> {
+    /// let file = File::open("source.bin")?;
+    /// let named_file = NamedFile::from_file(file, "download.txt")?;
+    /// assert_eq!(named_file.path(), std::path::Path::new("download.txt"));
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_file<P: AsRef<Path>>(file: File, path: P) -> io::Result<NamedFile> {
         let path = path.as_ref().to_path_buf();
@@ -153,35 +175,44 @@ impl NamedFile {
         })
     }
 
-    /// Attempts to open a file in read-only mode.
+    /// Opens `path` read-only and constructs a [`NamedFile`] with that path.
     ///
-    /// # Examples
+    /// This synchronous operation follows symlinks and does not perform the
+    /// URL segment validation or base-directory containment checks of [`crate::Files`].
     ///
-    /// ```rust
+    /// # Errors
+    ///
+    /// Returns an I/O error if the file cannot be opened, or any error described
+    /// by [`Self::from_file`].
+    ///
+    /// ```no_run
     /// use ntex_files::NamedFile;
     ///
-    /// let file = NamedFile::open("foo.txt");
+    /// # fn main() -> std::io::Result<()> {
+    /// let file = NamedFile::open("report.txt")?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<NamedFile> {
         Self::from_file(File::open(&path)?, path)
     }
 
-    /// Returns reference to the underlying `File` object.
+    /// Returns a reference to the underlying [`File`].
     #[inline]
     pub fn file(&self) -> &File {
         &self.file
     }
 
-    /// Retrieve the path of this file.
+    /// Returns the path supplied to [`Self::open`] or [`Self::from_file`].
     ///
-    /// # Examples
+    /// This is not necessarily the path of the underlying file or a canonical path.
     ///
-    /// ```rust
+    /// ```no_run
     /// use ntex_files::NamedFile;
     ///
-    /// # fn path() -> std::io::Result<()> {
-    /// let file = NamedFile::open("test.txt")?;
-    /// assert_eq!(file.path().as_os_str(), "foo.txt");
+    /// # fn main() -> std::io::Result<()> {
+    /// let file = NamedFile::open("report.txt")?;
+    /// assert_eq!(file.path(), std::path::Path::new("report.txt"));
     /// # Ok(())
     /// # }
     /// ```
@@ -190,27 +221,31 @@ impl NamedFile {
         self.path.as_path()
     }
 
-    /// Set response **Status Code**
+    /// Sets the response status, which defaults to `200 OK`.
+    ///
+    /// A status other than `200 OK` streams the entire file without evaluating
+    /// conditional or range requests, or adding `ETag`, `Last-Modified`, or
+    /// `Accept-Ranges`.
     pub fn set_status_code(mut self, status: StatusCode) -> Self {
         self.status_code = status;
         self
     }
 
-    /// Set the MIME Content-Type for serving this file. By default
-    /// the Content-Type is inferred from the filename extension.
+    /// Sets `Content-Type`, overriding the type inferred from the path extension.
+    ///
+    /// Does not recompute the disposition type; use [`Self::set_content_disposition`]
+    /// to change it separately.
     #[inline]
     pub fn set_content_type(mut self, mime_type: mime::Mime) -> Self {
         self.content_type = mime_type;
         self
     }
 
-    /// Set the Content-Disposition for serving this file. This allows
-    /// changing the inline/attachment disposition as well as the filename
-    /// sent to the peer. By default the disposition is `inline` for text,
-    /// image, and video content types, and `attachment` otherwise, and
-    /// the filename is taken from the path provided in the `open` method
-    /// after converting it to UTF-8 using.
-    /// [to_string_lossy](https://doc.rust-lang.org/std/ffi/struct.OsStr.html#method.to_string_lossy).
+    /// Sets and enables `Content-Disposition`, including its filename parameters.
+    ///
+    /// See [`Self::from_file`] for the default MIME-based disposition and filename
+    /// handling. This also re-enables a previously disabled header; it does not
+    /// change `Content-Type`.
     #[inline]
     pub fn set_content_disposition(mut self, cd: header::ContentDisposition) -> Self {
         self.content_disposition = cd;
@@ -218,16 +253,17 @@ impl NamedFile {
         self
     }
 
-    /// Disable `Content-Disposition` header.
-    ///
-    /// By default Content-Disposition` header is enabled.
+    /// Disables the `Content-Disposition` header, which is enabled by default.
     #[inline]
     pub fn disable_content_disposition(mut self) -> Self {
         self.flags.remove(Flags::CONTENT_DISPOSITION);
         self
     }
 
-    /// Set content encoding for serving this file
+    /// Sets the response encoding override used by ntex's encoding middleware.
+    ///
+    /// Does not transform the file bytes itself. No override is set by default;
+    /// successful partial responses force [`ContentEncoding::Identity`].
     #[inline]
     pub fn set_content_encoding(mut self, enc: ContentEncoding) -> Self {
         self.encoding = Some(enc);
@@ -235,18 +271,23 @@ impl NamedFile {
     }
 
     #[inline]
-    ///Specifies whether to use ETag or not.
+    /// Enables or disables `ETag` emission and use as a conditional validator.
     ///
-    ///Default is true.
+    /// Defaults to `true`. Without a custom tag, metadata supplies a strong tag
+    /// only when modification time is available and at or after the Unix epoch.
+    /// Disabling it removes the validator for explicit tag comparisons and
+    /// `If-Range`; wildcard `If-Match` and `If-None-Match` still test file existence.
     pub fn use_etag(mut self, value: bool) -> Self {
         self.flags.set(Flags::ETAG, value);
         self
     }
 
     #[inline]
-    ///Specifies whether to use Last-Modified or not.
+    /// Enables or disables `Last-Modified` emission and date-based validators.
     ///
-    ///Default is true.
+    /// Defaults to `true`. The header is omitted if modification time is
+    /// unavailable, before the Unix epoch, or after the end of year 9999.
+    /// HTTP dates have whole-second precision.
     pub fn use_last_modified(mut self, value: bool) -> Self {
         self.flags.set(Flags::LAST_MD, value);
         self
@@ -260,13 +301,14 @@ impl NamedFile {
     /// The given tag is sent in the `ETag` header and used to evaluate the
     /// conditional request headers `If-Match` and `If-None-Match`.
     ///
-    /// A strong tag must change whenever the bytes of the file change; if it does
-    /// not, use [`EntityTag::weak`](header::EntityTag::weak). `If-Match` uses the
-    /// strong comparison, so a weak tag never satisfies it.
+    /// A strong tag must change whenever the bytes change. Use
+    /// [`EntityTag::weak`](header::EntityTag::weak) when the version identifies
+    /// semantic equivalence rather than byte-for-byte identity. `If-Match` uses
+    /// strong comparison, so an explicit weak tag never satisfies it.
     ///
-    /// This also enables the `ETag` header; a later `use_etag(false)` disables it
-    /// again. If the modification time of the file does not reflect the content
-    /// version, consider disabling `Last-Modified` with `use_last_modified(false)`.
+    /// This also enables the header; a later [`Self::use_etag`] call can disable it.
+    /// If modification time does not reflect the content version, consider
+    /// disabling `Last-Modified` with [`Self::use_last_modified`].
     ///
     /// ```rust,no_run
     /// use ntex_files::{NamedFile, header::EntityTag};
@@ -326,6 +368,36 @@ impl NamedFile {
         Some(mtime.into())
     }
 
+    /// Builds a streaming response, evaluating `req` against the captured metadata.
+    ///
+    /// For the default `200 OK` status, sends `Content-Type`, `Accept-Ranges:
+    /// bytes`, and enabled `Content-Disposition`, `ETag`, and `Last-Modified`
+    /// headers when their values are available. Reads run on the blocking thread
+    /// pool. Read and seek failures are reported by the response body stream.
+    ///
+    /// Conditional requests take precedence over ranges. `If-Match` uses strong
+    /// tag comparison and takes precedence over `If-Unmodified-Since`;
+    /// `If-None-Match` uses weak comparison and takes precedence over
+    /// `If-Modified-Since`. Preconditions are ignored for `CONNECT`, `OPTIONS`,
+    /// and `TRACE`. An unchanged `GET`/`HEAD` response returns `304 Not Modified`;
+    /// failed preconditions, including matching `If-None-Match` on other
+    /// applicable methods, return `412 Precondition Failed`.
+    ///
+    /// Byte ranges are evaluated only for `GET`. Other range units are ignored.
+    /// A nonmatching or invalid `If-Range` ignores the range; entity tags must
+    /// match strongly and dates must equal the available `Last-Modified` value.
+    /// Only the first selected range is served, with `206 Partial Content`,
+    /// `Content-Range`, and identity encoding; no multipart response is generated.
+    /// A zero-length suffix result for an empty file is ignored.
+    ///
+    /// # Errors
+    ///
+    /// An evaluated `Range` value that cannot be converted to text returns
+    /// `400 Bad Request`. Malformed, empty, or wholly unsatisfiable byte range
+    /// lists return `416 Range Not Satisfiable` with `Content-Range: bytes */size`.
+    /// Failed preconditions return `412 Precondition Failed` as described above.
+    /// These responses have no file body. A non-OK configured status bypasses
+    /// these checks; see [`Self::set_status_code`].
     pub fn into_response(self, req: &HttpRequest) -> HttpResponse {
         if self.status_code != StatusCode::OK {
             let mut resp = HttpResponse::builder(self.status_code);

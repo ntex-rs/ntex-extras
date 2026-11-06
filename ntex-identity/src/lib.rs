@@ -1,48 +1,40 @@
-//! Request identity service for ntex applications.
+//! Request identity middleware for ntex applications.
 //!
-//! [**IdentityService**](struct.IdentityService.html) middleware can be
-//! used with different policies types to store identity information.
+//! [`IdentityService`] loads and persists an identity through an
+//! [`IdentityPolicy`]. Handlers use the [`Identity`] extractor to read, remember,
+//! or forget it; other request consumers can use [`RequestIdentity`].
+//! [`CookieIdentityPolicy`] stores identities in authenticated, encrypted cookies.
+//! Custom policies can use other storage backends.
 //!
-//! By default, only cookie identity policy is implemented. Other backend
-//! implementations can be added separately.
+//! The middleware must load the identity before handlers or other middleware
+//! access it. An identity is application-defined data, not proof of credentials:
+//! authenticate the user before calling [`Identity::remember`].
 //!
-//! [**CookieIdentityPolicy**](struct.CookieIdentityPolicy.html)
-//! uses cookies as identity storage.
-//!
-//! To access current request identity
-//! [**Identity**](struct.Identity.html) extractor should be used.
+//! # Example
 //!
 //! ```rust
 //! use ntex::web;
-//! use ntex_identity::{Identity, CookieIdentityPolicy, IdentityService};
+//! use ntex_identity::{CookieIdentityPolicy, Identity, IdentityService};
 //!
 //! async fn index(id: Identity) -> String {
-//!     // access request identity
-//!     if let Some(id) = id.identity() {
-//!         format!("Welcome! {}", id)
-//!     } else {
-//!         "Welcome Anonymous!".to_owned()
+//!     match id.identity() {
+//!         Some(name) => format!("Welcome, {name}!"),
+//!         None => "Welcome, anonymous!".to_owned(),
 //!     }
 //! }
 //!
-//! async fn login(id: Identity) -> web::HttpResponse {
-//!     id.remember("User1".to_owned()); // <- remember identity
-//!     web::HttpResponse::Ok().build()
-//! }
-//!
 //! async fn logout(id: Identity) -> web::HttpResponse {
-//!     id.forget();                      // <- remove identity
+//!     id.forget();
 //!     web::HttpResponse::Ok().build()
 //! }
 //!
-//! let app = web::App::default().middleware(IdentityService::new(
-//!     // <- create identity middleware
-//!     CookieIdentityPolicy::new(&[0; 32])    // <- create cookie identity policy
-//!           .name("auth-cookie")
-//!           .secure(false)))
-//!     .service(web::resource("/index.html").to(index))
-//!     .service(web::resource("/login.html").to(login))
-//!     .service(web::resource("/logout.html").to(logout));
+//! let app = web::App::default()
+//!     .middleware(IdentityService::new(
+//!         // Use a secret, stable key in production; disable Secure only for local HTTP.
+//!         CookieIdentityPolicy::new(&[0; 32]).secure(false),
+//!     ))
+//!     .service(web::resource("/").to(index))
+//!     .service(web::resource("/logout").to(logout));
 //! ```
 #![allow(async_fn_in_trait)]
 use std::{convert::Infallible, rc::Rc, time::SystemTime};
@@ -62,44 +54,40 @@ use ntex::web::{
 /// Browsers drop cookies whose `name=value` pair is larger than this.
 const MAX_COOKIE_SIZE: usize = 4096;
 
-/// The extractor type to obtain your identity from a request.
+/// Handle to the identity associated with a request.
+///
+/// Clones share the same request state. Without [`IdentityService`], extraction
+/// still succeeds, but [`identity`](Self::identity) returns `None` and mutations
+/// have no effect. Changes are persisted by the policy after the inner service
+/// returns a response, and can fail at that stage.
 ///
 /// ```rust
-/// use std::convert::Infallible;
-/// use ntex::web;
-/// use ntex_identity::Identity;
+/// use ntex::{web, web::App};
+/// use ntex_identity::{CookieIdentityPolicy, Identity, IdentityService};
 ///
-/// fn index(id: Identity) -> Result<String, Infallible> {
-///     // access request identity
-///     if let Some(id) = id.identity() {
-///         Ok(format!("Welcome! {}", id))
-///     } else {
-///         Ok("Welcome Anonymous!".to_owned())
-///     }
-/// }
-///
-/// fn login(id: Identity) -> web::HttpResponse {
-///     id.remember("User1".to_owned()); // <- remember identity
+/// async fn login(id: Identity) -> web::HttpResponse {
+///     // Remember an identity only after verifying the user's credentials.
+///     id.remember("User1".to_owned());
 ///     web::HttpResponse::Ok().build()
 /// }
 ///
-/// fn logout(id: Identity) -> web::HttpResponse {
-///     id.forget(); // <- remove identity
-///     web::HttpResponse::Ok().build()
-/// }
-/// # fn main() {}
+/// let app = App::default()
+///     .middleware(IdentityService::new(CookieIdentityPolicy::new(&[0; 32])))
+///     .service(web::resource("/login").to(login));
 /// ```
 #[derive(Clone)]
 pub struct Identity(HttpRequest);
 
 impl Identity {
-    /// Return the claimed identity of the user associated request or
-    /// ``None`` if no identity can be found associated with the request.
+    /// Returns a copy of the current identity, or `None` if none was loaded or remembered.
     pub fn identity(&self) -> Option<String> {
         Identity::get_identity(&self.0.extensions())
     }
 
-    /// Remember identity.
+    /// Replaces the request identity and marks it for persistence in the response.
+    ///
+    /// Does not authenticate the supplied identity. Has no effect without
+    /// [`IdentityService`]; persistence errors are handled by the middleware.
     pub fn remember(&self, identity: String) {
         if let Some(id) = self.0.extensions_mut().get_mut::<IdentityItem>() {
             id.id = Some(identity);
@@ -107,8 +95,10 @@ impl Identity {
         }
     }
 
-    /// This method is used to 'forget' the current identity on subsequent
-    /// requests.
+    /// Clears the request identity and asks the policy to remove its stored value.
+    ///
+    /// With [`CookieIdentityPolicy`], the response expires the identity cookie.
+    /// Has no effect without [`IdentityService`].
     pub fn forget(&self) {
         if let Some(id) = self.0.extensions_mut().get_mut::<IdentityItem>() {
             id.id = None;
@@ -130,11 +120,13 @@ struct IdentityItem {
     changed: bool,
 }
 
-/// Helper trait that allows to get Identity.
+/// Reads the identity loaded or remembered for a request.
 ///
-/// It could be used in middleware but identity policy must be set before any other middleware that needs identity
-/// RequestIdentity is implemented both for `ServiceRequest` and `HttpRequest`.
+/// Implemented for all [`HttpMessage`] types, including [`HttpRequest`] and
+/// [`WebRequest`]. [`IdentityService`] must run before middleware that needs to
+/// read the identity.
 pub trait RequestIdentity {
+    /// Returns a copy of the current identity, or `None` if no identity is available.
     fn get_identity(&self) -> Option<String>;
 }
 
@@ -147,21 +139,7 @@ where
     }
 }
 
-/// Extractor implementation for Identity type.
-///
-/// ```rust
-/// use ntex_identity::Identity;
-///
-/// fn index(id: Identity) -> String {
-///     // access request identity
-///     if let Some(id) = id.identity() {
-///         format!("Welcome! {}", id)
-///     } else {
-///         "Welcome Anonymous!".to_owned()
-///     }
-/// }
-/// # fn main() {}
-/// ```
+/// Extracts an [`Identity`] handle without failing, even if no middleware is installed.
 impl<St: State> FromRequest<St> for Identity {
     type Error = Infallible;
 
@@ -176,19 +154,35 @@ impl<St: State> FromRequest<St> for Identity {
 }
 
 #[allow(clippy::wrong_self_convention)]
-/// Identity policy definition.
+/// Backend for loading and persisting request identities.
+///
+/// [`IdentityService`] renders policy errors as HTTP error responses. A load
+/// error skips the inner service; a save error replaces its response.
 pub trait IdentityPolicy<St, In>: Sized + 'static {
-    /// The error type of the policy
+    /// Error returned when loading or persisting an identity fails.
     type Error;
 
-    /// Parse the session from request and load data from a service identity.
+    /// Loads an identity from the request, or returns `None` for an anonymous request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend-specific error if loading fails. Policies may instead
+    /// treat invalid or expired stored identities as anonymous.
     async fn from_request(
         &self,
         st: &St,
         request: &mut WebRequest<In>,
     ) -> Result<Option<String>, Self::Error>;
 
-    /// Write changes to response
+    /// Persists the final identity by updating the response.
+    ///
+    /// `changed` is true if [`Identity::remember`] or [`Identity::forget`] was
+    /// called. `identity` is the current value, or `None` when it was cleared.
+    /// The policy may refresh unchanged identities as needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend-specific error if persisting or removing the identity fails.
     async fn to_response(
         &self,
         st: &St,
@@ -198,17 +192,17 @@ pub trait IdentityPolicy<St, In>: Sized + 'static {
     ) -> Result<(), Self::Error>;
 }
 
-/// Request identity middleware
+/// Middleware that loads request identities and persists them in responses.
+///
+/// Uses an [`IdentityPolicy`] backend. Policy errors are rendered as error
+/// responses; inner service errors propagate without calling the save policy.
 ///
 /// ```rust
 /// use ntex::web::App;
 /// use ntex_identity::{CookieIdentityPolicy, IdentityService};
 ///
 /// let app = App::default().middleware(IdentityService::new(
-///     // <- create identity middleware
-///     CookieIdentityPolicy::new(&[0; 32])    // <- create cookie session backend
-///           .name("auth-cookie")
-///           .secure(false),
+///     CookieIdentityPolicy::new(&[0; 32]).name("auth-cookie"),
 /// ));
 /// ```
 pub struct IdentityService<T> {
@@ -216,7 +210,7 @@ pub struct IdentityService<T> {
 }
 
 impl<T> IdentityService<T> {
-    /// Create new identity service with specified backend.
+    /// Creates identity middleware using the supplied policy.
     pub fn new(backend: T) -> Self {
         IdentityService {
             backend: Rc::new(backend),
@@ -235,6 +229,7 @@ impl<S, St, T> Middleware<S, St> for IdentityService<T> {
     }
 }
 
+/// Service created by [`IdentityService`] to wrap the inner service.
 #[doc(hidden)]
 pub struct IdentityServiceMiddleware<S, T> {
     backend: Rc<T>,
@@ -451,12 +446,28 @@ impl CookieIdentityInner {
     }
 }
 
-/// Use cookies for request identity storage.
+/// Stores identities in authenticated, encrypted client-side cookies.
 ///
-/// The constructors take a key as an argument.
-/// This is the private key for cookie - when this value is changed,
-/// all identities are lost. The constructors will panic if the key is less
-/// than 32 bytes in length.
+/// The client cannot read the identity or modify it without invalidating the
+/// cookie. Keep the key secret and stable; changing it invalidates existing
+/// cookies. Missing, malformed, undecryptable, or deadline-expired cookies are
+/// treated as anonymous, not as policy errors.
+///
+/// Defaults: name `ntex-identity`, path `/`, `Secure` and `HttpOnly` set, and no
+/// `Domain`, `SameSite`, or `Max-Age` attribute. Login and visit deadlines are
+/// disabled. Cookies are written on identity changes; with
+/// [`visit_deadline`](Self::visit_deadline), valid identities are also refreshed
+/// on each response. Forgetting an identity expires the cookie with the same
+/// configured scope and security attributes.
+///
+/// The encrypted cookie's `name=value` pair must not exceed 4096 bytes;
+/// attributes are excluded from this limit. Writing an oversized cookie or an
+/// invalid `Set-Cookie` header returns [`CookieIdentityPolicyError`], which
+/// [`IdentityService`] renders as an error response (`500` with [`DefaultError`]).
+///
+/// Configuration methods replace previous values and do not validate cookie
+/// names or attributes. Configure the policy before creating a middleware
+/// service; setters panic while the policy is shared with a live service.
 ///
 /// # Example
 ///
@@ -465,22 +476,26 @@ impl CookieIdentityInner {
 /// use ntex_identity::{CookieIdentityPolicy, IdentityService};
 ///
 /// let app = App::default().middleware(IdentityService::new(
-///     // <- create identity middleware
-///     CookieIdentityPolicy::new(&[0; 32])  // <- construct cookie policy
-///            .domain("www.rust-lang.org")
-///            .name("ntex-auth")
-///            .path("/")
-///            .secure(true),
+///     CookieIdentityPolicy::new(&[0; 32])
+///         .name("ntex-auth")
+///         .path("/")
+///         .secure(true),
 /// ));
 /// ```
 pub struct CookieIdentityPolicy(Rc<CookieIdentityInner>);
 
+/// Errors returned when writing or removing an identity cookie.
+///
+/// With ntex's [`DefaultError`] renderer, these produce `500 Internal Server Error`.
 #[derive(Debug, thiserror::Error)]
 pub enum CookieIdentityPolicyError {
+    /// The cookie cannot be represented as a valid `Set-Cookie` header.
     #[error("Http error {0}")]
     Http(#[from] HttpError),
+    /// The identity and deadline timestamps cannot be serialized to JSON.
     #[error("Json error {0}")]
     Json(#[from] serde_json::error::Error),
+    /// The encrypted cookie's `name=value` pair exceeds 4096 bytes, excluding attributes.
     #[error("Size of the identity cookie is greater than 4096 bytes")]
     Overflow,
 }
@@ -488,68 +503,123 @@ pub enum CookieIdentityPolicyError {
 impl<St> WebResponseError<St, DefaultError> for CookieIdentityPolicyError {}
 
 impl CookieIdentityPolicy {
-    /// Construct new `CookieIdentityPolicy` instance.
+    /// Creates a cookie identity policy using a secret key of at least 32 bytes.
     ///
-    /// Panics if key length is less than 32 bytes.
+    /// # Panics
+    ///
+    /// Panics if `key` is shorter than 32 bytes.
     pub fn new(key: &[u8]) -> Self {
         CookieIdentityPolicy(Rc::new(CookieIdentityInner::new(key)))
     }
 
-    /// Sets the `path` field in the session cookie being built.
+    /// Sets the identity cookie's `Path` attribute. Default: `/`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this policy is shared with a live middleware service.
     pub fn path<S: Into<String>>(mut self, value: S) -> Self {
         Rc::get_mut(&mut self.0).unwrap().path = value.into();
         self
     }
 
-    /// Sets the `name` field in the session cookie being built.
+    /// Sets the identity cookie's name. Default: `ntex-identity`.
+    ///
+    /// Browsers require `Secure` for `__Secure-` names; `__Host-` also requires
+    /// path `/` and no domain. These restrictions are not validated here.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this policy is shared with a live middleware service.
     pub fn name<S: Into<String>>(mut self, value: S) -> Self {
         Rc::get_mut(&mut self.0).unwrap().name = value.into();
         self
     }
 
-    /// Sets the `domain` field in the session cookie being built.
+    /// Sets the identity cookie's `Domain` attribute.
+    ///
+    /// Unset by default, restricting the cookie to the issuing host.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this policy is shared with a live middleware service.
     pub fn domain<S: Into<String>>(mut self, value: S) -> Self {
         Rc::get_mut(&mut self.0).unwrap().domain = Some(value.into());
         self
     }
 
-    /// Sets the `secure` field in the session cookie being built.
+    /// Sets the identity cookie's `Secure` attribute. Default: `true`.
     ///
-    /// If the `secure` field is set, a cookie will only be transmitted when the
-    /// connection is secure - i.e. `https`
+    /// Secure cookies are sent only over HTTPS; use `false` only when plain
+    /// HTTP is required, such as for local development. `HttpOnly` remains set.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this policy is shared with a live middleware service.
     pub fn secure(mut self, value: bool) -> Self {
         Rc::get_mut(&mut self.0).unwrap().secure = value;
         self
     }
 
-    /// Sets the `max-age` field in the session cookie being built with given number of seconds.
+    /// Sets the cookie's `Max-Age` in seconds, replacing any previous value.
+    ///
+    /// Unset by default, so the cookie lasts for the browser session. This
+    /// controls browser retention, not server-side login or visit deadlines.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this policy is shared with a live middleware service.
     pub fn max_age(self, seconds: i64) -> Self {
         self.max_age_time(Duration::seconds(seconds))
     }
 
-    /// Sets the `max-age` field in the session cookie being built with `chrono::Duration`.
+    /// Sets the cookie's `Max-Age` using [`time::Duration`].
+    ///
+    /// Equivalent to [`max_age`](Self::max_age), but accepts a duration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this policy is shared with a live middleware service.
     pub fn max_age_time(mut self, value: Duration) -> Self {
         Rc::get_mut(&mut self.0).unwrap().max_age = Some(value);
         self
     }
 
-    /// Sets the `same_site` field in the session cookie being built.
+    /// Sets the identity cookie's [`SameSite`] attribute. Unset by default.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this policy is shared with a live middleware service.
     pub fn same_site(mut self, same_site: SameSite) -> Self {
         Rc::get_mut(&mut self.0).unwrap().same_site = Some(same_site);
         self
     }
 
-    /// Accepts only users whose cookie has been seen before the given deadline
+    /// Sets the maximum inactivity duration for a remembered identity.
     ///
-    /// By default visit deadline is disabled.
+    /// Disabled by default. Valid authenticated requests refresh the visit
+    /// timestamp and reissue the cookie. A missing timestamp, a future timestamp,
+    /// or elapsed time greater than this duration makes the identity anonymous.
+    /// Enabling this rejects legacy cookies without timestamps.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this policy is shared with a live middleware service.
     pub fn visit_deadline(mut self, value: Duration) -> Self {
         Rc::get_mut(&mut self.0).unwrap().visit_deadline = Some(value);
         self
     }
 
-    /// Accepts only users which has been authenticated before the given deadline
+    /// Sets the maximum duration since the identity was last remembered.
     ///
-    /// By default login deadline is disabled.
+    /// Disabled by default. Unlike [`visit_deadline`](Self::visit_deadline),
+    /// requests do not reset this timestamp; [`Identity::remember`] does.
+    /// A missing timestamp, a future timestamp, or elapsed time greater than
+    /// this duration makes the identity anonymous. Enabling this rejects
+    /// legacy cookies without timestamps.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this policy is shared with a live middleware service.
     pub fn login_deadline(mut self, value: Duration) -> Self {
         Rc::get_mut(&mut self.0).unwrap().login_deadline = Some(value);
         self
@@ -559,6 +629,10 @@ impl CookieIdentityPolicy {
 impl<St, In> IdentityPolicy<St, In> for CookieIdentityPolicy {
     type Error = CookieIdentityPolicyError;
 
+    /// Loads the identity, treating invalid or expired cookies as anonymous.
+    ///
+    /// Always returns `Ok`. When a login deadline is configured, records the
+    /// login timestamp in the request for use by [`to_response`](Self::to_response).
     async fn from_request(
         &self,
         _: &St,
@@ -579,6 +653,20 @@ impl<St, In> IdentityPolicy<St, In> for CookieIdentityPolicy {
         ))
     }
 
+    /// Writes changes, expires forgotten identities, or refreshes valid identities
+    /// when [`visit_deadline`](Self::visit_deadline) is enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CookieIdentityPolicyError`] for JSON serialization failures,
+    /// oversized cookies, or invalid `Set-Cookie` header values. These errors
+    /// are not discarded.
+    ///
+    /// # Panics
+    ///
+    /// With both deadlines enabled, refreshing an unchanged identity panics
+    /// unless [`from_request`](Self::from_request) recorded its login timestamp
+    /// in this response's request. [`IdentityService`] provides this state.
     async fn to_response(
         &self,
         _: &St,

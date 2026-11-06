@@ -8,7 +8,7 @@ header! {
     /// The `If-Unmodified-Since` header field makes the request method
     /// conditional on the selected representation's last modification date
     /// being earlier than or equal to the date provided in the field-value.
-    /// This field accomplishes the same purpose as If-Match for cases where
+    /// This field accomplishes the same purpose as `If-Match` for cases where
     /// the user agent does not have an entity-tag for the representation.
     ///
     /// # ABNF
@@ -30,7 +30,7 @@ header! {
     /// `If-Modified-Since` header, defined in
     /// [RFC7232](http://tools.ietf.org/html/rfc7232#section-3.3)
     ///
-    /// The `If-Modified-Since` header field makes a GET or HEAD request
+    /// The `If-Modified-Since` header field makes a `GET` or `HEAD` request
     /// method conditional on the selected representation's modification date
     /// being more recent than the date provided in the field-value.
     /// Transfer of the selected representation's data is avoided if that
@@ -39,7 +39,7 @@ header! {
     /// # ABNF
     ///
     /// ```text
-    /// If-Unmodified-Since = HTTP-date
+    /// If-Modified-Since = HTTP-date
     /// ```
     ///
     /// # Example values
@@ -63,7 +63,7 @@ header! {
     /// # ABNF
     ///
     /// ```text
-    /// Expires = HTTP-date
+    /// Last-Modified = HTTP-date
     /// ```
     ///
     /// # Example values
@@ -117,7 +117,7 @@ header! {
     /// match any of those listed in the field-value.
     ///
     /// A recipient MUST use the weak comparison function when comparing
-    /// entity-tags for If-None-Match (Section 2.3.2), since weak entity-tags
+    /// entity-tags for `If-None-Match` (Section 2.3.2), since weak entity-tags
     /// can be used for cache validation even if there have been changes to
     /// the representation data.
     ///
@@ -165,7 +165,7 @@ header! {
     /// # Example values
     ///
     /// * `"xyzzy"`
-    /// * "xyzzy", "r2d2xxxx", "c3piozzzz"
+    /// * `"xyzzy", "r2d2xxxx", "c3piozzzz"`
     ///
     (IfMatch, "If-Match") => {Any / (EntityTag)+}
 

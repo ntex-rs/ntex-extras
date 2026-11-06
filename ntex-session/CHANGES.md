@@ -1,10 +1,10 @@
 # Changes
 
-## [Unreleased]
+## [4.3.0] - 2026-11-06
+
+* Reject `path` and `domain` values that are not valid in `Set-Cookie` at configuration time instead of panicking per request
 
 * Export `CookieSessionError` and `CookieSessionMiddleware`
-
-## [4.3.0] - 2026-11-06
 
 * Check the 4096-byte cookie size limit after signing or encryption and encoding
 

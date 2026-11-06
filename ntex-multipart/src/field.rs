@@ -12,7 +12,27 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 use std::{cmp, fmt};
 
-/// A single field in a multipart stream
+/// One part of a [`Multipart`](crate::Multipart) body, streamed as byte chunks.
+///
+/// Implements [`Stream`] with items of type `Result<Bytes, MultipartError>`.
+/// Chunks contain body data, not part headers or boundary delimiters. A valid
+/// part `Content-Length`, when present, determines how many body bytes are read;
+/// otherwise the parser scans for a boundary followed by CRLF or `--`.
+///
+/// Read and drop this field before requesting another part. Dropping it early
+/// lets the parent drain the unread data; keeping it alive prevents the parent
+/// from advancing even after EOF.
+///
+/// # Errors
+///
+/// Polling can return payload, incomplete-body, or boundary errors. A field that
+/// outlives its parent [`Multipart`](crate::Multipart) returns
+/// [`MultipartError::NotConsumed`] when polled.
+///
+/// # Panics
+///
+/// Polling after the field has returned `None` may panic. If repeated polling
+/// after EOF is needed, wrap it with [`StreamExt::fuse`](futures::StreamExt::fuse).
 pub struct Field {
     /// Field's Content-Type.
     content_type: Option<mime::Mime>,
@@ -49,22 +69,29 @@ impl Field {
         }
     }
 
-    /// Get a map of headers
+    /// Returns the parsed headers of this part, not the request headers.
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 
-    /// Get the content type of the field
+    /// Returns the parsed part `Content-Type`, or `None` if absent or invalid.
+    ///
+    /// No default media type is inserted and no charset conversion is performed.
     pub fn content_type(&self) -> Option<&mime::Mime> {
         self.content_type.as_ref()
     }
 
-    /// Returns this field's parsed Content-Disposition header, if set.
+    /// Returns the parsed `Content-Disposition` only for a valid `form-data` disposition.
+    ///
+    /// Missing, malformed, and other disposition types yield `None` for non-form
+    /// multipart bodies; in `multipart/form-data` they prevent the field from being yielded.
     pub fn content_disposition(&self) -> Option<&ContentDisposition> {
         self.content_disposition.as_ref()
     }
 
-    /// Returns the field's name, if set.
+    /// Returns the `name` parameter of a parsed `form-data` disposition, if present.
+    ///
+    /// A name is required for fields in a `multipart/form-data` body.
     pub fn name(&self) -> Option<&str> {
         self.content_disposition()?.get_name()
     }

@@ -3,48 +3,38 @@
     clippy::type_complexity,
     clippy::mutable_key_type
 )]
-//! Cross-origin resource sharing (CORS) for ntex applications
+//! Cross-origin resource sharing (CORS) middleware for ntex applications.
 //!
-//! CORS middleware could be used with application and with resource.
-//! Cors middleware could be used as parameter for `App::wrap()`,
-//! `Resource::wrap()` or `Scope::wrap()` methods.
+//! Configure a [`Cors`] builder, call [`Cors::build`], and register the resulting
+//! middleware with [`App::middleware`](ntex::web::App::middleware),
+//! [`Resource::middleware`](ntex::web::Resource::middleware), or
+//! [`Scope::middleware`](ntex::web::Scope::middleware).
+//!
+//! By default, all origins and request headers are allowed. Requests with an
+//! `Origin` header are validated on ordinary requests; ordinary requests without
+//! one reach the application.
+//! Preflight requests (`OPTIONS` with `Access-Control-Request-Method`) are
+//! validated and answered directly. Method and request-header restrictions
+//! apply only to preflights, not to ordinary requests.
 //!
 //! # Example
 //!
-//! ```rust,no_run
+//! ```rust
+//! use ntex::{http::{header, Method}, web};
 //! use ntex_cors::Cors;
-//! use ntex::{http, web, SharedCfg};
-//! use ntex::web::{App, HttpRequest, HttpResponse};
 //!
-//! async fn index(req: HttpRequest) -> &'static str {
-//!     "Hello world"
-//! }
-//!
-//! #[ntex::main]
-//! async fn main() -> std::io::Result<()> {
-//!     web::server(async |_| App::new()
-//!         .middleware(
-//!             Cors::new() // <- Construct CORS middleware builder
-//!               .allowed_origin("https://www.rust-lang.org/")
-//!               .allowed_methods(vec![http::Method::GET, http::Method::POST])
-//!               .allowed_headers(vec![http::header::AUTHORIZATION, http::header::ACCEPT])
-//!               .allowed_header(http::header::CONTENT_TYPE)
-//!               .max_age(3600)
-//!               .build())
-//!         .service(
-//!             web::resource("/index.html")
-//!               .route(web::get().to(index))
-//!               .route(web::head().to(|| async { HttpResponse::MethodNotAllowed() }))
-//!         ))
-//!         .bind("127.0.0.1:8080", SharedCfg::default())?
-//!         .run()
-//!         .await
-//! }
+//! let app = web::App::default()
+//!     .middleware(
+//!         Cors::new()
+//!             .allowed_origin("https://www.rust-lang.org")
+//!             .allowed_methods([Method::GET, Method::POST])
+//!             .allowed_headers([header::AUTHORIZATION, header::ACCEPT])
+//!             .allowed_header(header::CONTENT_TYPE)
+//!             .max_age(3600)
+//!             .build::<()>(),
+//!     )
+//!     .service(web::resource("/").to(|| async { "Hello world" }));
 //! ```
-//! In this example custom *CORS* middleware get registered for "/index.html"
-//! endpoint.
-//!
-//! Cors middleware automatically handle *OPTIONS* preflight request.
 use std::{
     collections::HashSet, convert::TryFrom, iter::FromIterator, marker::PhantomData, rc::Rc,
 };
@@ -76,13 +66,15 @@ impl ErrorDiagnostic for ConfigError {
     }
 }
 
-/// A set of errors that can occur during processing CORS
+/// CORS request validation errors.
+///
+/// With ntex's [`DefaultError`] renderer, these produce `400 Bad Request`.
 #[derive(Debug, Display, thiserror::Error)]
 pub enum CorsError {
-    /// The HTTP request header `Origin` is required but was not provided
+    /// A preflight is missing `Origin` while the origin allowlist is restricted.
     #[display("The HTTP request header `Origin` is required but was not provided")]
     MissingOrigin,
-    /// The HTTP request header `Origin` could not be parsed correctly.
+    /// The `Origin` header cannot be converted to text.
     #[display("The HTTP request header `Origin` could not be parsed correctly.")]
     BadOrigin,
     /// The request header `Access-Control-Request-Method` is required but is
@@ -92,43 +84,41 @@ pub enum CorsError {
     /// The request header `Access-Control-Request-Method` has an invalid value
     #[display("The request header `Access-Control-Request-Method` has an invalid value")]
     BadRequestMethod,
-    /// The request header `Access-Control-Request-Headers`  has an invalid
-    /// value
+    /// The restricted preflight `Access-Control-Request-Headers` list is malformed.
     #[display("The request header `Access-Control-Request-Headers`  has an invalid value")]
     BadRequestHeaders,
-    /// Origin is not allowed to make this request
+    /// The `Origin` header does not exactly match an allowed origin.
     #[display("Origin is not allowed to make this request")]
     OriginNotAllowed,
-    /// Requested method is not allowed
+    /// The preflight method is not in the allowed method set.
     #[display("Requested method is not allowed")]
     MethodNotAllowed,
-    /// One or more headers requested are not allowed
+    /// One or more preflight header names are not allowed.
     #[display("One or more headers requested are not allowed")]
     HeadersNotAllowed,
 }
 
-/// DefaultError renderer support
+/// Renders [`CorsError`] as `400 Bad Request` with [`DefaultError`].
 impl<St> WebResponseError<St, DefaultError> for CorsError {
     fn error_response(&self, _: &St) -> HttpResponse {
         HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }
 
-/// An enum signifying that some of type T is allowed, or `All` (everything is
-/// allowed).
+/// Either all values are allowed or only a specified set is allowed.
 ///
-/// `Default` is implemented for this enum and is `All`.
+/// The default is [`All`](Self::All).
 #[derive(Default, Clone, Debug, Eq, PartialEq)]
 pub enum AllOrSome<T> {
-    /// Everything is allowed. Usually equivalent to the "*" value.
+    /// Everything is allowed; this does not necessarily send a `*` header.
     #[default]
     All,
-    /// Only some of `T` is allowed
+    /// Only the values represented by `T` are allowed.
     Some(T),
 }
 
 impl<T> AllOrSome<T> {
-    /// Returns whether this is an `All` variant
+    /// Returns whether this is [`All`](Self::All).
     pub fn is_all(&self) -> bool {
         match *self {
             AllOrSome::All => true,
@@ -136,12 +126,12 @@ impl<T> AllOrSome<T> {
         }
     }
 
-    /// Returns whether this is a `Some` variant
+    /// Returns whether this is [`Some`](Self::Some).
     pub fn is_some(&self) -> bool {
         !self.is_all()
     }
 
-    /// Returns &T
+    /// Returns the contained value for [`Some`](Self::Some), or `None` for [`All`](Self::All).
     pub fn as_ref(&self) -> Option<&T> {
         match *self {
             AllOrSome::All => None,
@@ -150,29 +140,28 @@ impl<T> AllOrSome<T> {
     }
 }
 
-/// Structure that follows the builder pattern for building `Cors` middleware
-/// structs.
+/// Builder for [`CorsMiddleware`].
 ///
-/// To construct a cors:
-///
-///   1. Call [`Cors::build`](struct.Cors.html#method.build) to start building.
-///   2. Use any of the builder methods to set fields in the backend.
-///   3. Call [build](struct.Cors.html#method.build) to retrieve the constructed backend.
+/// Start with [`Cors::new`], configure the policy, then call [`Cors::build`].
+/// Origin, method, and header additions accumulate across calls; scalar
+/// settings such as [`max_age`](Self::max_age) replace their previous value.
+/// Invalid configuration is reported by a panic in [`build`](Self::build),
+/// rather than by the individual setters.
 ///
 /// # Example
 ///
 /// ```rust
+/// use ntex::{http::{header, Method}, web::App};
 /// use ntex_cors::Cors;
-/// use ntex::http::header;
 ///
-/// let cors = Cors::new()
-///     .allowed_origin("https://www.rust-lang.org/")
-///     .allowed_methods(vec!["GET", "POST"])
-///     .allowed_headers(vec![header::AUTHORIZATION, header::ACCEPT])
-///     .allowed_header(header::CONTENT_TYPE)
-///     .max_age(3600);
+/// let app = App::default().middleware(
+///     Cors::new()
+///         .allowed_origin("https://www.rust-lang.org")
+///         .allowed_methods([Method::GET, Method::POST])
+///         .allowed_header(header::CONTENT_TYPE)
+///         .build::<()>(),
+/// );
 /// ```
-#[derive(Default)]
 pub struct Cors {
     cors: Option<Inner>,
     methods: bool,
@@ -180,8 +169,23 @@ pub struct Cors {
     error: Option<Failure>,
 }
 
+/// Same as [`Cors::new`].
+///
+/// The inherent [`Cors::default`] returns middleware instead; call this
+/// implementation as `<Cors as Default>::default()`.
+impl Default for Cors {
+    fn default() -> Self {
+        Cors::new()
+    }
+}
+
 impl Cors {
-    /// Build a new CORS middleware instance
+    /// Creates a builder allowing all origins and request headers.
+    ///
+    /// Unless overridden, [`build`](Self::build) allows `GET`, `HEAD`, `POST`,
+    /// `OPTIONS`, `PUT`, `PATCH`, and `DELETE`. Preflight handling and
+    /// `Vary: Origin` are enabled; credentials, wildcard responses, exposed
+    /// headers, and a preflight cache lifetime are disabled or unset.
     pub fn new() -> Self {
         Cors {
             cors: Some(Inner {
@@ -203,7 +207,9 @@ impl Cors {
     }
 
     #[allow(clippy::should_implement_trait)]
-    /// Build a new CORS default middleware
+    /// Creates middleware with the same settings as `Cors::new().build()`.
+    ///
+    /// Unlike [`new`](Self::new), this returns middleware, not a builder.
     pub fn default<St>() -> CorsMiddleware<St> {
         let inner = Inner {
             origins: AllOrSome::default(),
@@ -231,23 +237,20 @@ impl Cors {
         }
     }
 
-    /// Add an origin that are allowed to make requests.
-    /// Will be verified against the `Origin` request header.
+    /// Adds an origin to the allowlist, matched exactly against `Origin`.
     ///
-    /// When `All` is set, and `send_wildcard` is set, "*" will be sent in
-    /// the `Access-Control-Allow-Origin` response header. Otherwise, the
-    /// client's `Origin` request header will be echoed back in the
-    /// `Access-Control-Allow-Origin` response header.
+    /// All origins are allowed by default. The first non-wildcard call starts
+    /// a restricted list; later calls add to it. `"*"` resets the list to all
+    /// origins. A later non-wildcard call starts a new restricted list.
     ///
-    /// When `Some` is set, the client's `Origin` request header will be
-    /// checked in a case-sensitive manner.
+    /// Values are checked with [`Url::try_from`] but stored as supplied, without
+    /// normalization. Use the browser's origin form, such as
+    /// `https://example.com`, without a trailing slash or path. Invalid URLs
+    /// cause [`build`](Self::build) to panic.
     ///
-    /// This is the `list of origins` in the
-    /// [Resource Processing Model](https://www.w3.org/TR/cors/#resource-processing-model).
-    ///
-    /// Defaults to `All`.
-    ///
-    /// Builder panics if supplied origin is not valid uri.
+    /// Allowed request origins are echoed in `Access-Control-Allow-Origin`,
+    /// unless all origins are allowed and [`send_wildcard`](Self::send_wildcard)
+    /// is enabled.
     pub fn allowed_origin(mut self, origin: &str) -> Self {
         if let Some(cors) = cors(&mut self.cors, &self.error) {
             match Url::try_from(origin) {
@@ -272,24 +275,22 @@ impl Cors {
         self
     }
 
-    /// Set a list of methods which the allowed origins are allowed to access
-    /// for requests.
+    /// Adds methods allowed in `Access-Control-Request-Method` on preflights.
     ///
-    /// This is the `list of methods` in the
-    /// [Resource Processing Model](https://www.w3.org/TR/cors/#resource-processing-model).
-    ///
-    /// You can use either `&str` (e.g. `"GET"`) or directly use the [`http::Method`] enum
-    /// (e.g. `http::Method::GET`). Using [`http::Method`] is recommended for better type safety
-    /// and to avoid runtime errors due to typos.
+    /// Accepts strings such as `"GET"` or [`Method`] values. Calls accumulate;
+    /// the first call replaces the default set (`GET`, `HEAD`, `POST`,
+    /// `OPTIONS`, `PUT`, `PATCH`, `DELETE`), even if the iterator is empty.
+    /// An empty set rejects every preflight. Ordinary request methods are not
+    /// checked. Invalid method values cause [`build`](Self::build) to panic.
     ///
     /// # Example
-    /// ```rust,ignore
+    ///
+    /// ```rust
     /// use ntex::http::Method;
+    /// use ntex_cors::Cors;
     ///
-    /// cors.allowed_methods(vec![Method::GET, Method::POST]);
+    /// let cors = Cors::new().allowed_methods([Method::GET, Method::POST]);
     /// ```
-    ///
-    /// The default is `[GET, HEAD, POST, OPTIONS, PUT, PATCH, DELETE]`.
     pub fn allowed_methods<U, M>(mut self, methods: U) -> Self
     where
         U: IntoIterator<Item = M>,
@@ -313,7 +314,11 @@ impl Cors {
         self
     }
 
-    /// Set an allowed header
+    /// Adds one allowed preflight request header, using [`HeaderName`] or a string.
+    ///
+    /// The first addition restricts the default allow-all policy. Calls
+    /// accumulate with [`allowed_headers`](Self::allowed_headers); names are
+    /// case-insensitive. Invalid names cause [`build`](Self::build) to panic.
     pub fn allowed_header<H>(mut self, header: H) -> Self
     where
         HeaderName: TryFrom<H>,
@@ -335,17 +340,17 @@ impl Cors {
         self
     }
 
-    /// Set a list of header field names which can be used when
-    /// this resource is accessed by allowed origins.
+    /// Adds header names allowed in `Access-Control-Request-Headers` on preflights.
     ///
-    /// If `All` is set, whatever is requested by the client in
-    /// `Access-Control-Request-Headers` will be echoed back in the
-    /// `Access-Control-Allow-Headers` header.
+    /// All headers are allowed by default, and the request's header list is
+    /// echoed verbatim in `Access-Control-Allow-Headers`, without validating
+    /// its names. The first added name restricts this policy. Calls accumulate
+    /// with [`allowed_header`](Self::allowed_header); an empty iterator has no
+    /// effect. Invalid configured names cause [`build`](Self::build) to panic.
     ///
-    /// This is the `list of headers` in the
-    /// [Resource Processing Model](https://www.w3.org/TR/cors/#resource-processing-model).
-    ///
-    /// Defaults to `All`.
+    /// With a restricted set, requested names are checked case-insensitively
+    /// and the complete allowed set is returned in `Access-Control-Allow-Headers`.
+    /// An absent request-header list is allowed; an empty or malformed one is not.
     pub fn allowed_headers<U, H>(mut self, headers: U) -> Self
     where
         U: IntoIterator<Item = H>,
@@ -373,14 +378,12 @@ impl Cors {
         self
     }
 
-    /// Set a list of headers which are safe to expose to the API of a CORS API
-    /// specification. This corresponds to the
-    /// `Access-Control-Expose-Headers` response header.
+    /// Adds response header names exposed to browser scripts.
     ///
-    /// This is the `list of exposed headers` in the
-    /// [Resource Processing Model](https://www.w3.org/TR/cors/#resource-processing-model).
-    ///
-    /// This defaults to an empty set.
+    /// Calls accumulate; no headers are explicitly exposed by default.
+    /// `Access-Control-Expose-Headers` is added only to ordinary responses to
+    /// requests with `Origin`, not to preflight responses. Invalid names cause
+    /// [`build`](Self::build) to panic.
     pub fn expose_headers<U, H>(mut self, headers: U) -> Self
     where
         U: IntoIterator<Item = H>,
@@ -401,10 +404,9 @@ impl Cors {
         self
     }
 
-    /// Set a maximum time for which this CORS request maybe cached.
-    /// This value is set as the `Access-Control-Max-Age` header.
+    /// Sets the preflight cache lifetime in seconds via `Access-Control-Max-Age`.
     ///
-    /// This defaults to `None` (unset).
+    /// Unset by default. Repeated calls replace the previous value.
     pub fn max_age(mut self, max_age: usize) -> Self {
         if let Some(cors) = cors(&mut self.cors, &self.error) {
             cors.max_age = Some(max_age)
@@ -412,21 +414,15 @@ impl Cors {
         self
     }
 
-    /// Set a wildcard origins
+    /// Sends `Access-Control-Allow-Origin: *` when all origins are allowed.
     ///
-    /// If send wildcard is set and the `allowed_origins` parameter is `All`, a
-    /// wildcard `Access-Control-Allow-Origin` response header is sent,
-    /// rather than the request’s `Origin` header.
+    /// Otherwise the request origin is echoed. Disabled by default; repeated
+    /// calls have no additional effect. With a restricted origin list this
+    /// setting has no effect.
     ///
-    /// This is the `supports credentials flag` in the
-    /// [Resource Processing Model](https://www.w3.org/TR/cors/#resource-processing-model).
-    ///
-    /// This **CANNOT** be used in conjunction with `allowed_origins` set to
-    /// `All` and `allow_credentials` set to `true`. Depending on the mode
-    /// of usage, this will either result in an `Error::
-    /// CredentialsWithWildcardOrigin` error during ntex launch or runtime.
-    ///
-    /// Defaults to `false`.
+    /// Combining all origins, this setting, and
+    /// [`supports_credentials`](Self::supports_credentials) causes
+    /// [`build`](Self::build) to panic.
     pub fn send_wildcard(mut self) -> Self {
         if let Some(cors) = cors(&mut self.cors, &self.error) {
             cors.send_wildcard = true
@@ -434,19 +430,12 @@ impl Cors {
         self
     }
 
-    /// Allows users to make authenticated requests
+    /// Enables `Access-Control-Allow-Credentials: true` on CORS responses.
     ///
-    /// If true, injects the `Access-Control-Allow-Credentials` header in
-    /// responses. This allows cookies and credentials to be submitted
-    /// across domains.
-    ///
-    /// This option cannot be used in conjunction with an `allowed_origin` set
-    /// to `All` and `send_wildcards` set to `true`.
-    ///
-    /// Defaults to `false`.
-    ///
-    /// Builder panics if credentials are allowed, but the Origin is set to "*".
-    /// This is not allowed by W3C
+    /// Disabled by default; repeated calls have no additional effect. Allowing
+    /// all origins is compatible with credentials when the request origin is
+    /// echoed, but not with [`send_wildcard`](Self::send_wildcard).
+    /// The invalid combination is rejected by [`build`](Self::build).
     pub fn supports_credentials(mut self) -> Self {
         if let Some(cors) = cors(&mut self.cors, &self.error) {
             cors.supports_credentials = true
@@ -454,17 +443,16 @@ impl Cors {
         self
     }
 
-    /// Disable `Vary` header support.
+    /// Stops adding `Origin` to the response's `Vary` header.
     ///
-    /// When enabled the header `Vary: Origin` will be returned as per the W3
-    /// implementation guidelines.
+    /// By default, successful preflight and ordinary responses (including
+    /// requests without `Origin`) vary by origin. Existing `Vary` values are
+    /// preserved, and `Origin` is not added if any value already contains it
+    /// case-insensitively or contains `*`. This informs caches that responses
+    /// can differ by origin; it does not prohibit caching.
     ///
-    /// Setting this header when the `Access-Control-Allow-Origin` is
-    /// dynamically generated (e.g. when there is more than one allowed
-    /// origin, and an Origin than '*' is returned) informs CDNs and other
-    /// caches that the CORS headers are dynamic, and cannot be cached.
-    ///
-    /// By default `vary` header support is enabled.
+    /// Repeated calls have no additional effect. Existing `Vary` headers are
+    /// not removed.
     pub fn disable_vary_header(mut self) -> Self {
         if let Some(cors) = cors(&mut self.cors, &self.error) {
             cors.vary_header = false
@@ -472,14 +460,14 @@ impl Cors {
         self
     }
 
-    /// Disable *preflight* request support.
+    /// Passes preflight requests to the inner service instead of answering them.
     ///
-    /// When enabled cors middleware automatically handles *OPTIONS* requests
-    /// that carry the `Access-Control-Request-Method` header. Other *OPTIONS*
-    /// requests are passed to the inner service.
-    /// This is useful application level middleware.
+    /// By default, `OPTIONS` requests with `Access-Control-Request-Method` are
+    /// intercepted; other `OPTIONS` requests reach the application. Disabling
+    /// this does not disable origin validation or CORS response headers, but
+    /// method and requested-header checks no longer run.
     ///
-    /// By default *preflight* support is enabled.
+    /// Repeated calls have no additional effect.
     pub fn disable_preflight(mut self) -> Self {
         if let Some(cors) = cors(&mut self.cors, &self.error) {
             cors.preflight = false
@@ -487,7 +475,14 @@ impl Cors {
         self
     }
 
-    /// Construct cors middleware
+    /// Consumes this builder and constructs [`CorsMiddleware`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if a configured origin, method, or header name is invalid, or
+    /// if an origin cannot be represented in a response header. Also panics
+    /// when all origins, [`send_wildcard`](Self::send_wildcard), and
+    /// [`supports_credentials`](Self::supports_credentials) are combined.
     pub fn build<St>(self) -> CorsMiddleware<St> {
         let mut slf = if !self.methods {
             self.allowed_methods(vec![
@@ -767,10 +762,11 @@ impl Inner {
     }
 }
 
-/// `Middleware` for Cross-origin resource sharing support
+/// Configured CORS middleware, created by [`Cors::build`] or [`Cors::default`].
 ///
-/// The Cors struct contains the settings for CORS requests to be validated and
-/// for responses to be generated.
+/// Validates request origins and preflight policies, then adds CORS response
+/// headers. CORS validation failures are rendered using [`CorsError`]; inner
+/// service errors propagate unchanged.
 pub struct CorsMiddleware<St> {
     inner: Rc<Inner>,
     st: PhantomData<St>,
@@ -787,10 +783,7 @@ impl<S, St> Middleware<S, St> for CorsMiddleware<St> {
     }
 }
 
-/// `Middleware` for Cross-origin resource sharing support
-///
-/// The Cors struct contains the settings for CORS requests to be validated and
-/// for responses to be generated.
+/// Service wrapping an inner service with the policy from [`CorsMiddleware`].
 #[derive(Clone)]
 pub struct CorsService<S> {
     service: S,
@@ -1933,5 +1926,22 @@ mod tests {
             }
         }
         assert_eq!(calls.get(), 1);
+    }
+
+    /// STATEMENT: The `Default` trait builder behaves like `Cors::new`.
+    ///
+    /// HOW:
+    /// - Build middleware from `<Cors as Default>::default()` instead of `Cors::new`.
+    /// - Send a cross-origin request and confirm `build` does not panic and the request succeeds.
+    #[ntex::test]
+    async fn default_trait_builder_matches_new() {
+        let cors = <Cors as Default>::default()
+            .build()
+            .create(&(), test::ok_service())
+            .pipeline(());
+        let req = TestRequest::with_header("Origin", "https://www.example.com").to_srv_request();
+
+        let resp = cors.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

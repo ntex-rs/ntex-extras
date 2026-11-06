@@ -4,29 +4,29 @@ use ntex::web::{HttpResponse, error::DefaultError, error::WebResponseError};
 /// Errors which can occur when serving static files.
 #[derive(Debug, thiserror::Error)]
 pub enum FilesError {
-    /// Path is not a directory
+    /// The configured path is not a directory.
     #[allow(dead_code)]
     #[error("Path is not a directory. Unable to serve static files.")]
     IsNotDirectory,
 
-    /// Cannot render directory
+    /// A directory was requested but directory listings are disabled.
     #[error("Unable to render directory without index file.")]
     IsDirectory,
 
-    /// Only GET and HEAD methods are allowed
+    /// The request failed the configured guard or default `GET`/`HEAD` check.
     #[error("Request did not meet this resource's requirements.")]
     MethodNotAllowed,
 
-    /// Uri segments parsing error
+    /// A decoded URL segment contains a rejected character.
     #[error("{}", _0)]
     Uri(#[from] UriSegmentError),
 
-    /// IO Error
+    /// File resolution, opening, or directory rendering failed.
     #[error("Error reading: {}", _0)]
     Io(#[from] std::io::Error),
 }
 
-/// Return `NotFound` for `FilesError`
+/// Maps URL errors to `400`, rejected guards to `405`, and other file errors to `404`.
 impl<St> WebResponseError<St, DefaultError> for FilesError {
     fn error_response(&self, _: &St) -> HttpResponse {
         match self {
@@ -39,6 +39,7 @@ impl<St> WebResponseError<St, DefaultError> for FilesError {
     }
 }
 
+/// A character rejected while validating a percent-decoded URL path segment.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum UriSegmentError {
     /// The segment started with the wrapped invalid character.
@@ -52,7 +53,7 @@ pub enum UriSegmentError {
     BadEnd(char),
 }
 
-/// Return `BadRequest` for `UriSegmentError`
+/// Returns `400 Bad Request` for a rejected URL segment.
 impl<St> WebResponseError<St, DefaultError> for UriSegmentError {
     fn error_response(&self, _: &St) -> HttpResponse {
         HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
