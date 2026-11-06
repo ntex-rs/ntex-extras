@@ -187,7 +187,7 @@ impl InnerField {
         }
 
         // check boundary
-        if len > 4 && payload.buf[0] == b'\r' {
+        if len >= 4 && payload.buf[0] == b'\r' {
             let b_len = if &payload.buf[..2] == b"\r\n" && &payload.buf[2..4] == b"--" {
                 Some(4)
             } else if &payload.buf[1..3] == b"--" {
@@ -199,7 +199,11 @@ impl InnerField {
             if let Some(b_len) = b_len {
                 let b_size = boundary.len() + b_len;
                 if len < b_size {
-                    return Poll::Pending;
+                    return if payload.eof {
+                        Poll::Ready(Some(Err(MultipartError::Incomplete)))
+                    } else {
+                        Poll::Pending
+                    };
                 } else if &payload.buf[b_len..b_size] == boundary.as_bytes() {
                     // found boundary
                     return Poll::Ready(None);
@@ -215,6 +219,8 @@ impl InnerField {
                 if cur + 4 > len {
                     if cur > 0 {
                         Poll::Ready(Some(Ok(payload.buf.split_to(cur))))
+                    } else if payload.eof {
+                        Poll::Ready(Some(Err(MultipartError::Incomplete)))
                     } else {
                         Poll::Pending
                     }
@@ -268,10 +274,12 @@ impl InnerField {
             match payload.readline() {
                 Ok(None) => Poll::Pending,
                 Ok(Some(line)) => {
-                    if line.as_ref() != b"\r\n" {
-                        log::warn!("multipart field did not read all the data or it is malformed");
+                    if line.as_ref() == b"\r\n" {
+                        Poll::Ready(None)
+                    } else {
+                        // field data must end right before the boundary
+                        Poll::Ready(Some(Err(MultipartError::Boundary)))
                     }
-                    Poll::Ready(None)
                 }
                 Err(e) => Poll::Ready(Some(Err(e))),
             }

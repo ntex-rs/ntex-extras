@@ -1,5 +1,9 @@
 # Changes
 
+## [4.2.0] - 2026-11-06
+
+* Support generic structs in `MultipartForm` derive
+
 ## [4.1.0] - 2026-10-05
 
 * Update the `ntex` apis
