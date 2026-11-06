@@ -29,8 +29,20 @@
 [ntex-multipart-derive]: ntex-multipart-derive
 [ntex-session]: ntex-session
 
+## Documentation and community
+
+- [Framework guide](https://docs.ntex.rs/index.html)
+- [Web framework documentation](https://ntex.rs)
+- [Examples](https://github.com/ntex-rs/examples)
+- Minimum supported Rust version: 1.97
+
 ## License
 
-This project is licensed under
+This project is licensed under either of:
 
-* MIT license ([LICENSE](LICENSE) or [http://opensource.org/licenses/MIT](http://opensource.org/licenses/MIT))
+- Apache License, Version 2.0
+  ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license
+  ([LICENSE-MIT](LICENSE-MIT) or
+  <https://opensource.org/licenses/MIT>)
