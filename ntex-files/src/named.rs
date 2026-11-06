@@ -468,6 +468,7 @@ impl NamedFile {
                     if range.length > 0 {
                         length = range.length;
                         offset = range.start;
+                        resp.status(StatusCode::PARTIAL_CONTENT);
                         resp.encoding(ContentEncoding::Identity);
                         resp.header(
                             http::header::CONTENT_RANGE,
@@ -490,9 +491,6 @@ impl NamedFile {
             fut: None,
             counter: 0,
         };
-        if offset != 0 || length != self.md.len() {
-            resp.status(StatusCode::PARTIAL_CONTENT);
-        }
         resp.body(SizedStream::new(
             length,
             reader.map_err(|e| {

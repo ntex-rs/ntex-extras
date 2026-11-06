@@ -24,7 +24,6 @@ impl HttpRange {
             return Err(());
         }
 
-        let size_sig = size as i64;
         let mut no_overlap = false;
 
         let all_ranges: Vec<Option<HttpRange>> = header[PREFIX_LEN..]
@@ -40,53 +39,41 @@ impl HttpRange {
                 if start_str.is_empty() {
                     // If no start is specified, end specifies the
                     // range start relative to the end of the file.
-                    let mut length: i64 = end_str.parse().map_err(|_| ())?;
+                    let length = parse_pos(end_str)?;
 
                     if length == 0 {
                         // A zero-length suffix range selects no bytes.
                         no_overlap = true;
                         return Ok(None);
                     }
-                    if length > size_sig {
-                        length = size_sig;
-                    }
+                    let length = length.min(size);
 
                     Ok(Some(HttpRange {
-                        start: (size_sig - length) as u64,
-                        length: length as u64,
+                        start: size - length,
+                        length,
                     }))
                 } else {
-                    let start: i64 = start_str.parse().map_err(|_| ())?;
+                    let start = parse_pos(start_str)?;
 
-                    if start < 0 {
-                        return Err(());
-                    }
-                    if start >= size_sig {
+                    if start >= size {
                         no_overlap = true;
                         return Ok(None);
                     }
 
                     let length = if end_str.is_empty() {
                         // If no end is specified, range extends to end of the file.
-                        size_sig - start
+                        size - start
                     } else {
-                        let mut end: i64 = end_str.parse().map_err(|_| ())?;
+                        let end = parse_pos(end_str)?;
 
                         if start > end {
                             return Err(());
                         }
 
-                        if end >= size_sig {
-                            end = size_sig - 1;
-                        }
-
-                        end - start + 1
+                        end.min(size - 1) - start + 1
                     };
 
-                    Ok(Some(HttpRange {
-                        start: start as u64,
-                        length: length as u64,
-                    }))
+                    Ok(Some(HttpRange { start, length }))
                 }
             })
             .collect::<Result<_, _>>()?;
@@ -101,12 +88,26 @@ impl HttpRange {
     }
 }
 
+/// Parses a byte position, a value too large for `u64` saturates
+/// since it lies past the end of any file.
+fn parse_pos(s: &str) -> Result<u64, ()> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(());
+    }
+    Ok(s.parse().unwrap_or(u64::MAX))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     struct T(&'static str, u64, Vec<HttpRange>);
 
+    /// STATEMENT: `HttpRange::parse` selects the bytes requested by a `Range` header.
+    ///
+    /// HOW:
+    /// - Parse a table of headers against file sizes, including positions too large for `u64`.
+    /// - Check that invalid or unsatisfiable headers fail and others return the expected ranges.
     #[test]
     fn test_parse() {
         let tests = vec![
@@ -131,6 +132,24 @@ mod tests {
             T("bytes=         ", 10, vec![]),
             T("bytes= , , ,   ", 10, vec![]),
             T("bytes=-0", 10, vec![]),
+            T("bytes=+1-2", 10, vec![]),
+            T("bytes=99999999999999999999-", 10, vec![]),
+            T(
+                "bytes=0-99999999999999999999",
+                10,
+                vec![HttpRange {
+                    start: 0,
+                    length: 10,
+                }],
+            ),
+            T(
+                "bytes=-99999999999999999999",
+                10,
+                vec![HttpRange {
+                    start: 0,
+                    length: 10,
+                }],
+            ),
             T(
                 "bytes=-0,2-3",
                 10,
@@ -349,22 +368,11 @@ mod tests {
             let size = t.1;
             let expected = t.2;
 
-            let res = HttpRange::parse(header, size);
-
-            if res.is_err() {
-                if expected.is_empty() {
-                    continue;
-                } else {
-                    panic!(
-                        "parse({}, {}) returned error {:?}",
-                        header,
-                        size,
-                        res.unwrap_err()
-                    );
-                }
-            }
-
-            let got = res.unwrap();
+            let got = match HttpRange::parse(header, size) {
+                Ok(got) => got,
+                Err(_) if expected.is_empty() => continue,
+                Err(e) => panic!("parse({}, {}) returned error {:?}", header, size, e),
+            };
 
             if got.len() != expected.len() {
                 panic!(

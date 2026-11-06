@@ -249,7 +249,7 @@ macro_rules! __tm__ {
             use std::str;
             use $crate::header::*;
             use mime::*;
-            use $crate::method::Method;
+            use $crate::header::method::Method;
             use super::$id as HeaderField;
             $($tf)*
         }
@@ -257,7 +257,8 @@ macro_rules! __tm__ {
     }
 }
 
-/// Create a custom header type.
+/// Create a header type, for internal use only.
+#[doc(hidden)]
 #[macro_export]
 macro_rules! header {
     // $a:meta: Attributes associated with the header item (usually docs)
@@ -277,7 +278,7 @@ macro_rules! header {
                 NAME
             }
             #[inline]
-            fn parse_header<'a, T>(raw: &'a T) -> $crate::Result<Self>
+            fn parse_header<'a, T>(raw: &'a T) -> $crate::header::error::Result<Self>
             where T: $crate::header::RawLike<'a>
             {
                 $crate::header::parsing::from_comma_delimited(raw).map($id)
@@ -307,7 +308,7 @@ macro_rules! header {
                 NAME
             }
             #[inline]
-            fn parse_header<'a, T>(raw: &'a T) -> $crate::Result<Self>
+            fn parse_header<'a, T>(raw: &'a T) -> $crate::header::error::Result<Self>
             where T: $crate::header::RawLike<'a>
             {
                 $crate::header::parsing::from_comma_delimited(raw).map($id)
@@ -367,7 +368,7 @@ macro_rules! header {
                 NAME
             }
             #[inline]
-            fn parse_header<'a, T>(raw: &'a T) -> $crate::Result<Self>
+            fn parse_header<'a, T>(raw: &'a T) -> $crate::header::error::Result<Self>
             where T: $crate::header::RawLike<'a>
             {
                 $crate::header::parsing::from_one_raw_str(raw).map($id)
@@ -409,7 +410,7 @@ macro_rules! header {
                 NAME
             }
             #[inline]
-            fn parse_header<'a, T>(raw: &'a T) -> $crate::Result<Self>
+            fn parse_header<'a, T>(raw: &'a T) -> $crate::header::error::Result<Self>
             where T: $crate::header::RawLike<'a>
             {
                 $crate::header::parsing::from_one_raw_str::<_, <$value as ::std::borrow::ToOwned>::Owned>(raw).map($id::new)

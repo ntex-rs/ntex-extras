@@ -37,7 +37,7 @@ where
     for s in raw.iter() {
         let s = str::from_utf8(s)?;
         result.extend(
-            s.split(',')
+            split_unquoted(s, ',', false)
                 .filter_map(|x| match x.trim() {
                     "" => None,
                     y => Some(y),
@@ -46,6 +46,27 @@ where
         )
     }
     Ok(result)
+}
+
+/// Splits `s` on `sep`, ignoring separators inside of quoted strings.
+///
+/// With `escapes` a backslash escapes the next character of a quoted string,
+/// entity tags have no escapes and may contain a backslash.
+pub(crate) fn split_unquoted(s: &str, sep: char, escapes: bool) -> impl Iterator<Item = &str> {
+    let mut quoted = false;
+    let mut escaped = false;
+    s.split(move |c: char| {
+        if escaped {
+            escaped = false;
+        } else if escapes && quoted && c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            quoted = !quoted;
+        } else if !quoted && c == sep {
+            return true;
+        }
+        false
+    })
 }
 
 /// Format an array into a comma-delimited string.
@@ -192,8 +213,28 @@ mod percent_encoding_http {
 
 #[cfg(test)]
 mod tests {
-    use super::{Charset, ExtendedValue, parse_extended_value};
+    use super::{Charset, ExtendedValue, from_comma_delimited, parse_extended_value};
+    use crate::header::{EntityTag, Raw};
     use language_tags::LanguageTag;
+
+    /// STATEMENT: A comma inside of a quoted entity tag does not split the list.
+    ///
+    /// HOW:
+    /// - Parse a list with a tag containing `,` and a weak tag ending in `\`.
+    /// - Check that exactly those tags plus the trailing one are returned.
+    #[test]
+    fn test_comma_delimited_quoted_entity_tags() {
+        let raw: Raw = r#""x,y", W/"a\", "b""#.into();
+        let tags: Vec<EntityTag> = from_comma_delimited(&raw).unwrap();
+        assert_eq!(
+            tags,
+            vec![
+                EntityTag::strong("x,y".to_owned()),
+                EntityTag::weak("a\\".to_owned()),
+                EntityTag::strong("b".to_owned()),
+            ]
+        );
+    }
 
     #[test]
     fn test_parse_extended_value_with_encoding_and_language_tag() {

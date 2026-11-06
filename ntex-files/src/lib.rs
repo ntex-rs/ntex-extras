@@ -23,7 +23,7 @@ use ntex::web::error::{WebError, WebResponseError};
 use ntex::web::guard::Guard;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse, State, WebRequest, WebResponse};
 use ntex::{Ctx, IntoServiceFactory, Service, ServiceFactory, util::Bytes};
-use percent_encoding::{CONTROLS, utf8_percent_encode};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use v_htmlescape::escape_fmt;
 
 mod error;
@@ -76,6 +76,8 @@ impl Stream for ChunkedReadFile {
                         BlockingError::Error(e) => e,
                         BlockingError::Canceled => io::Error::other("Operation is canceled"),
                     };
+                    // the file is consumed by the failed read, so the stream ends here
+                    self.fut.take();
                     Poll::Ready(Some(Err(e)))
                 }
                 Poll::Pending => Poll::Pending,
@@ -89,7 +91,9 @@ impl Stream for ChunkedReadFile {
         if size == counter {
             Poll::Ready(None)
         } else {
-            let mut file = self.file.take().expect("Use after completion");
+            let Some(mut file) = self.file.take() else {
+                return Poll::Ready(None);
+            };
             self.fut = Some(
                 web::block(move || {
                     let max_bytes: usize = cmp::min(size.saturating_sub(counter), 65_536) as usize;
@@ -142,12 +146,19 @@ impl Directory {
     }
 }
 
-// show file url as relative to static path
-macro_rules! encode_file_url {
-    ($path:ident) => {
-        utf8_percent_encode(&$path, CONTROLS)
-    };
-}
+// characters that must be percent-encoded in a file name used as an url path segment
+const FILE_NAME_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'\'')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'\\')
+    .add(b'`');
 
 // " -- &quot;  & -- &amp;  ' -- &#x27;  < -- &lt;  > -- &gt;  / -- &#x2f;
 macro_rules! encode_file_name {
@@ -156,19 +167,36 @@ macro_rules! encode_file_name {
     };
 }
 
+// escape characters that are significant inside of a quoted html attribute
+fn escape_attr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<WebResponse, io::Error> {
-    let index_of = format!("Index of {}", req.path());
+    let index_of = format!("Index of {}", escape_fmt(req.path()));
     let mut body = String::new();
-    let base = Path::new(req.path());
+    let base = req.path().trim_end_matches('/');
 
     for entry in dir.path.read_dir()? {
         if dir.is_visible(&entry) {
             let entry = entry.unwrap();
-            let p = match entry.path().strip_prefix(&dir.path) {
-                Ok(p) if cfg!(windows) => base.join(p).to_string_lossy().replace('\\', "/"),
-                Ok(p) => base.join(p).to_string_lossy().into_owned(),
-                Err(_) => continue,
-            };
+            let href = format!(
+                "{}/{}",
+                base,
+                utf8_percent_encode(&entry.file_name().to_string_lossy(), FILE_NAME_ENCODE_SET)
+            );
+            let href = escape_attr(&href);
 
             // if file is a directory, add '/' to the end of the name
             if let Ok(metadata) = entry.metadata() {
@@ -176,14 +204,14 @@ fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<WebResponse, 
                     let _ = write!(
                         body,
                         "<li><a href=\"{}\">{}/</a></li>",
-                        encode_file_url!(p),
+                        href,
                         encode_file_name!(entry),
                     );
                 } else {
                     let _ = write!(
                         body,
                         "<li><a href=\"{}\">{}</a></li>",
-                        encode_file_url!(p),
+                        href,
                         encode_file_name!(entry),
                     );
                 }
@@ -234,6 +262,7 @@ pub struct Files<St: State, In> {
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
     guards: Option<Rc<dyn Guard>>,
+    follow_symlinks: bool,
 }
 
 impl<St: State, In> Clone for Files<St, In> {
@@ -249,6 +278,7 @@ impl<St: State, In> Clone for Files<St, In> {
             path: self.path.clone(),
             mime_override: self.mime_override.clone(),
             guards: self.guards.clone(),
+            follow_symlinks: self.follow_symlinks,
         }
     }
 }
@@ -257,13 +287,16 @@ impl<St: State, In: 'static> Files<St, In> {
     /// Create new `Files` instance for specified base directory.
     ///
     /// Filesystem operations run on the worker thread that handles the request.
+    ///
+    /// If the directory cannot be resolved, an error is logged and
+    /// every request is answered with `404 Not Found`.
     pub fn new<T: Into<PathBuf>>(path: &str, dir: T) -> Self {
         let orig_dir = dir.into();
         let dir = match orig_dir.canonicalize() {
             Ok(canon_dir) => canon_dir,
-            Err(_) => {
-                log::error!("Specified path is not a directory: {:?}", orig_dir);
-                PathBuf::new()
+            Err(e) => {
+                log::error!("Cannot resolve static files directory {orig_dir:?}: {e}");
+                orig_dir
             }
         };
 
@@ -278,7 +311,16 @@ impl<St: State, In: 'static> Files<St, In> {
             mime_override: None,
             file_flags: named::Flags::default(),
             guards: None,
+            follow_symlinks: false,
         }
+    }
+
+    /// Serve files that resolve outside of the base directory through symlinks.
+    ///
+    /// By default such files are answered with `404 Not Found`.
+    pub fn follow_symlinks(mut self, value: bool) -> Self {
+        self.follow_symlinks = value;
+        self
     }
 
     /// Show files listing for directories.
@@ -416,6 +458,7 @@ where
             mime_override: self.mime_override.clone(),
             file_flags: self.file_flags.clone(),
             guards: self.guards.clone(),
+            follow_symlinks: self.follow_symlinks,
         };
 
         if let Some(default) = self.default.as_ref() {
@@ -445,6 +488,7 @@ pub struct FilesService<St: State, In> {
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
     guards: Option<Rc<dyn Guard>>,
+    follow_symlinks: bool,
 }
 
 impl<St: State, In> FilesService<St, In>
@@ -495,69 +539,103 @@ where
             Err(e) => return Ok(req.error_response(ctx.st(), &FilesError::from(e))),
         };
 
-        // full filepath
-        let path = match self.directory.join(real_path.0).canonicalize() {
-            Ok(path) => path,
-            Err(e) => return self.handle_io_error(e, req, ctx).await,
-        };
+        let directory = self.directory.clone();
+        let index = self.index.clone();
+        let redirect = self.redirect_to_slash && !req.path().ends_with('/');
+        let follow_symlinks = self.follow_symlinks;
+        let target = web::block(move || {
+            resolve(
+                &directory,
+                real_path.0,
+                index.as_deref(),
+                redirect,
+                follow_symlinks,
+            )
+        })
+        .await;
 
-        if path.is_dir() {
-            if let Some(ref redir_index) = self.index {
-                if self.redirect_to_slash && !req.path().ends_with('/') {
-                    let redirect_to = format!("{}/", req.path());
-                    return Ok(req.into_response(
-                        HttpResponse::Found()
-                            .header(http::header::LOCATION, redirect_to)
-                            .body("")
-                            .into_body(),
-                    ));
+        match target {
+            Ok(Target::File(mut named_file)) => {
+                if let Some(ref mime_override) = self.mime_override {
+                    let new_disposition = mime_override(&named_file.content_type.type_());
+                    named_file.content_disposition.disposition = new_disposition;
                 }
 
-                let path = path.join(redir_index);
-
-                match NamedFile::open(path) {
-                    Ok(mut named_file) => {
-                        if let Some(ref mime_override) = self.mime_override {
-                            let new_disposition = mime_override(&named_file.content_type.type_());
-                            named_file.content_disposition.disposition = new_disposition;
-                        }
-
-                        named_file.flags = self.file_flags.clone();
-                        let (req, _, _) = req.into_parts();
-                        Ok(WebResponse::new(named_file.into_response(&req), req))
-                    }
-                    Err(e) => self.handle_io_error(e, req, ctx).await,
-                }
-            } else if self.show_index {
-                let dir = Directory::new(self.directory.clone(), path);
+                named_file.flags = self.file_flags.clone();
                 let (req, _, _) = req.into_parts();
-                let x = (self.renderer)(&dir, &req);
-                match x {
-                    Ok(resp) => Ok(resp),
-                    Err(e) => Ok(WebResponse::from_err(ctx.st(), &FilesError::from(e), req)),
-                }
-            } else {
-                Ok(WebResponse::from_err(
-                    ctx.st(),
-                    &FilesError::IsDirectory,
-                    req.into_parts().0,
+                Ok(WebResponse::new((*named_file).into_response(&req), req))
+            }
+            Ok(Target::Redirect) => {
+                let redirect_to = format!("{}/", req.path());
+                Ok(req.into_response(
+                    HttpResponse::Found()
+                        .header(http::header::LOCATION, redirect_to)
+                        .body("")
+                        .into_body(),
                 ))
             }
-        } else {
-            match NamedFile::open(path) {
-                Ok(mut named_file) => {
-                    if let Some(ref mime_override) = self.mime_override {
-                        let new_disposition = mime_override(&named_file.content_type.type_());
-                        named_file.content_disposition.disposition = new_disposition;
-                    }
-
-                    named_file.flags = self.file_flags.clone();
+            Ok(Target::Dir(path)) => {
+                if self.show_index {
+                    let dir = Directory::new(self.directory.clone(), path);
                     let (req, _, _) = req.into_parts();
-                    Ok(WebResponse::new(named_file.into_response(&req), req))
+                    match (self.renderer)(&dir, &req) {
+                        Ok(resp) => Ok(resp),
+                        Err(e) => Ok(WebResponse::from_err(ctx.st(), &FilesError::from(e), req)),
+                    }
+                } else {
+                    Ok(WebResponse::from_err(
+                        ctx.st(),
+                        &FilesError::IsDirectory,
+                        req.into_parts().0,
+                    ))
                 }
-                Err(e) => self.handle_io_error(e, req, ctx).await,
+            }
+            Err(BlockingError::Error(e)) => self.handle_io_error(e, req, ctx).await,
+            Err(BlockingError::Canceled) => {
+                let e = io::Error::other("Operation is canceled");
+                self.handle_io_error(e, req, ctx).await
             }
         }
+    }
+}
+
+/// Filesystem object a request path resolves to.
+enum Target {
+    File(Box<NamedFile>),
+    Dir(PathBuf),
+    Redirect,
+}
+
+/// Resolves a request path inside of `directory`, runs on the blocking thread pool.
+///
+/// A canonical path outside of `directory` is reported as not found,
+/// unless `follow_symlinks` is set.
+fn resolve(
+    directory: &Path,
+    path: PathBuf,
+    index: Option<&str>,
+    redirect: bool,
+    follow_symlinks: bool,
+) -> io::Result<Target> {
+    let contained = |path: PathBuf| -> io::Result<PathBuf> {
+        let path = path.canonicalize()?;
+        if follow_symlinks || path.starts_with(directory) {
+            Ok(path)
+        } else {
+            Err(io::ErrorKind::NotFound.into())
+        }
+    };
+
+    let path = contained(directory.join(path))?;
+    if !path.is_dir() {
+        return NamedFile::open(path).map(|file| Target::File(Box::new(file)));
+    }
+    match index {
+        Some(_) if redirect => Ok(Target::Redirect),
+        Some(index) => {
+            NamedFile::open(contained(path.join(index))?).map(|file| Target::File(Box::new(file)))
+        }
+        None => Ok(Target::Dir(path)),
     }
 }
 
@@ -570,7 +648,12 @@ impl PathBufWrp {
         for segment in path.split('/') {
             if segment == ".." {
                 buf.pop();
-            } else if segment.starts_with('.') {
+                continue;
+            }
+
+            // validate the decoded segment, encoded characters must not bypass checks
+            let segment = <Url as ResourcePath>::unquote(segment);
+            if segment.starts_with('.') {
                 return Err(UriSegmentError::BadStart('.'));
             } else if segment.starts_with('*') {
                 return Err(UriSegmentError::BadStart('*'));
@@ -582,10 +665,14 @@ impl PathBufWrp {
                 return Err(UriSegmentError::BadEnd('<'));
             } else if segment.is_empty() {
                 continue;
+            } else if segment.contains('/') {
+                return Err(UriSegmentError::BadChar('/'));
+            } else if segment.contains('\0') {
+                return Err(UriSegmentError::BadChar('\0'));
             } else if cfg!(windows) && segment.contains('\\') {
                 return Err(UriSegmentError::BadChar('\\'));
             } else {
-                buf.push(<Url as ResourcePath>::unquote(segment).as_ref())
+                buf.push(segment.as_ref())
             }
         }
 
@@ -1496,13 +1583,7 @@ mod tests {
                 let body = test::read_body(response).await;
 
                 let (expected_status, expected_range, expected_body) = match selected {
-                    // A range that covers the whole file is answered with 200
-                    // and the whole file.
-                    Selected::Bytes(0, last) if last == size - 1 => (
-                        StatusCode::OK,
-                        Some(format!("bytes 0-{last}/{size}")),
-                        &data[..],
-                    ),
+                    // A range that covers the whole file is a 206 as well.
                     Selected::Bytes(first, last) => (
                         StatusCode::PARTIAL_CONTENT,
                         Some(format!("bytes {first}-{last}/{size}")),
@@ -2062,5 +2143,150 @@ mod tests {
             PathBufWrp::get_pathbuf("/seg1/../seg2/").unwrap().0,
             PathBuf::from_iter(vec!["seg2"])
         );
+    }
+
+    /// STATEMENT: Percent-encoded segments are validated after decoding, so they cannot
+    /// bypass the traversal and hidden-file checks.
+    ///
+    /// HOW:
+    /// - Call `PathBufWrp::get_pathbuf` with encoded `..`, a leading `.`, `/` and NUL.
+    /// - Confirm each is rejected with the matching `UriSegmentError`.
+    #[test]
+    fn test_path_buf_encoded_segments() {
+        assert_eq!(
+            PathBufWrp::get_pathbuf("/%2e%2e/Cargo.toml").map(|t| t.0),
+            Err(UriSegmentError::BadStart('.'))
+        );
+        assert_eq!(
+            PathBufWrp::get_pathbuf("/%2ehidden").map(|t| t.0),
+            Err(UriSegmentError::BadStart('.'))
+        );
+        assert_eq!(
+            PathBufWrp::get_pathbuf("/%2Fetc%2Fpasswd").map(|t| t.0),
+            Err(UriSegmentError::BadChar('/'))
+        );
+        assert_eq!(
+            PathBufWrp::get_pathbuf("/src%2F..%2F..%2FCargo.toml").map(|t| t.0),
+            Err(UriSegmentError::BadChar('/'))
+        );
+        assert_eq!(
+            PathBufWrp::get_pathbuf("/a%00b").map(|t| t.0),
+            Err(UriSegmentError::BadChar('\0'))
+        );
+    }
+
+    /// STATEMENT: Encoded traversal requests cannot read files outside of the base directory.
+    ///
+    /// HOW:
+    /// - Serve the `src` directory, so the crate's `Cargo.toml` lies outside the root.
+    /// - Request it through encoded `..` and `/` segments.
+    /// - Confirm each request is rejected with `400 Bad Request`.
+    #[ntex::test]
+    async fn test_encoded_traversal_rejected() {
+        let srv = test::init_service(App::new().service(Files::new("/", "src"))).await;
+
+        for uri in [
+            "/%2e%2e/Cargo.toml",
+            "/lib.rs%2F..%2F..%2FCargo.toml",
+            "/%2FCargo.toml",
+        ] {
+            let req = TestRequest::with_uri(uri).to_request();
+            let resp = test::call_service(&srv, req).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    /// STATEMENT: Symlinks that resolve outside of the base directory are only served
+    /// when `Files::follow_symlinks` is enabled.
+    ///
+    /// HOW:
+    /// - Create a root directory with a symlinked file and a symlinked index file,
+    ///   both pointing at a file in another directory.
+    /// - Confirm both answer `404 Not Found` by default.
+    /// - Enable `follow_symlinks(true)` and confirm both are served with `200 OK`.
+    #[cfg(unix)]
+    #[ntex::test]
+    async fn test_symlink_outside_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, "secret").unwrap();
+        std::os::unix::fs::symlink(&secret, root.path().join("link.txt")).unwrap();
+        fs::create_dir(root.path().join("sub")).unwrap();
+        std::os::unix::fs::symlink(&secret, root.path().join("sub/index.txt")).unwrap();
+
+        for (follow, status) in [(false, StatusCode::NOT_FOUND), (true, StatusCode::OK)] {
+            let files = Files::new("/", root.path())
+                .index_file("index.txt")
+                .follow_symlinks(follow);
+            let srv = test::init_service(App::new().service(files)).await;
+
+            for uri in ["/link.txt", "/sub/"] {
+                let req = TestRequest::with_uri(uri).to_request();
+                let resp = test::call_service(&srv, req).await;
+                assert_eq!(resp.status(), status, "{uri} follow={follow}");
+            }
+        }
+    }
+
+    /// STATEMENT: Directory listings escape file names in both link targets and link text.
+    ///
+    /// HOW:
+    /// - List a directory holding a file whose name contains `"`, `<` and `>`.
+    /// - Confirm the raw markup never appears in the body.
+    /// - Confirm the link target is percent-encoded and the link text is html-escaped.
+    #[cfg(unix)]
+    #[ntex::test]
+    async fn test_files_listing_escapes_names() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a\"><b>.txt"), "x").unwrap();
+
+        let srv = test::init_service(
+            App::new().service(Files::new("/", root.path()).show_files_listing()),
+        )
+        .await;
+        let req = TestRequest::with_uri("/").to_request();
+        let resp = test::call_service(&srv, req).await;
+        let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+
+        assert!(!body.contains("\"><b>"), "{body}");
+        assert!(body.contains("href=\"/a%22%3E%3Cb%3E.txt\""), "{body}");
+        assert!(body.contains(">a&quot;&gt;&lt;b&gt;.txt</a>"), "{body}");
+    }
+
+    /// STATEMENT: A base directory that cannot be resolved never falls back to serving
+    /// the current working directory.
+    ///
+    /// HOW:
+    /// - Create `Files` for a missing directory.
+    /// - Request `Cargo.toml`, which exists in the current working directory.
+    /// - Confirm the response is `404 Not Found`.
+    #[ntex::test]
+    async fn test_missing_root_serves_nothing() {
+        let srv = test::init_service(App::new().service(Files::new("/", "missing"))).await;
+        let req = TestRequest::with_uri("/Cargo.toml").to_request();
+        let resp = test::call_service(&srv, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+    /// STATEMENT: `ChunkedReadFile` ends after a failed read instead of polling it again.
+    ///
+    /// HOW:
+    /// - Read `tests/test.binary` with a `size` larger than the file.
+    /// - Check that the stream yields the file, then `UnexpectedEof`, then ends.
+    #[ntex::test]
+    async fn test_chunked_read_file_ends_after_error() {
+        use futures::StreamExt;
+
+        let mut reader = ChunkedReadFile {
+            size: 110,
+            offset: 0,
+            file: Some(File::open("tests/test.binary").unwrap()),
+            fut: None,
+            counter: 0,
+        };
+        assert_eq!(reader.next().await.unwrap().unwrap().len(), 100);
+        let err = reader.next().await.unwrap().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(reader.next().await.is_none());
     }
 }

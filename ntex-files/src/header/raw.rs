@@ -259,11 +259,11 @@ macro_rules! literals {
         fn maybe_literal(s: Cow<[u8]>) -> Bytes {
             match s.len() {
                 $($len => {
-                    $(
-                    if s.as_ref() == $value {
-                        return Bytes::from_static($value);
+                    for value in [$($value),+] {
+                        if s.as_ref() == value {
+                            return Bytes::from_static(value);
+                        }
                     }
-                    )+
                 })+
 
                 _ => ()

@@ -275,7 +275,7 @@ impl Header for ContentDisposition {
         T: RawLike<'a>,
     {
         parsing::from_one_raw_str(raw).and_then(|s: String| {
-            let mut sections = s.split(';');
+            let mut sections = parsing::split_unquoted(&s, ';', true);
             let disposition = match sections.next() {
                 Some(s) => s.trim(),
                 None => return Err(error::Error::Header),
@@ -499,6 +499,19 @@ mod tests {
             })],
         };
         assert_eq!(a, b);
+    }
+
+    /// STATEMENT: A `;` inside of a quoted parameter value does not split the parameter.
+    ///
+    /// HOW:
+    /// - Parse a header whose quoted `filename` contains `;` and an escaped quote.
+    /// - Check that `name` and the whole `filename` are parsed.
+    #[test]
+    fn test_parse_quoted_separator() {
+        let a: Raw = r#"form-data; name="f"; filename="a;b \"c\".txt""#.into();
+        let a = ContentDisposition::parse_header(&a).unwrap();
+        assert_eq!(a.get_name(), Some("f"));
+        assert_eq!(a.get_filename(), Some(r#"a;b "c".txt"#));
     }
 
     #[test]
