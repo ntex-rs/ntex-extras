@@ -1,4 +1,4 @@
-//! Error and Result module.
+//! Parsing errors for the legacy typed header implementation.
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -7,7 +7,7 @@ use std::string::FromUtf8Error;
 
 use self::Error::{Header, Method, Status, TooLarge, Utf8, Version};
 
-/// Result type often returned from methods that can have hyper `Error`s.
+/// Result returned by typed header parsers.
 pub type Result<T> = ::std::result::Result<T, Error>;
 
 /// Errors while parsing headers and associated types.
@@ -15,13 +15,13 @@ pub type Result<T> = ::std::result::Result<T, Error>;
 pub enum Error {
     /// An invalid `Method`, such as `GE,T`.
     Method,
-    /// An invalid `HttpVersion`, such as `HTP/1.1`
+    /// An invalid HTTP version, such as `HTP/1.1`.
     Version,
     /// An invalid `Header`.
     Header,
     /// A message head is too large to be reasonable.
     TooLarge,
-    /// An invalid `Status`, such as `1337 ELITE`.
+    /// An invalid HTTP status, such as `1337 ELITE`.
     Status,
     /// Parsing a field as string failed.
     Utf8(Utf8Error),

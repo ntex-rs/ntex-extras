@@ -8,11 +8,32 @@ use serde::de::DeserializeOwned;
 use crate::form::{FieldReader, Limits, bytes::Bytes};
 use crate::{Field, MultipartError};
 
-/// Deserialize from JSON.
+/// Deserializes an in-memory field body as JSON using [`serde_json`].
+///
+/// By default, a parsed part `Content-Type` is required and its subtype or
+/// structured suffix must be `json` (for example, `application/json` or
+/// `application/problem+json`). The top-level media type is not restricted and
+/// charset parameters do not cause transcoding. Configure this check through
+/// [`JsonConfig`] in request app state. Both total and memory budgets apply.
+///
+/// # Errors
+///
+/// Content-type and deserialization failures return [`MultipartError::Field`]
+/// with a [`JsonFieldError`] rendered as a 400 response. Stream and budget errors
+/// from [`Bytes`] propagate without being wrapped in a field error.
+///
+/// # Panics
+///
+/// Manual [`FieldReader::read_field`] calls inherit the parsed-disposition
+/// precondition of [`Bytes`].
 #[derive(Debug, Deref, DerefMut)]
-pub struct Json<T: DeserializeOwned>(pub T);
+pub struct Json<T: DeserializeOwned>(
+    /// The deserialized JSON value.
+    pub T,
+);
 
 impl<T: DeserializeOwned> Json<T> {
+    /// Consumes the wrapper and returns the deserialized value.
     pub fn into_inner(self) -> T {
         self.0
     }
@@ -58,26 +79,34 @@ where
     }
 }
 
+/// JSON-specific field failures, rendered as 400 Bad Request responses.
+///
+/// [`Json`] stores the rendered response in [`MultipartError::Field`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum JsonFieldError {
-    /// Deserialize error.
+    /// The field body could not be deserialized into the requested JSON type.
     #[error("Json deserialize error: {:?}", _0)]
-    Deserialize(serde_json::Error),
+    Deserialize(
+        /// The JSON parser or deserializer failure.
+        serde_json::Error,
+    ),
 
-    /// Content type error.
+    /// The parsed content type is missing, or neither its subtype nor suffix is `json`.
     #[error("Content type error")]
     ContentType,
 }
 
-/// Return `BadRequest` for `JsonFieldError`
+/// Renders JSON field errors with HTTP status 400 Bad Request.
 impl<St> WebResponseError<St, DefaultError> for JsonFieldError {
     fn error_response(&self, _: &St) -> HttpResponse {
         HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }
 
-/// Configuration for the [`Json`] field reader.
+/// Configuration for [`Json`], registered with `App::app_state`.
+///
+/// Content-type validation is enabled by default.
 #[derive(Clone)]
 pub struct JsonConfig {
     validate_content_type: bool,
@@ -88,7 +117,11 @@ const DEFAULT_CONFIG: JsonConfig = JsonConfig {
 };
 
 impl JsonConfig {
-    /// Sets whether or not the field must have a valid `Content-Type` header to be parsed.
+    /// Enables or disables JSON media-type validation (enabled by default).
+    ///
+    /// When enabled, the parsed `Content-Type` must have subtype `json` or suffix
+    /// `+json`; no top-level type is required. Missing or malformed headers fail.
+    /// Disabling this check does not change JSON deserialization or charset handling.
     pub fn validate_content_type(mut self, validate_content_type: bool) -> Self {
         self.validate_content_type = validate_content_type;
         self

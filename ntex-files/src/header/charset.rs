@@ -4,13 +4,14 @@ use std::str::FromStr;
 use self::Charset::*;
 use super::error;
 
-/// A Mime charset.
+/// A MIME character-set label, not a character decoder.
 ///
-/// The string representation is normalised to upper case.
+/// Parsing recognizes the listed charsets case-insensitively and normalizes
+/// unknown labels to ASCII uppercase. It accepts arbitrary labels without
+/// validating their syntax. Formatting uses built-in names (`Shift-JIS` for
+/// [`Self::Shift_Jis`]) and preserves a directly constructed [`Self::Ext`] string.
 ///
-/// See [http://www.iana.org/assignments/character-sets/character-sets.xhtml][url].
-///
-/// [url]: http://www.iana.org/assignments/character-sets/character-sets.xhtml
+/// See the [IANA character-set registry](https://www.iana.org/assignments/character-sets/character-sets.xhtml).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 pub enum Charset {
@@ -36,7 +37,7 @@ pub enum Charset {
     Iso_8859_9,
     /// ISO-8859-10
     Iso_8859_10,
-    /// Shift_JIS
+    /// Shift JIS, formatted as `Shift-JIS`.
     Shift_Jis,
     /// EUC-JP
     Euc_Jp,
@@ -62,7 +63,7 @@ pub enum Charset {
     Big5,
     /// KOI8-R
     Koi8_R,
-    /// An arbitrary charset specified as a string
+    /// An unrecognized label; parsing uppercases it, but direct construction preserves it.
     Ext(String),
 }
 

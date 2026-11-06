@@ -862,3 +862,19 @@ async fn temp_files_handle_fragmented_uploads_and_payload_errors() {
         }
     }
 }
+
+/// STATEMENT: A part with an empty `name` is handled like any unknown field.
+///
+/// HOW:
+/// - Submit a form with an extra part named `""` alongside the required field.
+/// - Confirm extraction succeeds in a debug build and keeps the required value.
+#[ntex::test]
+async fn empty_field_name_is_ignored() {
+    let form = extract::<IgnoreDuplicates>(multipart_request(&[
+        Part::new("", b"ignored"),
+        Part::new("required", b"1"),
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(form.required.0, 1);
+}

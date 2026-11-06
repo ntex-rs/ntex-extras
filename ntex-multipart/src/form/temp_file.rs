@@ -9,19 +9,41 @@ use tempfile::NamedTempFile;
 
 use crate::{Field, MultipartError, form::FieldReader, form::Limits};
 
-/// Write the field to a temporary file on disk.
+/// Streams a field body to a newly created [`NamedTempFile`] on disk.
+///
+/// File writes run through [`spawn_blocking`]. This reader debits the total and
+/// field-specific byte budgets, but not the memory budget. It does not validate
+/// the content type or use the client filename as the on-disk name.
+/// Configure the destination directory with [`TempFileConfig`] in request app state.
+///
+/// # Errors
+///
+/// Stream and budget errors propagate directly. File creation, reopening, writing,
+/// and flushing failures return [`MultipartError::Field`] containing a
+/// [`TempFileError`] rendered as a 500 response. Blocking task failures return
+/// [`MultipartError::Blocking`].
+///
+/// # Panics
+///
+/// Calling [`FieldReader::read_field`] manually with a field whose
+/// [`Field::content_disposition`] is `None` panics after writing its body.
+/// The typed form extractor ensures a `form-data` disposition is present.
 #[derive(Debug)]
 pub struct TempFile {
-    /// The temporary file on disk.
+    /// The disk-backed file, deleted on drop unless kept or persisted through `tempfile`.
+    ///
+    /// Its generated path is independent of [`Self::file_name`].
     pub file: NamedTempFile,
 
-    /// The value of the `content-type` header.
+    /// The parsed part `Content-Type`, or `None` if absent or invalid.
     pub content_type: Option<Mime>,
 
-    /// The `filename` value in the `content-disposition` header.
+    /// The optional client-supplied `filename` parameter from `Content-Disposition`.
+    ///
+    /// It is not sanitized for use as a filesystem path.
     pub file_name: Option<String>,
 
-    /// The size in bytes of the file.
+    /// The number of field-body bytes successfully written to the file.
     pub size: usize,
 }
 
@@ -80,22 +102,31 @@ impl FieldReader for TempFile {
     }
 }
 
+/// Temporary-file I/O failures, rendered as 500 Internal Server Error responses.
+///
+/// [`TempFile`] stores the rendered response in [`MultipartError::Field`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TempFileError {
-    /// File I/O Error
+    /// Creating, reopening, writing, or flushing the file failed.
     #[error("File I/O error: {}", _0)]
-    FileIo(io::Error),
+    FileIo(
+        /// The underlying filesystem I/O failure.
+        io::Error,
+    ),
 }
 
-/// Return `BadRequest` for `TempFileError`
+/// Renders temporary-file errors with HTTP status 500 Internal Server Error.
 impl<St> WebResponseError<St, DefaultError> for TempFileError {
     fn error_response(&self, _: &St) -> HttpResponse {
         HttpResponse::render_with(StatusCode::INTERNAL_SERVER_ERROR, self)
     }
 }
 
-/// Configuration for the [`TempFile`] field reader.
+/// Destination directory for [`TempFile`], registered with `App::app_state`.
+///
+/// By default, [`NamedTempFile::new`] selects the platform's temporary directory.
+/// The configured directory is used as-is and is not created by this reader.
 #[derive(Clone)]
 pub struct TempFileConfig {
     directory: Option<PathBuf>,
@@ -112,9 +143,14 @@ impl TempFileConfig {
 }
 
 impl TempFileConfig {
-    /// Sets the directory that temp files will be created in.
+    /// Sets the directory in which new temporary files are created.
     ///
-    /// The default temporary file location is platform dependent.
+    /// The directory must already exist and allow file creation; relative paths
+    /// are relative to the process working directory. This setter only stores the
+    /// path and performs no I/O. The default is the platform temporary directory.
+    ///
+    /// An unusable directory fails later during field reading with
+    /// [`MultipartError::Field`], not when this setter is called.
     pub fn directory(mut self, dir: impl AsRef<Path>) -> Self {
         self.directory = Some(dir.as_ref().to_owned());
         self

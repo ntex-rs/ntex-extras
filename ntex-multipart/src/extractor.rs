@@ -9,30 +9,26 @@ use crate::form::{Limits, State};
 use crate::multipart::Multipart;
 use crate::{MultipartCollect, MultipartError, MultipartForm, multipart_form::MultipartFormConfig};
 
-/// Get request's payload as multipart stream
+/// Takes the request payload as a streaming [`Multipart`] parser.
 ///
-/// Content-type: multipart/form-data;
+/// Extraction itself is infallible: request-header errors appear as the first
+/// stream item. All `multipart/*` request subtypes are accepted, but nested parts
+/// are not supported.
 ///
-/// ## Server example
+/// ```
+/// use futures::TryStreamExt;
+/// use ntex::web::HttpResponse;
+/// use ntex_multipart::{Multipart, MultipartError};
 ///
-/// ```rust
-/// use futures::{Stream, StreamExt};
-/// use ntex::web::{self, HttpResponse};
-/// use ntex_multipart as mp;
-///
-/// async fn index(mut payload: mp::Multipart) -> Result<HttpResponse, mp::MultipartError> {
-///     // iterate over multipart stream
-///     while let Some(item) = payload.next().await {
-///            let mut field = item?;
-///
-///            // Field in turn is stream of *Bytes* object
-///            while let Some(chunk) = field.next().await {
-///                println!("-- CHUNK: \n{:?}", std::str::from_utf8(&chunk?));
-///            }
+/// async fn upload(mut body: Multipart) -> Result<HttpResponse, MultipartError> {
+///     while let Some(mut field) = body.try_next().await? {
+///         while let Some(chunk) = field.try_next().await? {
+///             // Process each chunk without collecting the whole field.
+///             println!("received {} bytes", chunk.len());
+///         }
 ///     }
 ///     Ok(HttpResponse::Ok().into())
 /// }
-/// # fn main() {}
 /// ```
 impl<St> FromRequest<St> for Multipart {
     type Error = Infallible;
@@ -47,6 +43,12 @@ impl<St> FromRequest<St> for Multipart {
     }
 }
 
+/// Reads and collects a complete `multipart/form-data` body using request app-state configuration.
+///
+/// # Errors
+///
+/// Returns request-header, parsing, reader, limit, and form-assembly errors.
+/// Other multipart subtypes return [`MultipartError::IncompatibleContentType`].
 impl<T, St> FromRequest<St> for MultipartForm<T>
 where
     T: MultipartCollect + 'static,
@@ -81,11 +83,6 @@ where
         let mut field_limits = HashMap::<String, Option<usize>>::default();
 
         while let Some(field) = multipart.try_next().await? {
-            debug_assert!(
-                !field.form_field_name.is_empty(),
-                "multipart form fields should have names",
-            );
-
             // Retrieve the limit for this field
             let entry = field_limits
                 .entry(field.form_field_name.clone())

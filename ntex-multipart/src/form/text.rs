@@ -9,15 +9,36 @@ use serde::de::DeserializeOwned;
 use crate::form::{FieldReader, Limits, bytes::Bytes};
 use crate::{Field, MultipartError};
 
-/// Deserialize from plain text.
+/// Deserializes an in-memory field body from UTF-8 plain text using [`serde_plain`].
 ///
-/// Internally this uses [`serde_plain`] for deserialization, which supports primitive types
-/// including strings, numbers, and simple enums.
+/// Supports strings, numbers, and other scalar values supported by `serde_plain`,
+/// including unit enum variants. By default, a parsed content type must have
+/// subtype `plain` or suffix `+plain`; its top-level type is not restricted.
+/// Missing or unparseable content types are accepted as the plain-text default.
+/// Configure the check with [`TextConfig`] in request app state.
+///
+/// The body must always be UTF-8: `charset` parameters are ignored, and no
+/// transcoding or whitespace trimming is performed. Both total and memory
+/// budgets apply.
+///
+/// # Errors
+///
+/// Media-type, UTF-8, and deserialization failures return [`MultipartError::Field`]
+/// with a [`TextError`] rendered as a 400 response. Stream and budget errors from
+/// [`Bytes`] propagate directly.
+///
+/// # Panics
+///
+/// Manual [`FieldReader::read_field`] calls inherit the parsed-disposition
+/// precondition of [`Bytes`].
 #[derive(Debug, Deref, DerefMut)]
-pub struct Text<T: DeserializeOwned>(pub T);
+pub struct Text<T: DeserializeOwned>(
+    /// The value deserialized from the field's UTF-8 text.
+    pub T,
+);
 
 impl<T: DeserializeOwned> Text<T> {
-    /// Unwraps into inner value.
+    /// Consumes the wrapper and returns the deserialized value.
     pub fn into_inner(self) -> T {
         self.0
     }
@@ -70,40 +91,54 @@ where
     }
 }
 
+/// Plain-text field failures, rendered as 400 Bad Request responses.
+///
+/// [`Text`] stores the rendered response in [`MultipartError::Field`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TextError {
-    /// UTF-8 decoding error.
+    /// The body is not valid UTF-8, regardless of its declared charset.
     #[error("UTF-8 decoding error: {}", _0)]
-    Utf8Error(str::Utf8Error),
+    Utf8Error(
+        /// The UTF-8 validation failure.
+        str::Utf8Error,
+    ),
 
-    /// Deserialize error.
+    /// The UTF-8 text could not be deserialized into the requested type.
     #[error("Plain text deserialize error: {}", _0)]
-    Deserialize(serde_plain::Error),
+    Deserialize(
+        /// The plain-text deserializer failure.
+        serde_plain::Error,
+    ),
 
-    /// Content type error.
+    /// A parsed content type has neither subtype `plain` nor suffix `+plain`.
     #[error("Content type error")]
     ContentType,
 }
 
-/// Return `BadRequest` for `TextError`
+/// Renders plain-text field errors with HTTP status 400 Bad Request.
 impl<St> WebResponseError<St, DefaultError> for TextError {
     fn error_response(&self, _: &St) -> HttpResponse {
         HttpResponse::render_with(StatusCode::BAD_REQUEST, self)
     }
 }
 
-/// Configuration for the [`Text`] field reader.
+/// Configuration for [`Text`], registered with `App::app_state`.
+///
+/// Plain-text media-type validation is enabled by default; UTF-8 validation is
+/// always performed.
 #[derive(Clone)]
 pub struct TextConfig {
     validate_content_type: bool,
 }
 
 impl TextConfig {
-    /// Sets whether or not the field must have a valid `Content-Type` header to be parsed.
+    /// Enables or disables plain-text media-type validation (enabled by default).
     ///
-    /// Note that an empty `Content-Type` is also accepted, as the multipart specification defines
-    /// `text/plain` as the default for text fields.
+    /// When enabled, a parsed type must have subtype `plain` or suffix `+plain`.
+    /// Missing, empty, or malformed headers are accepted because [`Field`] exposes
+    /// them as no parsed type, which this reader treats as the plain-text default.
+    /// Disabling this check does not disable UTF-8 validation or enable transcoding.
     pub fn validate_content_type(mut self, validate_content_type: bool) -> Self {
         self.validate_content_type = validate_content_type;
         self

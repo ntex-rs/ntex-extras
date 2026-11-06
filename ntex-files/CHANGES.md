@@ -1,6 +1,10 @@
 # Changes
 
-## [Unreleased]
+## [4.4.0] - 2026-11-06
+
+* Validate the end of byte ranges that start beyond the file size
+
+* Percent-encode every byte outside RFC 5987 `attr-char` when formatting extended values
 
 * Reject unterminated quoted values and trailing text in `Content-Disposition` parameters
 
@@ -13,8 +17,6 @@
 * Reject `Content-Disposition` types, parameter names and unquoted values that are not tokens
 
 * Reject byte ranges with extra `-` components, e.g. `bytes=0-1-2`
-
-## [4.4.0] - 2026-11-06
 
 * Files: validate path segments after percent-decoding, reject encoded traversal
 

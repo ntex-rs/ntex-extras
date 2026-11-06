@@ -6,7 +6,26 @@ use super::error::{Error, Result};
 
 use httpdate::HttpDate as InnerDate;
 
-/// A timestamp with HTTP formatting and parsing
+/// A whole-second HTTP timestamp, formatted as IMF-fixdate in GMT.
+///
+/// Parsing also accepts the obsolete RFC 850 and `asctime` HTTP date formats.
+/// Conversions to and from [`SystemTime`] are available.
+///
+/// # Errors
+///
+/// Parsing a malformed or unrepresentable date returns a header parsing error.
+///
+/// # Panics
+///
+/// Conversion from [`SystemTime`] panics for times before the Unix epoch or
+/// after the end of year 9999.
+///
+/// ```
+/// use ntex_files::header::HttpDate;
+///
+/// let date: HttpDate = "Sun Nov  6 08:49:37 1994".parse().unwrap();
+/// assert_eq!(date.to_string(), "Sun, 06 Nov 1994 08:49:37 GMT");
+/// ```
 //   Prior to 1995, there were three different formats commonly used by
 //   servers to communicate timestamps.  For compatibility with old
 //   implementations, all three are defined here.  The preferred format is

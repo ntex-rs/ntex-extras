@@ -6,7 +6,30 @@
     clippy::enum_variant_names
 )]
 
-//! Static files support
+//! Static file and directory serving for [`ntex::web`].
+//!
+//! Register [`Files`] with [`App::service`](ntex::web::App::service) to serve a
+//! directory, or return a [`NamedFile`] from a handler to serve a single file.
+//! File responses support conditional requests and byte ranges.
+//!
+//! ```
+//! use ntex::web::{self, App};
+//! use ntex_files::{Files, NamedFile};
+//!
+//! async fn download() -> std::io::Result<NamedFile> {
+//!     NamedFile::open("./manual.pdf")
+//! }
+//!
+//! let app = App::default()
+//!     .service(Files::new("/static", ".").index_file("index.html"))
+//!     .route("/manual", web::get().to(download));
+//! ```
+//!
+//! [`Files`] has no index file, directory listing, or directory redirect by
+//! default. It accepts `GET` and `HEAD`, rejects URL segments beginning with
+//! `.`, and confines resolved paths to its base directory unless
+//! [`Files::follow_symlinks`] is enabled. See [`NamedFile::into_response`] for
+//! response headers and status codes.
 use std::fs::{DirEntry, File};
 use std::path::{Path, PathBuf};
 use std::{cmp, fmt::Write, io, io::Read, io::Seek, pin::Pin, rc::Rc, task::Context, task::Poll};
@@ -27,6 +50,7 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use v_htmlescape::escape_fmt;
 
 mod error;
+/// Typed HTTP headers used by static file responses.
 pub mod header;
 mod named;
 mod range;
@@ -48,8 +72,10 @@ pub fn file_extension_to_mime(ext: &str) -> mime::Mime {
 }
 
 #[doc(hidden)]
-/// A helper created from a `std::fs::File` which reads the file
-/// chunk-by-chunk on a `ThreadPool`.
+/// A file stream that reads chunks of up to 64 KiB on the blocking thread pool.
+///
+/// Read failures, premature end of file, and canceled blocking tasks yield an
+/// [`io::Error`]; the stream ends after an error.
 pub struct ChunkedReadFile {
     size: u64,
     offset: u64,
@@ -114,22 +140,28 @@ impl Stream for ChunkedReadFile {
 
 type DirectoryRenderer = dyn Fn(&Directory, &HttpRequest) -> Result<WebResponse, io::Error>;
 
-/// A directory; responds with the generated directory listing.
+/// Directory paths passed to a [`Files::files_listing_renderer`] callback.
+///
+/// This type does not itself generate a response.
 #[derive(Debug)]
 pub struct Directory {
-    /// Base directory
+    /// Base directory configured for the static file service.
     pub base: PathBuf,
-    /// Path of subdirectory to generate listing for
+    /// Resolved directory for which a listing is requested.
     pub path: PathBuf,
 }
 
 impl Directory {
-    /// Create a new directory
+    /// Stores the base and listing paths without accessing or validating them.
     pub fn new(base: PathBuf, path: PathBuf) -> Directory {
         Directory { base, path }
     }
 
-    /// Is this entry visible from this directory?
+    /// Returns whether an entry is eligible for the default directory listing.
+    ///
+    /// Excludes names beginning with `.`, failed entries, and entries whose
+    /// metadata cannot be read. Files, directories, and symlinks are eligible;
+    /// this check does not enforce containment within [`Self::base`].
     pub fn is_visible(&self, entry: &io::Result<DirEntry>) -> bool {
         if let Ok(ref entry) = *entry {
             if let Some(name) = entry.file_name().to_str()
@@ -240,9 +272,24 @@ fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<WebResponse, 
 
 type MimeOverride = dyn Fn(&mime::Name) -> header::DispositionType;
 
-/// Static files handling
+/// A configurable service factory for serving a directory of static files.
 ///
-/// `Files` service must be registered with `App::service()` method.
+/// Register it with [`App::service`](ntex::web::App::service). The URL `path`
+/// is a prefix; the remaining path selects a file under the base directory.
+/// Defaults are `GET`/`HEAD` only, no index file, no directory listing, no
+/// redirect, and enabled `Content-Disposition`, `ETag`, and `Last-Modified`.
+///
+/// URL segments are validated after percent-decoding: leading `.` or `*`,
+/// trailing `:`, `>` or `<`, embedded `/` or NUL, and, on Windows, `\` are
+/// rejected with `400 Bad Request`. Literal `..` segments remove a preceding
+/// relative segment without escaping the base; percent-encoded `..` is rejected.
+/// Resolved paths outside the base, including symlink targets and index files,
+/// are rejected unless [`Self::follow_symlinks`] is enabled.
+///
+/// With the default web error handler, rejected methods or guards return
+/// `405 Method Not Allowed`; resolution failures and directories without a
+/// listing return `404 Not Found`. [`Self::default_handler`] handles resolution
+/// failures only.
 ///
 /// ```rust
 /// use ntex::web::App;
@@ -284,12 +331,15 @@ impl<St: State, In> Clone for Files<St, In> {
 }
 
 impl<St: State, In: 'static> Files<St, In> {
-    /// Create new `Files` instance for specified base directory.
+    /// Creates a service at the URL prefix `path` with filesystem base `dir`.
     ///
-    /// Filesystem operations run on the worker thread that handles the request.
+    /// Canonicalizes `dir` immediately. If this fails, logs the error and retains
+    /// the supplied path; later request resolution may still fail. Resolution,
+    /// metadata access, and file opening for requests run on the blocking
+    /// thread pool, as do file reads. Directory rendering runs on the web worker.
     ///
-    /// If the directory cannot be resolved, an error is logged and
-    /// every request is answered with `404 Not Found`.
+    /// Request resolution failures use [`Self::default_handler`] when configured,
+    /// or return `404 Not Found` with the default web error handler.
     pub fn new<T: Into<PathBuf>>(path: &str, dir: T) -> Self {
         let orig_dir = dir.into();
         let dir = match orig_dir.canonicalize() {
@@ -315,31 +365,44 @@ impl<St: State, In: 'static> Files<St, In> {
         }
     }
 
-    /// Serve files that resolve outside of the base directory through symlinks.
+    /// Allows resolved files and directories outside the base when `value` is `true`.
     ///
-    /// By default such files are answered with `404 Not Found`.
+    /// Defaults to `false`. Symlinks whose targets remain inside the base are
+    /// followed regardless of this setting. Rejected outside targets use the
+    /// default handler, or `404 Not Found` with the default web error handler.
+    /// URL segment validation remains enabled.
     pub fn follow_symlinks(mut self, value: bool) -> Self {
         self.follow_symlinks = value;
         self
     }
 
-    /// Show files listing for directories.
+    /// Enables directory listings when no index file is configured.
     ///
-    /// By default show files listing is disabled.
+    /// Disabled by default. The default HTML renderer excludes dot-prefixed
+    /// entries and entries with unreadable metadata. A configured but missing
+    /// index file uses the default handler or returns `404 Not Found`; it does
+    /// not fall back to a listing.
     pub fn show_files_listing(mut self) -> Self {
         self.show_index = true;
         self
     }
 
-    /// Redirects to a slash-ended path when browsing a directory.
+    /// Enables `302 Found` redirects to slash-ended directory paths.
     ///
-    /// By default never redirect.
+    /// Disabled by default, and only effective when an index file is configured.
+    /// The redirect uses the request path with `/` appended, without its query
+    /// string, before attempting to open the index file.
     pub fn redirect_to_slash_directory(mut self) -> Self {
         self.redirect_to_slash = true;
         self
     }
 
-    /// Set custom directory renderer
+    /// Sets the renderer used when directory listings are enabled.
+    ///
+    /// The callback runs on the web worker and must construct a [`WebResponse`].
+    /// Returning an [`io::Error`] produces `404 Not Found` with the default web
+    /// error handler; the default handler is not invoked. This does not enable
+    /// listings; call [`Self::show_files_listing`] separately.
     pub fn files_listing_renderer<F>(mut self, f: F) -> Self
     where
         for<'r, 's> F:
@@ -349,7 +412,11 @@ impl<St: State, In: 'static> Files<St, In> {
         self
     }
 
-    /// Specifies mime override callback
+    /// Overrides the disposition type based on the file's top-level MIME type.
+    ///
+    /// The callback receives, for example, `text` or `application`, not a MIME
+    /// subtype. It changes `inline`/`attachment` selection, not `Content-Type`
+    /// or filename parameters. See [`NamedFile::from_file`] for the defaults.
     pub fn mime_override<F>(mut self, f: F) -> Self
     where
         F: Fn(&mime::Name) -> header::DispositionType + 'static,
@@ -358,52 +425,64 @@ impl<St: State, In: 'static> Files<St, In> {
         self
     }
 
-    /// Set index file
+    /// Sets the index path to open for every requested directory.
     ///
-    /// Shows specific index file for directory "/" instead of
-    /// showing files listing.
+    /// No index is configured by default. The path is joined to the requested
+    /// directory and takes precedence over listings. Missing or rejected index
+    /// paths use the default handler or return `404 Not Found` with the default
+    /// web error handler; they do not fall back to a listing.
     pub fn index_file<T: Into<String>>(mut self, index: T) -> Self {
         self.index = Some(index.into());
         self
     }
 
     #[inline]
-    /// Specifies whether to use ETag or not.
+    /// Enables or disables metadata-derived `ETag` headers and tag validators.
     ///
-    /// Default is true.
+    /// Defaults to `true`. See [`NamedFile::use_etag`] for availability and
+    /// conditional request behavior.
     pub fn use_etag(mut self, value: bool) -> Self {
         self.file_flags.set(named::Flags::ETAG, value);
         self
     }
 
     #[inline]
-    /// Specifies whether to use Last-Modified or not.
+    /// Enables or disables `Last-Modified` headers and date validators.
     ///
-    /// Default is true.
+    /// Defaults to `true`. See [`NamedFile::use_last_modified`] for the supported
+    /// timestamp range.
     pub fn use_last_modified(mut self, value: bool) -> Self {
         self.file_flags.set(named::Flags::LAST_MD, value);
         self
     }
 
-    /// Specifies custom guards to use for directory listings and files.
+    /// Replaces the default `GET`/`HEAD` check with a custom guard.
     ///
-    /// Default behaviour allows GET and HEAD.
+    /// A failed guard returns `405 Method Not Allowed` with the default web
+    /// error handler; the default handler is not invoked. A successful guard
+    /// can permit other methods for both files and directory listings.
     #[inline]
     pub fn use_guards<G: Guard + 'static>(mut self, guards: G) -> Self {
         self.guards = Some(Rc::new(guards));
         self
     }
 
-    /// Disable `Content-Disposition` header.
+    /// Disables the `Content-Disposition` header for file responses.
     ///
-    /// By default Content-Disposition` header is enabled.
+    /// This header is enabled by default; see [`NamedFile::from_file`] for its
+    /// MIME-based disposition and filename parameters.
     #[inline]
     pub fn disable_content_disposition(mut self) -> Self {
         self.file_flags.remove(named::Flags::CONTENT_DISPOSITION);
         self
     }
 
-    /// Sets default handler which is used when no matched file could be found.
+    /// Sets the fallback service for file resolution or opening failures.
+    ///
+    /// This includes missing files and index files, rejected outside-base
+    /// targets, and canceled blocking resolution tasks. It is not used for
+    /// invalid URL segments, rejected guards, disabled listings, listing renderer
+    /// errors, or errors while streaming an already opened file.
     pub fn default_handler<F, U>(mut self, f: F) -> Self
     where
         F: IntoServiceFactory<U, St, WebRequest<In>>,
@@ -478,6 +557,9 @@ where
     }
 }
 
+/// The request-handling service created by the [`Files`] service factory.
+///
+/// Configure serving behavior through [`Files`] before creating this service.
 pub struct FilesService<St: State, In> {
     directory: PathBuf,
     index: Option<String>,
@@ -2327,6 +2409,9 @@ mod tests {
     /// HOW:
     /// - Obtain a directory entry for a file, then remove the file before visibility checking.
     /// - Check the formerly visible entry becomes invisible instead of causing a panic.
+    /// - Skipped on Windows, where `DirEntry::metadata` returns data cached by the
+    ///   directory scan and still succeeds after removal.
+    #[cfg(not(windows))]
     #[test]
     fn disappeared_directory_entries_are_not_visible() {
         let root = tempfile::tempdir_in(".").unwrap();

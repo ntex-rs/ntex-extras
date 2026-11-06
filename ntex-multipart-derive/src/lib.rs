@@ -1,3 +1,11 @@
+//! Derive support for typed `multipart/form-data` extraction in `ntex`.
+//!
+//! Enable `ntex-multipart`'s `derive` feature and import `MultipartForm` from
+//! `ntex_multipart`; the extractor is also named
+//! [`ntex_multipart::MultipartForm`](https://docs.rs/ntex-multipart/latest/ntex_multipart/struct.MultipartForm.html).
+//! Field readers live in [`ntex_multipart::form`](https://docs.rs/ntex-multipart/latest/ntex_multipart/form/index.html).
+//! See [`macro@MultipartForm`] for supported field and struct attributes.
+
 use bytesize::ByteSize;
 use darling::{FromDeriveInput, FromField, FromMeta};
 use proc_macro::TokenStream;
@@ -36,111 +44,94 @@ struct ParsedField<'t> {
     ty: &'t Type,
 }
 
-/// Implements `MultipartCollect` for a struct so that it can be used with the `MultipartForm`
-/// extractor.
+/// Derives `ntex_multipart::MultipartCollect` for a struct with named fields.
 ///
-/// # Basic Use
+/// Use the result with the [`ntex_multipart::MultipartForm`] extractor. The macro
+/// is re-exported from `ntex_multipart` when its `derive` feature is enabled.
+/// Generated code refers to both `::ntex` and `::ntex_multipart`, so both crates
+/// must be available under those names in the consuming crate.
 ///
-/// Each field type should implement the `FieldReader` trait:
+/// # Fields and ordering
 ///
-/// ```
-/// use ntex_multipart::MultipartForm;
-/// use ntex_multipart::form::{temp_file::TempFile, text::Text};
-///
-/// #[derive(MultipartForm)]
-/// struct ImageUpload {
-///     description: Text<String>,
-///     timestamp: Text<i64>,
-///     image: TempFile,
-/// }
-/// ```
-///
-/// # Optional and List Fields
-///
-/// You can also use `Vec<T>` and `Option<T>` provided that `T: FieldReader`.
-///
-/// A [`Vec`] field corresponds to an upload with multiple parts under the [same field
-/// name](https://www.rfc-editor.org/rfc/rfc7578#section-4.3).
+/// Each scalar field type must implement [`FieldReader`]. A scalar `T` is required;
+/// absence returns `MultipartError::MissingField`. `Option<T>` is optional and
+/// defaults to `None`. `Vec<T>` accepts repeated parts of the same name and defaults
+/// to an empty vector; `Option<Vec<T>>` is `None` if absent, or `Some` of the collected
+/// values if present. Parts may arrive in any order; vectors retain arrival order.
 ///
 /// ```
 /// use ntex_multipart::MultipartForm;
 /// use ntex_multipart::form::{temp_file::TempFile, text::Text};
 ///
 /// #[derive(MultipartForm)]
-/// struct Form {
-///     category: Option<Text<String>>,
+/// struct Upload {
+///     title: Text<String>,
+///     description: Option<Text<String>>,
 ///     files: Vec<TempFile>,
 /// }
 /// ```
 ///
-/// # Field Renaming
+/// # Field attributes
 ///
-/// You can use the `#[multipart(rename = "foo")]` attribute to receive a field by a different name.
+/// - `#[multipart(rename = "name")]` uses the given multipart field name instead
+///   of the Rust identifier. Names must be unique after renaming.
+/// - `#[multipart(limit = "size")]` sets a body-byte budget parsed by [`bytesize`]
+///   (for example, `"2 KiB"` or `"10 MiB"`). It is shared across all processed
+///   occurrences of that name, including vector entries and replaced scalar values.
+///   Ignored parts do not debit the budget. There is no field-specific limit by default.
 ///
-/// ```
-/// use ntex_multipart::MultipartForm;
-/// use ntex_multipart::form::temp_file::TempFile;
-///
-/// #[derive(MultipartForm)]
-/// struct Form {
-///     #[multipart(rename = "files[]")]
-///     files: Vec<TempFile>,
-/// }
-/// ```
-///
-/// # Field Limits
-///
-/// You can use the `#[multipart(limit = "<size>")]` attribute to set field level limits. The limit
-/// string is parsed using [`bytesize`].
-///
-/// Note: the form is also subject to the global limits configured using `MultipartFormConfig`.
+/// Fields are also subject to [`MultipartFormConfig`] budgets (50 MiB total and
+/// 2 MiB in memory by default). Readers must enforce budgets; built-in readers
+/// return `MultipartError::Payload` containing `PayloadError::Overflow` when exceeded.
 ///
 /// ```
 /// use ntex_multipart::MultipartForm;
 /// use ntex_multipart::form::{temp_file::TempFile, text::Text};
 ///
 /// #[derive(MultipartForm)]
-/// struct Form {
+/// struct Upload {
 ///     #[multipart(limit = "2 KiB")]
-///     description: Text<String>,
-///
-///     #[multipart(limit = "512 MiB")]
+///     title: Text<String>,
+///     #[multipart(rename = "files[]", limit = "10 MiB")]
 ///     files: Vec<TempFile>,
 /// }
 /// ```
 ///
-/// # Unknown Fields
+/// # Struct attributes
 ///
-/// By default fields with an unknown name are ignored. They can be rejected using the
-/// `#[multipart(deny_unknown_fields)]` attribute:
+/// - `#[multipart(deny_unknown_fields)]` rejects unrecognized names with
+///   `MultipartError::UnknownField`. Unknown parts are ignored by default.
+/// - `#[multipart(duplicate_field = "ignore")]` (default) keeps the first scalar
+///   value; later occurrences are ignored without invoking the reader.
+/// - `#[multipart(duplicate_field = "deny")]` rejects the second scalar occurrence
+///   with `MultipartError::DuplicateField`, not `UnknownField`.
+/// - `#[multipart(duplicate_field = "replace")]` reads every scalar occurrence and
+///   retains the last value. Every processed occurrence consumes reader budgets.
 ///
-/// ```
-/// use ntex_multipart::MultipartForm;
-///
-/// #[derive(MultipartForm)]
-/// #[multipart(deny_unknown_fields)]
-/// struct Form { }
-/// ```
-///
-/// # Duplicate Fields
-///
-/// The behaviour for when multiple fields with the same name are received can be changed using the
-/// `#[multipart(duplicate_field = "<behavior>")]` attribute:
-///
-/// - "ignore": (default) Extra fields are ignored. I.e., the first one is persisted.
-/// - "deny": A `MultipartError::UnknownField` error response is returned.
-/// - "replace": Each field is processed, but only the last one is persisted.
-///
-/// Note that `Vec` fields will ignore this option.
+/// The duplicate policy is form-wide, not a field attribute. `Vec<T>` and
+/// `Option<Vec<T>>` always collect all occurrences, regardless of this policy.
+/// Ignored parts are drained by the multipart parser and still must be well-formed.
 ///
 /// ```
 /// use ntex_multipart::MultipartForm;
+/// use ntex_multipart::form::text::Text;
 ///
 /// #[derive(MultipartForm)]
-/// #[multipart(duplicate_field = "deny")]
-/// struct Form { }
+/// #[multipart(deny_unknown_fields, duplicate_field = "deny")]
+/// struct Upload {
+///     title: Text<String>,
+/// }
 /// ```
 ///
+/// # Compile-time failures
+///
+/// Enums, unions, tuple/unit structs, duplicate renamed names, invalid attributes,
+/// and unparseable sizes are rejected. Field types must implement the appropriate
+/// reader/group traits. Limits must fit the target's `usize`.
+///
+/// [`ntex_multipart::MultipartForm`]: https://docs.rs/ntex-multipart/latest/ntex_multipart/struct.MultipartForm.html
+/// [`FieldReader`]: https://docs.rs/ntex-multipart/latest/ntex_multipart/form/trait.FieldReader.html
+/// [`MultipartFormConfig`]: https://docs.rs/ntex-multipart/latest/ntex_multipart/struct.MultipartFormConfig.html
 /// [`bytesize`]: https://docs.rs/bytesize/2
 #[proc_macro_derive(MultipartForm, attributes(multipart))]
 pub fn impl_multipart_form(input: TokenStream) -> TokenStream {
@@ -183,7 +174,12 @@ pub fn impl_multipart_form(input: TokenStream) -> TokenStream {
             let serialization_name = attrs.rename.unwrap_or_else(|| rust_name.to_string());
 
             let limit = match attrs.limit.map(|limit| match limit.parse::<ByteSize>() {
-                Ok(ByteSize(size)) => Ok(usize::try_from(size).unwrap()),
+                Ok(ByteSize(size)) => usize::try_from(size).map_err(|_| {
+                    syn::Error::new(
+                        field.ident.as_ref().unwrap().span(),
+                        format!("Size limit `{}` does not fit in `usize`", limit),
+                    )
+                }),
                 Err(err) => Err(syn::Error::new(
                     field.ident.as_ref().unwrap().span(),
                     format!("Could not parse size limit `{}`: {}", limit, err),

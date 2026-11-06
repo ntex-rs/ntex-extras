@@ -1,6 +1,12 @@
 # Changes
 
-## [Unreleased]
+## [4.2.0] - 2026-11-06
+
+* Render `MultipartError::Field` with the status of its field response
+
+* End the `Multipart` stream after a content-type error instead of panicking on the next poll
+
+* Do not panic in debug builds on fields with an empty name
 
 * Apply the 16 KiB header size limit when the terminator arrives in the same chunk
 
@@ -9,8 +15,6 @@
 * Accept a closing boundary without trailing CRLF in a body with no fields
 
 * Treat a boundary followed by anything but CRLF or `--` as field data
-
-## [4.2.0] - 2026-11-06
 
 * Replace the deprecated `twoway` dependency with `memchr`
 
