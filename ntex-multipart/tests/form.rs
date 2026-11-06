@@ -750,6 +750,29 @@ async fn temp_file_creation_errors_are_reported() {
     assert_field_error(error, StatusCode::INTERNAL_SERVER_ERROR, "File I/O error").await;
 }
 
+/// STATEMENT: Without a `TempFileConfig`, uploads are written to the platform temporary directory.
+///
+/// HOW:
+/// - Extract a `TempFile` from a request that registers no `TempFileConfig`.
+/// - Confirm the file's parent is `std::env::temp_dir()` and its contents match the upload.
+#[ntex::test]
+async fn temp_files_default_to_the_platform_temp_directory() {
+    let form = extract::<Form<TempFile>>(multipart_request(&[Part::new("name", b"data")]))
+        .await
+        .unwrap();
+    assert_eq!(
+        form.name
+            .file
+            .path()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap(),
+        std::env::temp_dir().canonicalize().unwrap()
+    );
+    assert_eq!(std::fs::read(form.name.file.path()).unwrap(), b"data");
+}
+
 /// STATEMENT: The untyped `Multipart` extractor accepts mixed uploads and preserves headers and streamed data without requiring a form-field name.
 ///
 /// HOW:

@@ -59,35 +59,23 @@ impl FieldReader for TempFile {
 
         let file = config
             .create_tempfile()
-            .map_err(|err| MultipartError::Field {
-                name: field.form_field_name.to_owned(),
-                source: TempFileError::FileIo(err).error_response(st),
-            })?;
+            .map_err(|err| file_io_error(&field.form_field_name, st, err))?;
 
         let (file, mut f) = spawn_blocking(move || file.reopen().map(move |f| (file, f)))
             .await?
-            .map_err(|err| MultipartError::Field {
-                name: field.form_field_name.to_owned(),
-                source: TempFileError::FileIo(err).error_response(st),
-            })?;
+            .map_err(|err| file_io_error(&field.form_field_name, st, err))?;
 
         while let Some(chunk) = field.try_next().await? {
             limits.try_consume_limits(chunk.len(), false)?;
             size += chunk.len();
             f = spawn_blocking(move || f.write_all(chunk.as_ref()).map(move |_| f))
                 .await?
-                .map_err(|err| MultipartError::Field {
-                    name: field.form_field_name.to_owned(),
-                    source: TempFileError::FileIo(err).error_response(st),
-                })?;
+                .map_err(|err| file_io_error(&field.form_field_name, st, err))?;
         }
 
         spawn_blocking(move || f.flush())
             .await?
-            .map_err(|err| MultipartError::Field {
-                name: field.form_field_name.to_owned(),
-                source: TempFileError::FileIo(err).error_response(st),
-            })?;
+            .map_err(|err| file_io_error(&field.form_field_name, st, err))?;
 
         Ok(TempFile {
             file,
@@ -99,6 +87,14 @@ impl FieldReader for TempFile {
                 .map(ToOwned::to_owned),
             size,
         })
+    }
+}
+
+/// Wraps a temporary-file I/O failure as a field error with a 500 response.
+fn file_io_error<St>(name: &str, st: &St, err: io::Error) -> MultipartError {
+    MultipartError::Field {
+        name: name.to_owned(),
+        source: TempFileError::FileIo(err).error_response(st),
     }
 }
 
