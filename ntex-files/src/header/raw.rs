@@ -223,18 +223,6 @@ impl From<Bytes> for Raw {
     }
 }
 
-pub fn parsed(val: Bytes) -> Raw {
-    Raw(Lines::One(From::from(val)))
-}
-
-pub fn push(raw: &mut Raw, val: Bytes) {
-    raw.push_line(val);
-}
-
-pub fn new() -> Raw {
-    Raw(Lines::Empty)
-}
-
 impl fmt::Debug for Lines {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {

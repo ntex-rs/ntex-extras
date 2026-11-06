@@ -2,6 +2,8 @@
 
 ## [4.2.0] - 2026-11-06
 
+* Treat a bare `\r--boundary` inside field data as data; only CRLF starts a delimiter
+
 * Render `MultipartError::Field` with the status of its field response
 
 * End the `Multipart` stream after a content-type error instead of panicking on the next poll
