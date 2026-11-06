@@ -3,7 +3,7 @@
 # Multipart support for ntex
 
 [![Version](https://img.shields.io/badge/rustc-1.97+-lightgray.svg)](https://releases.rs/docs/1.97.0/) 
-[![codecov](https://codecov.io/gh/ntex-rs/ntex-extras/branch/master/graph/badge.svg)](https://codecov.io/gh/ntex-rs/ntex-extras) 
+[![codecov](https://codecov.io/gh/ntex-rs/ntex-extras/branch/main/graph/badge.svg)](https://codecov.io/gh/ntex-rs/ntex-extras) 
 
 </div>
 

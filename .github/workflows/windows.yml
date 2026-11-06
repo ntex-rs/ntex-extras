@@ -1,6 +1,10 @@
 name: CI (Windows)
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - main
+  pull_request:
 
 env:
   VCPKGRS_DYNAMIC: 1
