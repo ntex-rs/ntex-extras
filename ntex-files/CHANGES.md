@@ -1,5 +1,29 @@
 # Changes
 
+## [4.4.0] - 2026-11-06
+
+* Files: validate path segments after percent-decoding, reject encoded traversal
+
+* Files: do not serve files resolved outside of the base directory, add `Files::follow_symlinks()`
+
+* Files: escape file names and request path in directory listing
+
+* Files: do not serve the current directory if the base directory cannot be resolved
+
+* Files: resolve and open files on the blocking thread pool
+
+* NamedFile: respond with 206 to a range that covers the whole file
+
+* NamedFile: clamp range positions that do not fit into `u64` instead of returning 416
+
+* NamedFile: end the body stream after a read error
+
+* Headers: do not split entity tags and `Content-Disposition` parameters on separators inside of quoted strings
+
+* Headers: use `BIG5` as the name of the `Big5` charset
+
+* Headers: hide the internal `header!` macro from docs, fix its paths
+
 ## [4.3.0] - 2026-11-03
 
 * Update the `ntex` to 4.5

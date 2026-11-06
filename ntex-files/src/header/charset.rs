@@ -91,7 +91,7 @@ impl Charset {
             Iso_8859_8_E => "ISO-8859-8-E",
             Iso_8859_8_I => "ISO-8859-8-I",
             Gb2312 => "GB2312",
-            Big5 => "5",
+            Big5 => "BIG5",
             Koi8_R => "KOI8-R",
             Ext(ref s) => s,
         }
@@ -130,7 +130,7 @@ impl FromStr for Charset {
             "ISO-8859-8-E" => Iso_8859_8_E,
             "ISO-8859-8-I" => Iso_8859_8_I,
             "GB2312" => Gb2312,
-            "5" => Big5,
+            "BIG5" => Big5,
             "KOI8-R" => Koi8_R,
             s => Ext(s.to_owned()),
         })
@@ -150,4 +150,15 @@ fn test_parse() {
 fn test_display() {
     assert_eq!("US-ASCII", format!("{}", Us_Ascii));
     assert_eq!("ABCD", format!("{}", Ext("ABCD".to_owned())));
+}
+
+/// STATEMENT: The `Big5` charset uses its registered name `BIG5`.
+///
+/// HOW:
+/// - Parse `big5` and check that it yields `Big5`.
+/// - Format `Big5` and check that it prints `BIG5`.
+#[test]
+fn test_big5_name() {
+    assert_eq!(Big5, "big5".parse().unwrap());
+    assert_eq!("BIG5", format!("{}", Big5));
 }
