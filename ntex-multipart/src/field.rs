@@ -213,31 +213,21 @@ impl InnerField {
             };
         }
 
-        // check boundary
-        if len >= 4 && payload.buf[0] == b'\r' {
-            let b_len = if &payload.buf[..2] == b"\r\n" && &payload.buf[2..4] == b"--" {
-                Some(4)
-            } else if &payload.buf[1..3] == b"--" {
-                Some(3)
-            } else {
-                None
-            };
-
-            if let Some(b_len) = b_len {
-                let b_size = boundary.len() + b_len;
-                // the boundary must be followed by CRLF or by "--"
-                if len < b_size + 2 {
-                    return if payload.eof {
-                        Poll::Ready(Some(Err(MultipartError::Incomplete)))
-                    } else {
-                        Poll::Pending
-                    };
-                } else if &payload.buf[b_len..b_size] == boundary.as_bytes()
-                    && matches!(&payload.buf[b_size..b_size + 2], b"\r\n" | b"--")
-                {
-                    // found boundary
-                    return Poll::Ready(None);
-                }
+        // check boundary, the delimiter is always CRLF followed by "--" (RFC 2046)
+        if len >= 4 && &payload.buf[..4] == b"\r\n--" {
+            let b_size = boundary.len() + 4;
+            // the boundary must be followed by CRLF or by "--"
+            if len < b_size + 2 {
+                return if payload.eof {
+                    Poll::Ready(Some(Err(MultipartError::Incomplete)))
+                } else {
+                    Poll::Pending
+                };
+            } else if &payload.buf[4..b_size] == boundary.as_bytes()
+                && matches!(&payload.buf[b_size..b_size + 2], b"\r\n" | b"--")
+            {
+                // found boundary
+                return Poll::Ready(None);
             }
         }
 
@@ -256,11 +246,7 @@ impl InnerField {
                     }
                 } else {
                     // check boundary
-                    if (&payload.buf[cur..cur + 2] == b"\r\n"
-                        && &payload.buf[cur + 2..cur + 4] == b"--")
-                        || (&payload.buf[cur..=cur] == b"\r"
-                            && &payload.buf[cur + 1..cur + 3] == b"--")
-                    {
+                    if &payload.buf[cur..cur + 4] == b"\r\n--" {
                         if cur != 0 {
                             // return buffer
                             Poll::Ready(Some(Ok(payload.buf.split_to(cur))))

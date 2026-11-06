@@ -2,6 +2,8 @@
 
 ## [4.4.0] - 2026-11-06
 
+* Remove unused crate-private header code
+
 * Validate the end of byte ranges that start beyond the file size
 
 * Percent-encode every byte outside RFC 5987 `attr-char` when formatting extended values

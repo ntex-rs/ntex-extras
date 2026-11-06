@@ -1091,22 +1091,39 @@ mod tests {
         ));
     }
 
-    /// STATEMENT: A carriage-return-only separator before a closing boundary is rejected rather than treated as a valid field terminator.
+    /// STATEMENT: A carriage return followed by `--boundary` without a line feed is field data, not a delimiter.
     ///
     /// HOW:
-    /// - Submit an unknown-length field followed by `\r--abc--` instead of a CRLF separator.
-    /// - Confirm the preceding data is yielded and the next field read returns `Boundary`.
+    /// - Submit an unknown-length field whose data contains `\r--abc\r\n`, terminated by a real CRLF delimiter.
+    /// - Confirm the field yields that data unchanged and the multipart stream then ends.
+    /// - Submit a field terminated only by `\r--abc--` and confirm it reads as data and ends with `Incomplete`.
     #[ntex::test]
-    async fn carriage_return_only_field_terminators_are_rejected() {
+    async fn carriage_return_only_delimiters_are_field_data() {
+        let mut multipart = multipart_body(Bytes::from_static(
+            b"--abc\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nx\r--abc\r\ny\r\n--abc--\r\n",
+        ));
+        let mut field = multipart.next().await.unwrap().unwrap();
+        let mut data = Vec::new();
+        while let Some(chunk) = field.next().await {
+            data.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(data, b"x\r--abc\r\ny");
+        drop(field);
+        assert!(multipart.next().await.is_none());
+
         let mut multipart = multipart_body(Bytes::from_static(
             b"--abc\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\ndata\r--abc--\r\n",
         ));
         let mut field = multipart.next().await.unwrap().unwrap();
-        assert_eq!(field.next().await.unwrap().unwrap(), "data");
-        assert!(matches!(
-            field.next().await,
-            Some(Err(MultipartError::Boundary))
-        ));
+        let mut data = Vec::new();
+        let err = loop {
+            match field.next().await.unwrap() {
+                Ok(chunk) => data.extend_from_slice(&chunk),
+                Err(err) => break err,
+            }
+        };
+        assert_eq!(data, b"data\r--abc--");
+        assert!(matches!(err, MultipartError::Incomplete));
     }
 
     /// STATEMENT: Boundary-looking preamble lines are skipped until an exact closing delimiter ends an empty multipart body.

@@ -20,7 +20,7 @@
 //! ]));
 //! ```
 
-#![allow(dead_code, clippy::useless_conversion)]
+#![allow(clippy::useless_conversion)]
 
 mod charset;
 mod common;
@@ -28,7 +28,6 @@ mod content_disposition;
 mod entity;
 pub(crate) mod error;
 mod http_date;
-pub(crate) mod method;
 pub(crate) mod parsing;
 mod raw;
 
@@ -140,35 +139,6 @@ impl<'a, 'b> Formatter<'a, 'b> {
             }
         }
     }
-
-    fn danger_fmt_line_without_newline_replacer<T: std::fmt::Display>(
-        &mut self,
-        line: &T,
-    ) -> std::fmt::Result {
-        use std::fmt::Write;
-        match self.0 {
-            Multi::Line(name, ref mut f) => {
-                f.write_str(name)?;
-                f.write_str(": ")?;
-                std::fmt::Display::fmt(line, f)?;
-                f.write_str("\r\n")
-            }
-            Multi::Join(ref mut first, ref mut f) => {
-                if !*first {
-                    f.write_str(", ")?;
-                } else {
-                    *first = false;
-                }
-                std::fmt::Display::fmt(line, f)
-            }
-            Multi::Raw(ref mut raw) => {
-                let mut s = String::new();
-                write!(s, "{}", line)?;
-                raw.push(s);
-                Ok(())
-            }
-        }
-    }
 }
 
 struct NewlineReplacer<'a, F: std::fmt::Write + 'a>(&'a mut F);
@@ -267,7 +237,6 @@ macro_rules! __tm__ {
             use std::str;
             use $crate::header::*;
             use mime::*;
-            use $crate::header::method::Method;
             use super::$id as HeaderField;
             $($tf)*
         }
