@@ -1,5 +1,11 @@
 # Changes
 
+## [4.3.0] - 2026-11-06
+
+* Return an error instead of silently dropping the identity cookie when it can not be set
+
+* Reject identity cookies larger than 4096 bytes, add `CookieIdentityPolicyError::Overflow`
+
 ## [4.2.0] - 2026-11-03
 
 * Update the `ntex` to 4.5

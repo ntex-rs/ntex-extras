@@ -54,7 +54,7 @@ use serde_json::error::Error as JsonError;
 #[cfg(feature = "cookie-session")]
 mod cookie;
 #[cfg(feature = "cookie-session")]
-pub use crate::cookie::CookieSession;
+pub use crate::cookie::{CookieSession, CookieSessionError, CookieSessionMiddleware};
 
 /// The high-level interface you use to read and modify session data.
 ///
