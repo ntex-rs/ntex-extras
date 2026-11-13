@@ -47,7 +47,6 @@ use ntex::web::guard::Guard;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse, State, WebRequest, WebResponse};
 use ntex::{Ctx, IntoServiceFactory, Service, ServiceFactory, util::Bytes};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-use v_htmlescape::escape_fmt;
 
 mod error;
 /// Typed HTTP headers used by static file responses.
@@ -195,28 +194,23 @@ const FILE_NAME_ENCODE_SET: &AsciiSet = &CONTROLS
 // " -- &quot;  & -- &amp;  ' -- &#x27;  < -- &lt;  > -- &gt;  / -- &#x2f;
 macro_rules! encode_file_name {
     ($entry:ident) => {
-        escape_fmt(&$entry.file_name().to_string_lossy())
+        v_htmlescape::escape_fmt(&$entry.file_name().to_string_lossy())
     };
 }
 
 // escape characters that are significant inside of a quoted html attribute
 fn escape_attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            c => out.push(c),
-        }
-    }
+    v_html5escape::escape_string(s, &mut out);
     out
 }
 
 fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<WebResponse, io::Error> {
-    let index_of = format!("Index of {}", escape_fmt(req.path()));
+    const INDEX_OF: &str = "Index of ";
+    let path = req.path();
+    let mut index_of = String::with_capacity(INDEX_OF.len() + path.len());
+    index_of.push_str(INDEX_OF);
+    v_htmlescape::escape_string(req.path(), &mut index_of);
     let mut body = String::new();
     let base = req.path().trim_end_matches('/');
 

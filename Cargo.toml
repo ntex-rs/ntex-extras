@@ -58,6 +58,7 @@ syn = "3"
 tempfile = "3.4"
 thiserror = "2"
 time = { version = "0.3.54", default-features = false, features = ["std"] }
-v_htmlescape = "0.17.0"
+v_htmlescape = "1.0.0"
+v_html5escape = "1.0.0"
 unicase = "2.6"
 urly = "1.2.0"

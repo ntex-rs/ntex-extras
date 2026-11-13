@@ -32,6 +32,7 @@ percent-encoding = { workspace = true }
 regex = { workspace = true }
 thiserror = { workspace = true }
 v_htmlescape = { workspace = true }
+v_html5escape = { workspace = true }
 unicase = { workspace = true }
 
 [dev-dependencies]
