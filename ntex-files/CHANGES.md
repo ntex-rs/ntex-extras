@@ -6,6 +6,8 @@
 
 * Add `Files::prefer_utf8` and `NamedFile::prefer_utf8`, enabled by default: text content types are sent with `charset=utf-8`
 
+* Add `Files::read_mode_threshold` and `NamedFile::read_mode_threshold`: bodies smaller than the threshold are read on the web worker instead of the blocking thread pool
+
 ## [4.4.0] - 2026-11-06
 
 * Remove unused crate-private header code

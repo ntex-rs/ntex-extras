@@ -52,6 +52,7 @@ pub struct NamedFile {
     pub(crate) content_type: mime::Mime,
     pub(crate) content_disposition: header::ContentDisposition,
     pub(crate) encoding: Option<ContentEncoding>,
+    pub(crate) read_mode_threshold: u64,
 }
 
 impl std::fmt::Debug for Flags {
@@ -173,6 +174,7 @@ impl NamedFile {
             encoding,
             status_code: StatusCode::OK,
             flags: Flags::default(),
+            read_mode_threshold: 0,
         })
     }
 
@@ -304,6 +306,18 @@ impl NamedFile {
     /// and `application/javascript`; other types are sent unchanged.
     pub fn prefer_utf8(mut self, value: bool) -> Self {
         self.flags.set(Flags::PREFER_UTF8, value);
+        self
+    }
+
+    #[inline]
+    /// Sets the body size below which file chunks are read on the web worker.
+    ///
+    /// Defaults to `0`, so all reads run on the blocking thread pool. When the
+    /// response body, or the selected range, is smaller than `size` bytes, each
+    /// chunk is read on the current thread instead. This avoids a thread pool
+    /// round trip per chunk, but a slow or uncached read blocks the worker.
+    pub fn read_mode_threshold(mut self, size: u64) -> Self {
+        self.read_mode_threshold = size;
         self
     }
 
@@ -440,6 +454,7 @@ impl NamedFile {
                 file: Some(self.file),
                 fut: None,
                 counter: 0,
+                sync: self.md.len() < self.read_mode_threshold,
             };
             return resp.streaming(reader);
         }
@@ -585,6 +600,7 @@ impl NamedFile {
             file: Some(self.file),
             fut: None,
             counter: 0,
+            sync: length < self.read_mode_threshold,
         };
         resp.body(SizedStream::new(
             length,

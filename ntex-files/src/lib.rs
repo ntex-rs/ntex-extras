@@ -71,16 +71,28 @@ pub fn file_extension_to_mime(ext: &str) -> mime::Mime {
 }
 
 #[doc(hidden)]
-/// A file stream that reads chunks of up to 64 KiB on the blocking thread pool.
+/// A file stream that reads chunks of up to 64 KiB.
 ///
-/// Read failures, premature end of file, and canceled blocking tasks yield an
-/// [`io::Error`]; the stream ends after an error.
+/// Chunks are read on the blocking thread pool, or on the current thread when
+/// `sync` is set. Read failures, premature end of file, and canceled blocking
+/// tasks yield an [`io::Error`]; the stream ends after an error.
 pub struct ChunkedReadFile {
     size: u64,
     offset: u64,
     file: Option<File>,
     fut: Option<LocalBoxFuture<'static, Result<(File, Bytes), BlockingError<io::Error>>>>,
     counter: u64,
+    sync: bool,
+}
+
+fn read_chunk(mut file: File, offset: u64, max_bytes: usize) -> io::Result<(File, Bytes)> {
+    let mut buf = Vec::with_capacity(max_bytes);
+    file.seek(io::SeekFrom::Start(offset))?;
+    let nbytes = file.by_ref().take(max_bytes as u64).read_to_end(&mut buf)?;
+    if nbytes == 0 {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok((file, Bytes::from(buf)))
 }
 
 impl Stream for ChunkedReadFile {
@@ -116,22 +128,22 @@ impl Stream for ChunkedReadFile {
         if size == counter {
             Poll::Ready(None)
         } else {
-            let Some(mut file) = self.file.take() else {
+            let Some(file) = self.file.take() else {
                 return Poll::Ready(None);
             };
-            self.fut = Some(
-                web::block(move || {
-                    let max_bytes: usize = cmp::min(size.saturating_sub(counter), 65_536) as usize;
-                    let mut buf = Vec::with_capacity(max_bytes);
-                    file.seek(io::SeekFrom::Start(offset))?;
-                    let nbytes = file.by_ref().take(max_bytes as u64).read_to_end(&mut buf)?;
-                    if nbytes == 0 {
-                        return Err(io::ErrorKind::UnexpectedEof.into());
-                    }
-                    Ok((file, Bytes::from(buf)))
-                })
-                .boxed_local(),
-            );
+            let max_bytes = cmp::min(size.saturating_sub(counter), 65_536) as usize;
+            if self.sync {
+                // the file is consumed by a failed read, so the stream ends after an error
+                return Poll::Ready(Some(read_chunk(file, offset, max_bytes).map(
+                    |(file, bytes)| {
+                        self.file = Some(file);
+                        self.offset += bytes.len() as u64;
+                        self.counter += bytes.len() as u64;
+                        bytes
+                    },
+                )));
+            }
+            self.fut = Some(web::block(move || read_chunk(file, offset, max_bytes)).boxed_local());
             self.poll_next(cx)
         }
     }
@@ -302,6 +314,7 @@ pub struct Files<St: State, In> {
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
+    read_mode_threshold: u64,
     guards: Option<Rc<dyn Guard>>,
     follow_symlinks: bool,
 }
@@ -316,6 +329,7 @@ impl<St: State, In> Clone for Files<St, In> {
             default: self.default.clone(),
             renderer: self.renderer.clone(),
             file_flags: self.file_flags.clone(),
+            read_mode_threshold: self.read_mode_threshold,
             path: self.path.clone(),
             mime_override: self.mime_override.clone(),
             guards: self.guards.clone(),
@@ -330,7 +344,8 @@ impl<St: State, In: 'static> Files<St, In> {
     /// Canonicalizes `dir` immediately. If this fails, logs the error and retains
     /// the supplied path; later request resolution may still fail. Resolution,
     /// metadata access, and file opening for requests run on the blocking
-    /// thread pool, as do file reads. Directory rendering runs on the web worker.
+    /// thread pool, as do file reads unless [`Self::read_mode_threshold`] is set.
+    /// Directory rendering runs on the web worker.
     ///
     /// Request resolution failures use [`Self::default_handler`] when configured,
     /// or return `404 Not Found` with the default web error handler.
@@ -354,6 +369,7 @@ impl<St: State, In: 'static> Files<St, In> {
             renderer: Rc::new(directory_listing),
             mime_override: None,
             file_flags: named::Flags::default(),
+            read_mode_threshold: 0,
             guards: None,
             follow_symlinks: false,
         }
@@ -459,6 +475,17 @@ impl<St: State, In: 'static> Files<St, In> {
         self
     }
 
+    #[inline]
+    /// Sets the body size below which file chunks are read on the web worker.
+    ///
+    /// Defaults to `0`, so all reads run on the blocking thread pool. See
+    /// [`NamedFile::read_mode_threshold`]. Path resolution and file opening
+    /// still run on the blocking thread pool.
+    pub fn read_mode_threshold(mut self, size: u64) -> Self {
+        self.read_mode_threshold = size;
+        self
+    }
+
     /// Replaces the default `GET`/`HEAD` check with a custom guard.
     ///
     /// A failed guard returns `405 Method Not Allowed` with the default web
@@ -539,6 +566,7 @@ where
             renderer: self.renderer.clone(),
             mime_override: self.mime_override.clone(),
             file_flags: self.file_flags.clone(),
+            read_mode_threshold: self.read_mode_threshold,
             guards: self.guards.clone(),
             follow_symlinks: self.follow_symlinks,
         };
@@ -572,6 +600,7 @@ pub struct FilesService<St: State, In> {
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
+    read_mode_threshold: u64,
     guards: Option<Rc<dyn Guard>>,
     follow_symlinks: bool,
 }
@@ -647,6 +676,7 @@ where
                 }
 
                 named_file.flags = self.file_flags.clone();
+                named_file.read_mode_threshold = self.read_mode_threshold;
                 let (req, _, _) = req.into_parts();
                 Ok(WebResponse::new((*named_file).into_response(&req), req))
             }
@@ -2532,11 +2562,74 @@ mod tests {
             file: Some(File::open("tests/test.binary").unwrap()),
             fut: None,
             counter: 0,
+            sync: false,
         };
         assert_eq!(reader.next().await.unwrap().unwrap().len(), 100);
         let err = reader.next().await.unwrap().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
         assert!(reader.next().await.is_none());
+    }
+
+    /// STATEMENT: A synchronous `ChunkedReadFile` returns each chunk from the first poll
+    /// and still ends after a failed read.
+    ///
+    /// HOW:
+    /// - Read `tests/test.binary` with `sync` set and a `size` larger than the file.
+    /// - Poll with a no-op waker and require `Ready` for the file bytes, then for
+    ///   `UnexpectedEof`, then for the end of the stream.
+    #[test]
+    fn test_chunked_read_file_sync() {
+        let mut reader = ChunkedReadFile {
+            size: 110,
+            offset: 0,
+            file: Some(File::open("tests/test.binary").unwrap()),
+            fut: None,
+            counter: 0,
+            sync: true,
+        };
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let Poll::Ready(Some(Ok(chunk))) = Pin::new(&mut reader).poll_next(&mut cx) else {
+            panic!("expected a ready chunk");
+        };
+        assert_eq!(chunk, fs::read("tests/test.binary").unwrap());
+        let Poll::Ready(Some(Err(err))) = Pin::new(&mut reader).poll_next(&mut cx) else {
+            panic!("expected a ready error");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(matches!(
+            Pin::new(&mut reader).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    /// STATEMENT: `Files::read_mode_threshold` makes ranges smaller than the threshold
+    /// readable without the blocking thread pool.
+    ///
+    /// HOW:
+    /// - Serve the crate directory with a 1 MiB threshold and request bytes 10-19 of
+    ///   `tests/test.binary`.
+    /// - Poll the response body once with a no-op waker and require the ready chunk
+    ///   to equal those file bytes.
+    #[ntex::test]
+    async fn test_files_read_mode_threshold() {
+        use futures::StreamExt;
+
+        let srv = test::init_service(
+            App::new().service(Files::new("/", ".").read_mode_threshold(1024 * 1024)),
+        )
+        .await;
+        let req = TestRequest::with_uri("/tests/test.binary")
+            .header(http::header::RANGE, "bytes=10-19")
+            .to_request();
+        let mut resp = test::call_service(&srv, req).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+
+        let mut body = resp.take_body();
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let Poll::Ready(Some(Ok(chunk))) = body.poll_next_unpin(&mut cx) else {
+            panic!("expected a ready chunk");
+        };
+        assert_eq!(chunk, fs::read("tests/test.binary").unwrap()[10..20]);
     }
 
     /// STATEMENT: Listings hide dot entries, escape ampersands, and mark visible directories with a slash.
