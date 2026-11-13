@@ -23,6 +23,7 @@ bitflags! {
         const ETAG = 0b0000_0001;
         const LAST_MD = 0b0000_0010;
         const CONTENT_DISPOSITION = 0b0000_0100;
+        const PREFER_UTF8 = 0b0000_1000;
     }
 }
 
@@ -233,11 +234,13 @@ impl NamedFile {
 
     /// Sets `Content-Type`, overriding the type inferred from the path extension.
     ///
-    /// Does not recompute the disposition type; use [`Self::set_content_disposition`]
+    /// The type is sent as given: this disables [`Self::prefer_utf8`]. Does not
+    /// recompute the disposition type; use [`Self::set_content_disposition`]
     /// to change it separately.
     #[inline]
     pub fn set_content_type(mut self, mime_type: mime::Mime) -> Self {
         self.content_type = mime_type;
+        self.flags.remove(Flags::PREFER_UTF8);
         self
     }
 
@@ -293,6 +296,17 @@ impl NamedFile {
         self
     }
 
+    #[inline]
+    /// Enables or disables the UTF-8 charset for text content types.
+    ///
+    /// Defaults to `true`. Adds `charset=utf-8` to `text/plain`, `text/html`,
+    /// `text/css`, `text/csv`, `text/tab-separated-values`, `text/javascript`
+    /// and `application/javascript`; other types are sent unchanged.
+    pub fn prefer_utf8(mut self, value: bool) -> Self {
+        self.flags.set(Flags::PREFER_UTF8, value);
+        self
+    }
+
     /// Set the `ETag` for serving this file.
     ///
     /// By default the `ETag` is derived from the file metadata: size, modification
@@ -325,6 +339,15 @@ impl NamedFile {
         self.etag = Some(etag);
         self.flags.insert(Flags::ETAG);
         self
+    }
+
+    fn content_type_value(&self) -> String {
+        if self.flags.contains(Flags::PREFER_UTF8) {
+            utf8_text(&self.content_type)
+                .map_or_else(|| self.content_type.to_string(), String::from)
+        } else {
+            self.content_type.to_string()
+        }
     }
 
     pub(crate) fn etag(&self) -> Option<header::EntityTag> {
@@ -410,6 +433,7 @@ impl NamedFile {
             if let Some(current_encoding) = self.encoding {
                 resp.encoding(current_encoding);
             }
+            resp.header(http::header::CONTENT_TYPE, self.content_type_value());
             let reader = ChunkedReadFile {
                 size: self.md.len(),
                 offset: 0,
@@ -417,7 +441,6 @@ impl NamedFile {
                 fut: None,
                 counter: 0,
             };
-            resp.header(http::header::CONTENT_TYPE, self.content_type.to_string());
             return resp.streaming(reader);
         }
 
@@ -504,7 +527,7 @@ impl NamedFile {
             resp.header(http::header::ETAG, header::ETag(etag).to_string());
         }
 
-        resp.header(http::header::CONTENT_TYPE, self.content_type.to_string());
+        resp.header(http::header::CONTENT_TYPE, self.content_type_value());
         resp.header(http::header::ACCEPT_RANGES, "bytes");
 
         // a 412 or 304 response takes precedence over the range request
@@ -571,6 +594,28 @@ impl NamedFile {
             }),
         ))
     }
+}
+
+/// Returns the UTF-8 charset variant of a text content type.
+fn utf8_text(ct: &mime::Mime) -> Option<&'static str> {
+    [
+        (mime::TEXT_PLAIN, "text/plain; charset=utf-8"),
+        (mime::TEXT_HTML, "text/html; charset=utf-8"),
+        (mime::TEXT_CSS, "text/css; charset=utf-8"),
+        (mime::TEXT_CSV, "text/csv; charset=utf-8"),
+        (
+            mime::TEXT_TAB_SEPARATED_VALUES,
+            "text/tab-separated-values; charset=utf-8",
+        ),
+        (mime::TEXT_JAVASCRIPT, "text/javascript; charset=utf-8"),
+        (
+            mime::APPLICATION_JAVASCRIPT,
+            "application/javascript; charset=utf-8",
+        ),
+    ]
+    .into_iter()
+    .find(|(plain, _)| plain == ct)
+    .map(|(_, utf8)| utf8)
 }
 
 impl Deref for NamedFile {
@@ -757,7 +802,11 @@ mod tests {
         use crate::header::{ContentDisposition, DispositionType, Header, Raw};
 
         for (filename, mime, disposition) in [
-            ("script.js", "text/javascript", DispositionType::Inline),
+            (
+                "script.js",
+                "text/javascript; charset=utf-8",
+                DispositionType::Inline,
+            ),
             ("data.json", "application/json", DispositionType::Inline),
             ("module.wasm", "application/wasm", DispositionType::Inline),
             (

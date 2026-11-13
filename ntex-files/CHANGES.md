@@ -1,8 +1,10 @@
 # Changes
 
-## [4.4.1] - unreleased
+## [4.5.0] - unreleased
 
 * Do not serve hidden files through Windows short-name aliases
+
+* Add `Files::prefer_utf8` and `NamedFile::prefer_utf8`, enabled by default: text content types are sent with `charset=utf-8`
 
 ## [4.4.0] - 2026-11-06
 
