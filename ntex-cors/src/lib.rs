@@ -237,34 +237,52 @@ impl Cors {
         }
     }
 
-    /// Adds an origin to the allowlist, matched exactly against `Origin`.
+    /// Adds an origin to the allowlist.
     ///
     /// All origins are allowed by default. The first non-wildcard call starts
     /// a restricted list; later calls add to it. `"*"` resets the list to all
     /// origins. A later non-wildcard call starts a new restricted list.
     ///
-    /// Values are checked with [`Url::try_from`] but stored as supplied, without
-    /// normalization. Use the browser's origin form, such as
-    /// `https://example.com`, without a trailing slash or path. Invalid URLs
-    /// cause [`build`](Self::build) to panic.
+    /// Origins are matched exactly as supplied, except that a host beginning
+    /// with `*.` matches any subdomain, including nested subdomains, but not
+    /// the base domain. For example, `https://*.example.com` matches
+    /// `https://api.example.com` and `https://v1.api.example.com`, but not
+    /// `https://example.com`. The scheme and port must also match.
+    ///
+    /// Exact origins are stored as supplied and compared without normalization.
+    /// Wildcard origins are parsed and normalized as [`Url`] values. Supply an
+    /// origin in browser origin form, such as `https://example.com`, without
+    /// credentials, a path, query, or fragment. Invalid values cause
+    /// configuration to panic.
     ///
     /// Allowed request origins are echoed in `Access-Control-Allow-Origin`,
     /// unless all origins are allowed and [`send_wildcard`](Self::send_wildcard)
     /// is enabled.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use ntex_cors::Cors;
+    ///
+    /// let cors = Cors::new()
+    ///     .allowed_origin("https://*.example.com")
+    ///     .build::<()>();
+    /// ```
     pub fn allowed_origin(mut self, origin: &str) -> Self {
         if let Some(cors) = cors(&mut self.cors, &self.error) {
             match Url::try_from(origin) {
-                Ok(_) => {
+                Ok(url) => {
                     // If the origin is "*", set the origins to `All`
                     if origin.trim() == "*" {
                         cors.origins = AllOrSome::All;
                         return self;
                     }
+
                     if cors.origins.is_all() {
-                        cors.origins = AllOrSome::Some(HashSet::new());
+                        cors.origins = AllOrSome::Some(Origins::default());
                     }
                     if let AllOrSome::Some(ref mut origins) = cors.origins {
-                        origins.insert(origin.to_owned());
+                        origins.add(url, origin);
                     }
                 }
                 Err(e) => {
@@ -510,7 +528,7 @@ impl Cors {
 
         if let AllOrSome::Some(ref origins) = cors.origins {
             let s = origins
-                .iter()
+                .into_iter()
                 .fold(String::new(), |s, v| format!("{}, {}", s, v));
             cors.origins_str = Some(HeaderValue::try_from(&s[2..]).unwrap());
         }
@@ -540,9 +558,130 @@ fn cors<'a>(parts: &'a mut Option<Inner>, err: &Option<Failure>) -> Option<&'a m
     parts.as_mut()
 }
 
+/// Stores the configured exact and wildcard CORS origins.
+///
+/// Exact origins retain their original strings for literal comparison. Wildcard
+/// origins are stored as parsed URLs so their scheme, host, and port can be
+/// checked independently.
+#[derive(Default)]
+struct Origins {
+    exacts: HashSet<String>,
+    wildcards: HashSet<Url>,
+}
+
+/// Iterator type used to expose exact and wildcard entries as header strings.
+type OriginsIntoIter<'a> = std::iter::Chain<
+    std::iter::Map<std::collections::hash_set::Iter<'a, String>, fn(&'a String) -> &'a str>,
+    std::iter::Map<std::collections::hash_set::Iter<'a, Url>, fn(&'a Url) -> &'a str>,
+>;
+
+/// Returns an exact origin as a string slice for iteration.
+#[inline(always)]
+fn origin_as_str(origin: &String) -> &str {
+    origin
+}
+
+/// Returns a wildcard URL without its normalized trailing slash.
+#[inline(always)]
+fn wildcard_as_str(origin: &Url) -> &str {
+    origin.as_str().strip_suffix('/').unwrap_or(origin.as_str())
+}
+
+/// Iterates over configured origins in the form used to construct response headers.
+impl<'a> IntoIterator for &'a Origins {
+    type Item = &'a str;
+    type IntoIter = OriginsIntoIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.exacts
+            .iter()
+            .map(origin_as_str as fn(&String) -> &str)
+            .chain(
+                self.wildcards
+                    .iter()
+                    .map(wildcard_as_str as fn(&Url) -> &str),
+            )
+    }
+}
+
+impl Origins {
+    /// Adds an origin, preserving exact values and storing wildcard URLs parsed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the URL is not an origin URL or its wildcard is not a leading
+    /// host label.
+    fn add(&mut self, url: Url, origin: &str) {
+        assert!(
+            is_origin_url(&url),
+            "origin must not contain a path, query, or fragment"
+        );
+
+        let host = url.host().expect("origin must include a host");
+        if let Some(host_suffix) = host.strip_prefix("*.") {
+            assert!(
+                !host_suffix.is_empty() && !host_suffix.contains('*'),
+                "wildcard must be the leading host label"
+            );
+
+            self.wildcards.insert(url);
+        } else {
+            self.exacts.insert(origin.to_owned());
+        }
+    }
+
+    /// Checks an incoming origin against exact entries and wildcard hosts.
+    ///
+    /// Exact entries are compared as supplied. Wildcards require a valid origin
+    /// with the same scheme and port and a non-empty subdomain before the
+    /// configured host suffix.
+    fn matches(&self, origin: &str) -> bool {
+        if self.exacts.contains(origin) {
+            return true;
+        }
+
+        let Ok(url) = Url::try_from(origin) else {
+            return false;
+        };
+        if !is_origin_url(&url) {
+            return false;
+        }
+
+        let (Some(scheme), Some(host)) = (url.scheme_str(), url.host()) else {
+            return false;
+        };
+
+        self.wildcards.iter().any(|allowed| {
+            if allowed.scheme_str() != Some(scheme) || url.port_u16() != allowed.port_u16() {
+                return false;
+            }
+
+            let Some(host_suffix) = allowed.host().and_then(|host| host.strip_prefix("*.")) else {
+                return false;
+            };
+
+            host.strip_suffix(host_suffix)
+                .and_then(|prefix| prefix.strip_suffix('.'))
+                .is_some_and(|subdomain| !subdomain.is_empty())
+        })
+    }
+}
+
+/// Returns whether a URL is a valid origin form with no credentials or
+/// components beyond its scheme and authority.
+fn is_origin_url(url: &Url) -> bool {
+    url.scheme().is_some()
+        && url.host().is_some()
+        && url.username().is_none()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
 struct Inner {
     methods: HashSet<Method>,
-    origins: AllOrSome<HashSet<String>>,
+    origins: AllOrSome<Origins>,
     origins_str: Option<HeaderValue>,
     headers: AllOrSome<HashSet<HeaderName>>,
     expose_hdrs: Option<HeaderValue>,
@@ -559,10 +698,13 @@ impl Inner {
             if let Ok(origin) = hdr.to_str() {
                 return match self.origins {
                     AllOrSome::All => Ok(()),
-                    AllOrSome::Some(ref allowed_origins) => allowed_origins
-                        .get(origin)
-                        .map(|_| ())
-                        .ok_or(CorsError::OriginNotAllowed),
+                    AllOrSome::Some(ref allowed_origins) => {
+                        if allowed_origins.matches(origin) {
+                            Ok(())
+                        } else {
+                            Err(CorsError::OriginNotAllowed)
+                        }
+                    }
                 };
             }
             Err(CorsError::BadOrigin)
@@ -585,7 +727,7 @@ impl Inner {
             }
             AllOrSome::Some(ref origins) => {
                 if let Some(origin) = headers.get(&header::ORIGIN).filter(|o| match o.to_str() {
-                    Ok(os) => origins.contains(os),
+                    Ok(os) => origins.matches(os),
                     _ => false,
                 }) {
                     Some(origin.clone())
@@ -1236,6 +1378,70 @@ mod tests {
                 .unwrap()
                 .as_bytes()
         );
+    }
+
+    #[ntex::test]
+    async fn test_wildcard_origin_matches_subdomains() {
+        let cors = Cors::new()
+            .allowed_origin("https://*.example.com")
+            .allowed_methods([Method::GET])
+            .build()
+            .create(&(), test::ok_service())
+            .pipeline(());
+
+        for (origin, allowed) in [
+            ("https://api.example.com", true),
+            ("https://API.EXAMPLE.COM", true),
+            ("https://v1.api.example.com", true),
+            ("https://api.example.com:443", true),
+            ("https://example.com", false),
+            ("https://evil-example.com", false),
+            ("https://api.example.com/path", false),
+            ("http://api.example.com", false),
+            ("https://api.example.com:8443", false),
+        ] {
+            let req = TestRequest::with_header(header::ORIGIN, origin)
+                .method(Method::GET)
+                .to_srv_request();
+            let resp = cors.call(req).await.unwrap();
+
+            if allowed {
+                assert_eq!(resp.status(), StatusCode::OK, "{origin}");
+                assert_eq!(
+                    resp.headers()
+                        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                        .unwrap(),
+                    origin
+                );
+            } else {
+                assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{origin}");
+                assert!(
+                    !resp
+                        .headers()
+                        .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                );
+            }
+        }
+
+        let req = TestRequest::with_header(header::ORIGIN, "https://api.example.com")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .method(Method::OPTIONS)
+            .to_srv_request();
+        let resp = cors.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "https://api.example.com"
+        );
+
+        let req = TestRequest::with_header(header::ORIGIN, "https://example.com")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .method(Method::OPTIONS)
+            .to_srv_request();
+        let resp = cors.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[ntex::test]

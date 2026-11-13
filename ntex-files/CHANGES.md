@@ -1,5 +1,9 @@
 # Changes
 
+## [Unreleased]
+
+* Use `v_html5escape` to escape attributes in directory listings
+
 ## [4.4.0] - 2026-11-06
 
 * Remove unused crate-private header code
