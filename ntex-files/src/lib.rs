@@ -685,7 +685,8 @@ enum Target {
 /// Resolves a request path inside of `directory`, runs on the blocking thread pool.
 ///
 /// A canonical path outside of `directory` is reported as not found,
-/// unless `follow_symlinks` is set.
+/// unless `follow_symlinks` is set. On Windows, a canonical path with a hidden
+/// component is reported as not found as well.
 fn resolve(
     directory: &Path,
     path: PathBuf,
@@ -695,6 +696,10 @@ fn resolve(
 ) -> io::Result<Target> {
     let contained = |path: PathBuf| -> io::Result<PathBuf> {
         let path = path.canonicalize()?;
+        // Windows short names (`ENV~1`) hide the leading dot from the request path checks
+        if cfg!(windows) && is_hidden(directory, &path) {
+            return Err(io::ErrorKind::NotFound.into());
+        }
         if follow_symlinks || path.starts_with(directory) {
             Ok(path)
         } else {
@@ -713,6 +718,14 @@ fn resolve(
         }
         None => Ok(Target::Dir(path)),
     }
+}
+
+/// Reports whether a component of `path` below `directory` starts with a dot.
+/// All components are checked when `path` is outside of `directory`.
+fn is_hidden(directory: &Path, path: &Path) -> bool {
+    path.strip_prefix(directory).unwrap_or(path).components().any(|c| {
+        matches!(c, std::path::Component::Normal(name) if name.as_encoded_bytes().starts_with(b"."))
+    })
 }
 
 #[derive(Debug)]
@@ -2303,6 +2316,63 @@ mod tests {
                 assert_eq!(resp.status(), status, "{uri} follow={follow}");
             }
         }
+    }
+
+    /// STATEMENT: `is_hidden` checks dot-prefixed components below the root, or the whole
+    /// path when it lies outside of the root.
+    ///
+    /// HOW:
+    /// - Pass a root that itself has a dot component and confirm visible paths below it
+    ///   are not hidden.
+    /// - Confirm a dot-prefixed file or directory below the root is hidden.
+    /// - Confirm a path outside of the root with a dot component is hidden.
+    #[test]
+    fn test_is_hidden() {
+        let root = Path::new("/srv/.site");
+        assert!(!is_hidden(root, &root.join("index.html")));
+        assert!(!is_hidden(root, &root.join("a.b/c.txt")));
+        assert!(is_hidden(root, &root.join(".env")));
+        assert!(is_hidden(root, &root.join(".git/config")));
+        assert!(is_hidden(root, Path::new("/home/user/.ssh/id")));
+        assert!(!is_hidden(root, Path::new("/home/user/file")));
+    }
+
+    /// STATEMENT: On Windows, a short-name alias of a hidden file is not served.
+    ///
+    /// HOW:
+    /// - Create `.secret-file` and look up its 8.3 short name with `cmd`; skip when the
+    ///   volume has no short names.
+    /// - Request the short name and confirm `404 Not Found` instead of the file contents.
+    #[cfg(windows)]
+    #[ntex::test]
+    async fn test_windows_short_name_hidden() {
+        use std::os::windows::process::CommandExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let secret = root.path().join(".secret-file");
+        fs::write(&secret, "secret").unwrap();
+
+        let out = std::process::Command::new("cmd")
+            .raw_arg(format!(
+                "/C for %I in (\"{}\") do @echo %~sI",
+                secret.display()
+            ))
+            .output()
+            .unwrap();
+        let short = String::from_utf8_lossy(&out.stdout);
+        let Some(name) = Path::new(short.trim())
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.starts_with('.'))
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+
+        let srv = test::init_service(App::new().service(Files::new("/", root.path()))).await;
+        let req = TestRequest::with_uri(&format!("/{name}")).to_request();
+        let resp = test::call_service(&srv, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{name}");
     }
 
     /// STATEMENT: Directory listings escape file names in both link targets and link text.
