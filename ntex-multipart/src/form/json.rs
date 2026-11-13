@@ -49,7 +49,7 @@ where
         field: Field,
         limits: &mut Limits,
     ) -> Result<Self, MultipartError> {
-        let config = req.app_state::<JsonConfig>().unwrap_or(&DEFAULT_CONFIG);
+        let config = req.app_value::<JsonConfig>().unwrap_or(&DEFAULT_CONFIG);
 
         if config.validate_content_type {
             let valid = if let Some(mime) = field.content_type() {

@@ -54,7 +54,7 @@ where
         field: Field,
         limits: &mut Limits,
     ) -> Result<Self, MultipartError> {
-        let config = req.app_state::<TextConfig>().unwrap_or(&DEFAULT_CONFIG);
+        let config = req.app_value::<TextConfig>().unwrap_or(&DEFAULT_CONFIG);
 
         if config.validate_content_type {
             let valid = if let Some(mime) = field.content_type() {

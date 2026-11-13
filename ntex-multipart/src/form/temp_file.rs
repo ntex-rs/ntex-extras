@@ -54,7 +54,7 @@ impl FieldReader for TempFile {
         mut field: Field,
         limits: &mut Limits,
     ) -> Result<Self, MultipartError> {
-        let config = req.app_state::<TempFileConfig>().unwrap_or(&DEFAULT_CONFIG);
+        let config = req.app_value::<TempFileConfig>().unwrap_or(&DEFAULT_CONFIG);
         let mut size = 0;
 
         let file = config

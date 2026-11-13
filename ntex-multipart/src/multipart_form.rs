@@ -130,7 +130,7 @@ impl MultipartFormConfig {
 
     /// Returns configuration from request app state, or the default if none is registered.
     pub(crate) fn from_req(req: &HttpRequest) -> &Self {
-        req.app_state::<Self>().unwrap_or(&DEFAULT_CONFIG)
+        req.app_value::<Self>().unwrap_or(&DEFAULT_CONFIG)
     }
 }
 
