@@ -1,5 +1,9 @@
 # Changes
 
+## [4.4.1] - unreleased
+
+* Do not serve hidden files through Windows short-name aliases
+
 ## [4.4.0] - 2026-11-06
 
 * Remove unused crate-private header code
