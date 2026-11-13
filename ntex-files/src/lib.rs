@@ -450,6 +450,15 @@ impl<St: State, In: 'static> Files<St, In> {
         self
     }
 
+    #[inline]
+    /// Enables or disables the UTF-8 charset for text content types.
+    ///
+    /// Defaults to `true`. See [`NamedFile::prefer_utf8`] for the affected types.
+    pub fn prefer_utf8(mut self, value: bool) -> Self {
+        self.file_flags.set(named::Flags::PREFER_UTF8, value);
+        self
+    }
+
     /// Replaces the default `GET`/`HEAD` check with a custom guard.
     ///
     /// A failed guard returns `405 Method Not Allowed` with the default web
@@ -1298,6 +1307,100 @@ mod tests {
                 .get(http::header::CONTENT_DISPOSITION)
                 .unwrap(),
             "inline; filename=\"Cargo.toml\""
+        );
+    }
+
+    /// STATEMENT: `Files` adds a UTF-8 charset to text content types by default, and
+    /// `prefer_utf8(false)` sends the bare type.
+    ///
+    /// HOW:
+    /// - Serve html, txt, css, csv, js, xml and png files with default settings and
+    ///   with `prefer_utf8(false)`.
+    /// - Confirm html, txt, css, csv and js get `charset=utf-8` only by default.
+    /// - Confirm xml and png are sent unchanged in both cases.
+    #[ntex::test]
+    async fn test_files_prefer_utf8() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "a.html", "a.txt", "a.css", "a.csv", "a.js", "a.xml", "a.png",
+        ] {
+            fs::write(root.path().join(name), "x").unwrap();
+        }
+        let cases = [
+            ("/a.html", "text/html"),
+            ("/a.txt", "text/plain"),
+            ("/a.css", "text/css"),
+            ("/a.csv", "text/csv"),
+            ("/a.js", "text/javascript"),
+        ];
+
+        for prefer in [true, false] {
+            let mut files = Files::new("/", root.path());
+            if !prefer {
+                files = files.prefer_utf8(false);
+            }
+            let srv = test::init_service(App::new().service(files)).await;
+
+            for (uri, ct) in cases {
+                let resp = test::call_service(&srv, TestRequest::with_uri(uri).to_request()).await;
+                let expected = if prefer {
+                    format!("{ct}; charset=utf-8")
+                } else {
+                    ct.to_string()
+                };
+                assert_eq!(
+                    resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+                    &expected
+                );
+            }
+            for (uri, ct) in [("/a.xml", "text/xml"), ("/a.png", "image/png")] {
+                let resp = test::call_service(&srv, TestRequest::with_uri(uri).to_request()).await;
+                assert_eq!(resp.headers().get(http::header::CONTENT_TYPE).unwrap(), ct);
+            }
+        }
+    }
+
+    /// STATEMENT: `NamedFile` applies `prefer_utf8` for custom status codes, and an explicit
+    /// `set_content_type` is sent unchanged unless `prefer_utf8` is enabled again.
+    ///
+    /// HOW:
+    /// - Respond with a `.html` file using status `404` and check for `charset=utf-8`.
+    /// - Set the content type to `text/plain` and check the bare type is sent.
+    /// - Call `prefer_utf8(true)` after `set_content_type` and check the charset is added.
+    #[ntex::test]
+    async fn test_named_file_prefer_utf8() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("page.html");
+        fs::write(&path, "x").unwrap();
+        let req = TestRequest::default().to_http_request();
+
+        let file = NamedFile::open(&path)
+            .unwrap()
+            .set_status_code(StatusCode::NOT_FOUND);
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+
+        let file = NamedFile::open(&path)
+            .unwrap()
+            .set_content_type(mime::TEXT_PLAIN);
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(
+            resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/plain"
+        );
+
+        let file = NamedFile::open(&path)
+            .unwrap()
+            .set_content_type(mime::TEXT_PLAIN)
+            .prefer_utf8(true);
+        let resp = test::respond_to(file, &req).await;
+        assert_eq!(
+            resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
         );
     }
 
