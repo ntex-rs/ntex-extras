@@ -53,7 +53,7 @@ async fn generic_form_is_extracted() {
 #[ntex::test]
 async fn config_from_app_state_limits_form() {
     let (req, mut pl, ()) = request()
-        .app_state(MultipartFormConfig::default().total_limit(3))
+        .app_value(MultipartFormConfig::default().total_limit(3))
         .to_http_parts();
     let res = MultipartForm::<Form<Bytes>>::from_request(&(), &req, &mut pl).await;
     assert!(matches!(
@@ -212,7 +212,7 @@ async fn json_config_allows_untyped_json() {
         part.content_type = content_type;
         let form = extract::<Form<Json<Vec<u32>>>>(
             multipart_request(&[part])
-                .app_state(JsonConfig::default().validate_content_type(false)),
+                .app_value(JsonConfig::default().validate_content_type(false)),
         )
         .await
         .unwrap();
@@ -290,7 +290,7 @@ async fn text_reports_decoding_and_deserialization_errors() {
 async fn text_config_allows_other_media_types() {
     let form = extract::<Form<Text<u32>>>(
         multipart_request(&[Part::new("name", b"42").content_type("application/octet-stream")])
-            .app_state(TextConfig::default().validate_content_type(false)),
+            .app_value(TextConfig::default().validate_content_type(false)),
     )
     .await
     .unwrap();
@@ -326,30 +326,30 @@ async fn bytes_preserves_upload_and_metadata() {
 #[ntex::test]
 async fn in_memory_readers_enforce_form_limits() {
     let memory = MultipartFormConfig::default().memory_limit(4);
-    assert_overflow(extract::<Form<Bytes>>(request().app_state(memory.clone())).await);
+    assert_overflow(extract::<Form<Bytes>>(request().app_value(memory.clone())).await);
     for config in [memory, MultipartFormConfig::default().total_limit(4)] {
         assert_overflow(
             extract::<Form<Json<Vec<u32>>>>(
                 multipart_request(&[Part::new("name", b"[1,2]").content_type("application/json")])
-                    .app_state(config.clone()),
+                    .app_value(config.clone()),
             )
             .await,
         );
-        assert_overflow(extract::<Form<Text<String>>>(request().app_state(config)).await);
+        assert_overflow(extract::<Form<Text<String>>>(request().app_value(config)).await);
     }
     let exact = MultipartFormConfig::default()
         .total_limit(5)
         .memory_limit(5);
-    let bytes = extract::<Form<Bytes>>(request().app_state(exact.clone()))
+    let bytes = extract::<Form<Bytes>>(request().app_value(exact.clone()))
         .await
         .unwrap();
     let json = extract::<Form<Json<Vec<u32>>>>(
         multipart_request(&[Part::new("name", b"[1,2]").content_type("application/json")])
-            .app_state(exact.clone()),
+            .app_value(exact.clone()),
     )
     .await
     .unwrap();
-    let text = extract::<Form<Text<String>>>(request().app_state(exact))
+    let text = extract::<Form<Text<String>>>(request().app_value(exact))
         .await
         .unwrap();
     assert_eq!(bytes.name.data, "hello");
@@ -609,7 +609,7 @@ async fn form_limits_accumulate_across_fields() {
         assert_overflow(
             extract::<LimitedCollection>(
                 multipart_request(&[Part::new("name", b"abc"), Part::new("tail", b"def")])
-                    .app_state(config),
+                    .app_value(config),
             )
             .await,
         );
@@ -665,8 +665,8 @@ async fn temp_files_preserve_data_metadata_and_cleanup() {
         }
         let form = extract::<Form<TempFile>>(
             multipart_request(&[part])
-                .app_state(TempFileConfig::default().directory("."))
-                .app_state(
+                .app_value(TempFileConfig::default().directory("."))
+                .app_value(
                     MultipartFormConfig::default()
                         .total_limit(5)
                         .memory_limit(0),
@@ -716,18 +716,18 @@ async fn temp_files_enforce_total_and_field_limits() {
     assert_overflow(
         extract::<Form<TempFile>>(
             request()
-                .app_state(TempFileConfig::default().directory("."))
-                .app_state(MultipartFormConfig::default().total_limit(4)),
+                .app_value(TempFileConfig::default().directory("."))
+                .app_value(MultipartFormConfig::default().total_limit(4)),
         )
         .await,
     );
     assert_overflow(
-        extract::<LimitedTempFile>(request().app_state(TempFileConfig::default().directory(".")))
+        extract::<LimitedTempFile>(request().app_value(TempFileConfig::default().directory(".")))
             .await,
     );
     let form = extract::<LimitedTempFile>(
         multipart_request(&[Part::new("name", b"four")])
-            .app_state(TempFileConfig::default().directory(".")),
+            .app_value(TempFileConfig::default().directory(".")),
     )
     .await
     .unwrap();
@@ -742,7 +742,7 @@ async fn temp_files_enforce_total_and_field_limits() {
 #[ntex::test]
 async fn temp_file_creation_errors_are_reported() {
     let error = extract::<Form<TempFile>>(
-        request().app_state(TempFileConfig::default().directory("Cargo.toml")),
+        request().app_value(TempFileConfig::default().directory("Cargo.toml")),
     )
     .await
     .err()
@@ -846,7 +846,7 @@ async fn temp_files_handle_fragmented_uploads_and_payload_errors() {
 
     for fail in [false, true] {
         let (req, _, ()) = request()
-            .app_state(TempFileConfig::default().directory("."))
+            .app_value(TempFileConfig::default().directory("."))
             .to_http_parts();
         let mut chunks = vec![
             Ok(PayloadBytes::from_static(
