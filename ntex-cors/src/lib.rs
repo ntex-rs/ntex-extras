@@ -640,6 +640,10 @@ impl Origins {
             return true;
         }
 
+        if self.wildcards.is_empty() {
+            return false;
+        }
+
         let Ok(url) = Url::try_from(origin) else {
             return false;
         };
