@@ -1,5 +1,9 @@
 # Changes
 
+## [Unreleased]
+
+* Support wildcard origins such as `https://*.example.com`, matching subdomains with the same scheme and port
+
 ## [4.3.0] - 2026-11-06
 
 * Make `Default` for the `Cors` builder equivalent to `Cors::new()`; `build()` no longer panics
