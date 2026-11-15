@@ -8,6 +8,8 @@
 
 * Add `Files::read_mode_threshold` and `NamedFile::read_mode_threshold`: bodies smaller than the threshold are read on the web worker instead of the blocking thread pool
 
+* Add `Files::use_hidden_files` to serve dot-prefixed path segments; `.` and `..` segments are still rejected and listings still omit dot entries
+
 ## [4.4.0] - 2026-11-06
 
 * Remove unused crate-private header code

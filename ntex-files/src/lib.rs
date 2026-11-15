@@ -317,6 +317,7 @@ pub struct Files<St: State, In> {
     read_mode_threshold: u64,
     guards: Option<Rc<dyn Guard>>,
     follow_symlinks: bool,
+    hidden_files: bool,
 }
 
 impl<St: State, In> Clone for Files<St, In> {
@@ -334,6 +335,7 @@ impl<St: State, In> Clone for Files<St, In> {
             mime_override: self.mime_override.clone(),
             guards: self.guards.clone(),
             follow_symlinks: self.follow_symlinks,
+            hidden_files: self.hidden_files,
         }
     }
 }
@@ -372,6 +374,7 @@ impl<St: State, In: 'static> Files<St, In> {
             read_mode_threshold: 0,
             guards: None,
             follow_symlinks: false,
+            hidden_files: false,
         }
     }
 
@@ -486,6 +489,18 @@ impl<St: State, In: 'static> Files<St, In> {
         self
     }
 
+    #[inline]
+    /// Allows serving files and directories whose path segments start with a dot.
+    ///
+    /// Disabled by default, so such requests return `400 Bad Request`. The `.`
+    /// and `..` segments are still rejected after decoding, resolved paths must
+    /// stay inside the base unless [`Self::follow_symlinks`] is set, and directory
+    /// listings still omit dot entries.
+    pub fn use_hidden_files(mut self) -> Self {
+        self.hidden_files = true;
+        self
+    }
+
     /// Replaces the default `GET`/`HEAD` check with a custom guard.
     ///
     /// A failed guard returns `405 Method Not Allowed` with the default web
@@ -569,6 +584,7 @@ where
             read_mode_threshold: self.read_mode_threshold,
             guards: self.guards.clone(),
             follow_symlinks: self.follow_symlinks,
+            hidden_files: self.hidden_files,
         };
 
         if let Some(default) = self.default.as_ref() {
@@ -603,6 +619,7 @@ pub struct FilesService<St: State, In> {
     read_mode_threshold: u64,
     guards: Option<Rc<dyn Guard>>,
     follow_symlinks: bool,
+    hidden_files: bool,
 }
 
 impl<St: State, In> FilesService<St, In>
@@ -648,7 +665,7 @@ where
             return Ok(req.error_response(ctx.st(), &FilesError::MethodNotAllowed));
         }
 
-        let real_path = match PathBufWrp::get_pathbuf(req.match_info().path()) {
+        let real_path = match PathBufWrp::get_pathbuf(req.match_info().path(), self.hidden_files) {
             Ok(item) => item,
             Err(e) => return Ok(req.error_response(ctx.st(), &FilesError::from(e))),
         };
@@ -657,6 +674,7 @@ where
         let index = self.index.clone();
         let redirect = self.redirect_to_slash && !req.path().ends_with('/');
         let follow_symlinks = self.follow_symlinks;
+        let hidden_files = self.hidden_files;
         let target = web::block(move || {
             resolve(
                 &directory,
@@ -664,6 +682,7 @@ where
                 index.as_deref(),
                 redirect,
                 follow_symlinks,
+                hidden_files,
             )
         })
         .await;
@@ -725,18 +744,19 @@ enum Target {
 ///
 /// A canonical path outside of `directory` is reported as not found,
 /// unless `follow_symlinks` is set. On Windows, a canonical path with a hidden
-/// component is reported as not found as well.
+/// component is reported as not found as well, unless `hidden_files` is set.
 fn resolve(
     directory: &Path,
     path: PathBuf,
     index: Option<&str>,
     redirect: bool,
     follow_symlinks: bool,
+    hidden_files: bool,
 ) -> io::Result<Target> {
     let contained = |path: PathBuf| -> io::Result<PathBuf> {
         let path = path.canonicalize()?;
         // Windows short names (`ENV~1`) hide the leading dot from the request path checks
-        if cfg!(windows) && is_hidden(directory, &path) {
+        if cfg!(windows) && !hidden_files && is_hidden(directory, &path) {
             return Err(io::ErrorKind::NotFound.into());
         }
         if follow_symlinks || path.starts_with(directory) {
@@ -771,7 +791,8 @@ fn is_hidden(directory: &Path, path: &Path) -> bool {
 struct PathBufWrp(PathBuf);
 
 impl PathBufWrp {
-    fn get_pathbuf(path: &str) -> Result<Self, UriSegmentError> {
+    /// Parses a request path; `hidden` allows dot-prefixed segments.
+    fn get_pathbuf(path: &str, hidden: bool) -> Result<Self, UriSegmentError> {
         let mut buf = PathBuf::new();
         for segment in path.split('/') {
             if segment == ".." {
@@ -781,7 +802,7 @@ impl PathBufWrp {
 
             // validate the decoded segment, encoded characters must not bypass checks
             let segment = <Url as ResourcePath>::unquote(segment);
-            if segment.starts_with('.') {
+            if segment.starts_with('.') && (!hidden || is_dot_segment(&segment)) {
                 return Err(UriSegmentError::BadStart('.'));
             } else if segment.starts_with('*') {
                 return Err(UriSegmentError::BadStart('*'));
@@ -812,8 +833,19 @@ impl<St> FromRequest<St> for PathBufWrp {
     type Error = UriSegmentError;
 
     async fn from_request(_: &St, req: &HttpRequest, _: &mut Payload) -> Result<Self, Self::Error> {
-        PathBufWrp::get_pathbuf(req.match_info().path())
+        PathBufWrp::get_pathbuf(req.match_info().path(), false)
     }
+}
+
+/// Reports whether a decoded segment is `.` or `..`, which must not reach the filesystem.
+/// On Windows, trailing dots and spaces are dropped, so `...` and `.. ` count as well.
+fn is_dot_segment(segment: &str) -> bool {
+    let name = if cfg!(windows) {
+        segment.trim_end_matches(['.', ' '])
+    } else {
+        segment
+    };
+    matches!(name, "" | "." | "..")
 }
 
 #[cfg(test)]
@@ -2338,31 +2370,31 @@ mod tests {
     #[ntex::test]
     async fn test_path_buf() {
         assert_eq!(
-            PathBufWrp::get_pathbuf("/test/.tt").map(|t| t.0),
+            PathBufWrp::get_pathbuf("/test/.tt", false).map(|t| t.0),
             Err(UriSegmentError::BadStart('.'))
         );
         assert_eq!(
-            PathBufWrp::get_pathbuf("/test/*tt").map(|t| t.0),
+            PathBufWrp::get_pathbuf("/test/*tt", false).map(|t| t.0),
             Err(UriSegmentError::BadStart('*'))
         );
         assert_eq!(
-            PathBufWrp::get_pathbuf("/test/tt:").map(|t| t.0),
+            PathBufWrp::get_pathbuf("/test/tt:", false).map(|t| t.0),
             Err(UriSegmentError::BadEnd(':'))
         );
         assert_eq!(
-            PathBufWrp::get_pathbuf("/test/tt<").map(|t| t.0),
+            PathBufWrp::get_pathbuf("/test/tt<", false).map(|t| t.0),
             Err(UriSegmentError::BadEnd('<'))
         );
         assert_eq!(
-            PathBufWrp::get_pathbuf("/test/tt>").map(|t| t.0),
+            PathBufWrp::get_pathbuf("/test/tt>", false).map(|t| t.0),
             Err(UriSegmentError::BadEnd('>'))
         );
         assert_eq!(
-            PathBufWrp::get_pathbuf("/seg1/seg2/").unwrap().0,
+            PathBufWrp::get_pathbuf("/seg1/seg2/", false).unwrap().0,
             PathBuf::from_iter(vec!["seg1", "seg2"])
         );
         assert_eq!(
-            PathBufWrp::get_pathbuf("/seg1/../seg2/").unwrap().0,
+            PathBufWrp::get_pathbuf("/seg1/../seg2/", false).unwrap().0,
             PathBuf::from_iter(vec!["seg2"])
         );
     }
@@ -2376,25 +2408,110 @@ mod tests {
     #[test]
     fn test_path_buf_encoded_segments() {
         assert_eq!(
-            PathBufWrp::get_pathbuf("/%2e%2e/Cargo.toml").map(|t| t.0),
+            PathBufWrp::get_pathbuf("/%2e%2e/Cargo.toml", false).map(|t| t.0),
             Err(UriSegmentError::BadStart('.'))
         );
         assert_eq!(
-            PathBufWrp::get_pathbuf("/%2ehidden").map(|t| t.0),
+            PathBufWrp::get_pathbuf("/%2ehidden", false).map(|t| t.0),
             Err(UriSegmentError::BadStart('.'))
         );
         assert_eq!(
-            PathBufWrp::get_pathbuf("/%2Fetc%2Fpasswd").map(|t| t.0),
+            PathBufWrp::get_pathbuf("/%2Fetc%2Fpasswd", false).map(|t| t.0),
             Err(UriSegmentError::BadChar('/'))
         );
         assert_eq!(
-            PathBufWrp::get_pathbuf("/src%2F..%2F..%2FCargo.toml").map(|t| t.0),
+            PathBufWrp::get_pathbuf("/src%2F..%2F..%2FCargo.toml", false).map(|t| t.0),
             Err(UriSegmentError::BadChar('/'))
         );
         assert_eq!(
-            PathBufWrp::get_pathbuf("/a%00b").map(|t| t.0),
+            PathBufWrp::get_pathbuf("/a%00b", false).map(|t| t.0),
             Err(UriSegmentError::BadChar('\0'))
         );
+    }
+
+    /// STATEMENT: With hidden files enabled, dot-prefixed segments are accepted, while
+    /// decoded `.` and `..` segments are still rejected.
+    ///
+    /// HOW:
+    /// - Parse `.env`, `.git/config` and `..rc` with `hidden` set and check the resulting paths.
+    /// - Parse plain and percent-encoded `.` and `..` segments and expect `BadStart('.')`.
+    /// - On Windows, expect `...` and `.. ` to be rejected, since Windows drops trailing
+    ///   dots and spaces.
+    #[test]
+    fn test_path_buf_hidden() {
+        for (path, expected) in [
+            ("/.env", vec![".env"]),
+            ("/.git/config", vec![".git", "config"]),
+            ("/a/..rc", vec!["a", "..rc"]),
+            ("/a/../.env", vec![".env"]),
+        ] {
+            assert_eq!(
+                PathBufWrp::get_pathbuf(path, true).unwrap().0,
+                PathBuf::from_iter(expected),
+                "{path}"
+            );
+        }
+        for path in ["/a/./b", "/%2e/b", "/%2e%2e/Cargo.toml", "/a/.%2e"] {
+            assert_eq!(
+                PathBufWrp::get_pathbuf(path, true).map(|t| t.0),
+                Err(UriSegmentError::BadStart('.')),
+                "{path}"
+            );
+        }
+        if cfg!(windows) {
+            for path in ["/...", "/..%20", "/.%20."] {
+                assert_eq!(
+                    PathBufWrp::get_pathbuf(path, true).map(|t| t.0),
+                    Err(UriSegmentError::BadStart('.')),
+                    "{path}"
+                );
+            }
+        }
+    }
+
+    /// STATEMENT: `Files::use_hidden_files` serves dot files and directories, keeps them
+    /// out of listings, and still confines requests to the base directory.
+    ///
+    /// HOW:
+    /// - Serve a directory with `.secret` and `.hidden-dir/inner.txt` with hidden files
+    ///   and listings enabled.
+    /// - Request both files and compare the bodies.
+    /// - Check the root listing omits both dot entries.
+    /// - Request `.` and encoded `..` segments and expect `400 Bad Request`.
+    #[ntex::test]
+    async fn test_files_use_hidden_files() {
+        let root = tempfile::tempdir_in(".").unwrap();
+        fs::write(root.path().join(".secret"), b"hidden").unwrap();
+        fs::create_dir(root.path().join(".hidden-dir")).unwrap();
+        fs::write(root.path().join(".hidden-dir/inner.txt"), b"inner").unwrap();
+        let srv = test::init_service(
+            App::new().service(
+                Files::new("/static", root.path())
+                    .use_hidden_files()
+                    .show_files_listing(),
+            ),
+        )
+        .await;
+
+        for (uri, body) in [
+            ("/static/.secret", &b"hidden"[..]),
+            ("/static/.hidden-dir/inner.txt", b"inner"),
+        ] {
+            let resp = test::call_service(&srv, TestRequest::with_uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            assert_eq!(test::read_body(resp).await, body, "{uri}");
+        }
+
+        let resp = test::call_service(&srv, TestRequest::with_uri("/static/").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+        assert!(!body.contains(".secret"), "{body}");
+        assert!(!body.contains(".hidden-dir"), "{body}");
+
+        for uri in ["/static/./.secret", "/static/%2e%2e/Cargo.toml"] {
+            let resp = test::call_service(&srv, TestRequest::with_uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
     }
 
     /// STATEMENT: Encoded traversal requests cannot read files outside of the base directory.
