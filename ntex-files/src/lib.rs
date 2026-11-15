@@ -40,7 +40,7 @@ use futures::{Future, Stream, future::FutureExt, future::LocalBoxFuture};
 use mime_guess::from_ext;
 use ntex::error::{Failure, IntoFailure};
 use ntex::http::header::{ACCEPT_ENCODING, ContentEncoding, HeaderMap, HeaderValue, VARY};
-use ntex::http::{Method, Payload, error::BlockingError};
+use ntex::http::{Method, Payload, RequestHead, error::BlockingError};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex::url::Url;
@@ -59,7 +59,7 @@ mod range;
 
 use self::error::{FilesError, UriSegmentError};
 pub use crate::{
-    named::NamedFile,
+    named::{NamedFile, NamedFileService},
     range::{HttpRange, ParseRangeErr},
 };
 
@@ -284,6 +284,8 @@ fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<WebResponse, 
 
 type MimeOverride = dyn Fn(&mime::Name) -> header::DispositionType;
 
+type PathFilter = dyn Fn(&Path, &RequestHead) -> bool;
+
 /// A configurable service factory for serving a directory of static files.
 ///
 /// Register it with [`App::service`](ntex::web::App::service). The URL `path`
@@ -328,6 +330,7 @@ pub struct Files<St: State, In> {
     follow_symlinks: bool,
     hidden_files: bool,
     try_compressed: bool,
+    path_filter: Option<Rc<PathFilter>>,
 }
 
 impl<St: State, In> Clone for Files<St, In> {
@@ -349,6 +352,7 @@ impl<St: State, In> Clone for Files<St, In> {
             follow_symlinks: self.follow_symlinks,
             hidden_files: self.hidden_files,
             try_compressed: self.try_compressed,
+            path_filter: self.path_filter.clone(),
         }
     }
 }
@@ -391,6 +395,7 @@ impl<St: State, In: 'static> Files<St, In> {
             follow_symlinks: false,
             hidden_files: false,
             try_compressed: false,
+            path_filter: None,
         }
     }
 
@@ -548,6 +553,32 @@ impl<St: State, In: 'static> Files<St, In> {
         self
     }
 
+    /// Sets a filter that accepts or rejects request paths before filesystem access.
+    ///
+    /// The filter receives the decoded path relative to the base directory, after
+    /// URL segment validation, and the request head. Returning `false` rejects
+    /// the request like a missing file: it uses [`Self::default_handler`] when
+    /// configured, or returns `404 Not Found` with the default web error handler.
+    /// The filter applies to the requested path only, not to symlink targets or
+    /// index files.
+    ///
+    /// ```rust
+    /// use ntex::web::App;
+    /// use ntex_files::Files;
+    ///
+    /// let app = App::default().service(
+    ///     Files::new("/static", ".")
+    ///         .path_filter(|path, _| path.extension().is_none_or(|ext| ext != "toml")),
+    /// );
+    /// ```
+    pub fn path_filter<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&Path, &RequestHead) -> bool + 'static,
+    {
+        self.path_filter = Some(Rc::new(f));
+        self
+    }
+
     /// Adds a resource guard that selects this service during routing.
     ///
     /// Can be called multiple times; all guards must match. A request that does
@@ -584,7 +615,8 @@ impl<St: State, In: 'static> Files<St, In> {
     /// Sets the fallback service for file resolution or opening failures.
     ///
     /// This includes missing files and index files, rejected outside-base
-    /// targets, and canceled blocking resolution tasks. It is not used for
+    /// targets, paths rejected by [`Self::path_filter`], and canceled blocking
+    /// resolution tasks. It is not used for
     /// invalid URL segments, rejected guards, disabled listings, listing renderer
     /// errors, or errors while streaming an already opened file.
     pub fn default_handler<F, U>(mut self, f: F) -> Self
@@ -669,6 +701,7 @@ where
             follow_symlinks: self.follow_symlinks,
             hidden_files: self.hidden_files,
             try_compressed: self.try_compressed,
+            path_filter: self.path_filter.clone(),
         };
 
         if let Some(default) = self.default.as_ref() {
@@ -706,6 +739,7 @@ pub struct FilesService<St: State, In> {
     follow_symlinks: bool,
     hidden_files: bool,
     try_compressed: bool,
+    path_filter: Option<Rc<PathFilter>>,
 }
 
 impl<St: State, In> FilesService<St, In>
@@ -755,6 +789,13 @@ where
             Ok(item) => item,
             Err(e) => return Ok(req.error_response(ctx.st(), &FilesError::from(e))),
         };
+
+        if let Some(filter) = &self.path_filter
+            && !filter(&real_path.0, req.head())
+        {
+            let e = io::Error::new(io::ErrorKind::NotFound, "Path is filtered");
+            return self.handle_io_error(e, req, ctx).await;
+        }
 
         let directory = self.directory.clone();
         let index = self.index.clone();
@@ -949,8 +990,8 @@ fn accepted_encodings(headers: &HeaderMap) -> Vec<ContentEncoding> {
             .unwrap_or(0);
         if name == "*" {
             wildcard.get_or_insert(q);
-        } else {
-            listed.push((ContentEncoding::from(name), q));
+        } else if let Ok(enc) = name.parse::<ContentEncoding>() {
+            listed.push((enc, q));
         }
     }
 
@@ -2581,6 +2622,154 @@ mod tests {
             );
             assert_eq!(test::read_body(resp).await, body.as_bytes(), "{uri}");
         }
+    }
+
+    /// STATEMENT: `path_filter` sees the decoded relative path and request head before
+    /// filesystem access, and a rejection behaves like a missing file.
+    ///
+    /// HOW:
+    /// - Serve a directory with a filter that records its arguments and rejects
+    ///   `.toml` paths and `HEAD` requests.
+    /// - Request `/sub/%61.txt` and check `200` and the recorded path `sub/a.txt`.
+    /// - Request `/secret.toml`, an existing file, and check `404 Not Found`.
+    /// - Request an existing file with `HEAD` and check `404 Not Found`.
+    /// - With a default handler, check `/secret.toml` returns the handler's body.
+    #[ntex::test]
+    async fn test_files_path_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub").join("a.txt"), b"a").unwrap();
+        fs::write(dir.path().join("secret.toml"), b"secret").unwrap();
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let files = {
+            let seen = seen.clone();
+            Files::new("/", dir.path()).path_filter(move |path, head| {
+                seen.borrow_mut().push(path.to_path_buf());
+                head.method != Method::HEAD && path.extension().is_none_or(|ext| ext != "toml")
+            })
+        };
+
+        let srv = test::init_service(App::new().service(files.clone())).await;
+        let resp =
+            test::call_service(&srv, TestRequest::with_uri("/sub/%61.txt").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(test::read_body(resp).await, "a".as_bytes());
+        assert_eq!(
+            seen.borrow().as_slice(),
+            [Path::new("sub").join("a.txt")].as_slice()
+        );
+
+        let resp =
+            test::call_service(&srv, TestRequest::with_uri("/secret.toml").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let req = TestRequest::with_uri("/sub/a.txt").method(Method::HEAD);
+        let resp = test::call_service(&srv, req.to_request()).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let srv = test::init_service(App::new().service(files.default_handler(
+            |req: WebRequest<()>| async move {
+                Ok::<_, Infallible>(req.into_response(HttpResponse::Ok().body("default")))
+            },
+        )))
+        .await;
+        let resp =
+            test::call_service(&srv, TestRequest::with_uri("/secret.toml").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(test::read_body(resp).await, "default".as_bytes());
+    }
+
+    /// STATEMENT: A `NamedFile` registered as a service is served at its path with its
+    /// configured settings, for `GET` and `HEAD` only.
+    ///
+    /// HOW:
+    /// - Register `Cargo.toml` with an overridden content type and disabled
+    ///   disposition, at the root and inside a `/s` scope.
+    /// - Request `/Cargo.toml` and `/s/Cargo.toml` and check `200`, the content type,
+    ///   no `Content-Disposition`, and the file body.
+    /// - Check `/Cargo.toml/x` returns `404 Not Found` and `POST` returns
+    ///   `405 Method Not Allowed`.
+    #[ntex::test]
+    async fn test_named_file_service() {
+        let file = || {
+            NamedFile::open("Cargo.toml")
+                .unwrap()
+                .set_content_type(mime::APPLICATION_OCTET_STREAM)
+                .disable_content_disposition()
+        };
+        let srv = test::init_service(
+            App::new()
+                .service(file())
+                .service(web::scope("/s").service(file())),
+        )
+        .await;
+
+        for uri in ["/Cargo.toml", "/s/Cargo.toml"] {
+            let resp = test::call_service(&srv, TestRequest::with_uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+                "application/octet-stream"
+            );
+            assert!(
+                !resp
+                    .headers()
+                    .contains_key(http::header::CONTENT_DISPOSITION)
+            );
+            assert_eq!(test::read_body(resp).await, fs::read("Cargo.toml").unwrap());
+        }
+
+        let resp =
+            test::call_service(&srv, TestRequest::with_uri("/Cargo.toml/x").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let req = TestRequest::with_uri("/Cargo.toml").method(Method::POST);
+        let resp = test::call_service(&srv, req.to_request()).await;
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    /// STATEMENT: The `NamedFile` service reopens its path for each request, keeps a
+    /// custom `ETag`, and works as a default handler.
+    ///
+    /// HOW:
+    /// - Use a temporary `index.html` with a custom `ETag` as the default handler
+    ///   of `Files` and as the application default service.
+    /// - Request a missing file through `Files` and an unrouted path, and check
+    ///   both return the file body and the custom `ETag`.
+    /// - Rewrite the file and check the next response has the new body.
+    /// - Remove the file and check `404 Not Found`.
+    #[ntex::test]
+    async fn test_named_file_service_reopens_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("index.html");
+        fs::write(&index, b"v1").unwrap();
+        let file = || {
+            NamedFile::open(&index)
+                .unwrap()
+                .set_etag(header::EntityTag::strong("fixed".into()))
+        };
+        let srv = test::init_service(
+            App::new()
+                .service(Files::new("/static", dir.path()).default_handler(file()))
+                .default_service(file()),
+        )
+        .await;
+        let get = |uri: &str| TestRequest::with_uri(uri).to_request();
+
+        for uri in ["/static/missing", "/missing"] {
+            let resp = test::call_service(&srv, get(uri)).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            assert_eq!(resp.headers().get(http::header::ETAG).unwrap(), "\"fixed\"");
+            assert_eq!(test::read_body(resp).await, "v1".as_bytes(), "{uri}");
+        }
+
+        fs::write(&index, b"version-2").unwrap();
+        let resp = test::call_service(&srv, get("/missing")).await;
+        assert_eq!(test::read_body(resp).await, "version-2".as_bytes());
+
+        fs::remove_file(&index).unwrap();
+        let resp = test::call_service(&srv, get("/missing")).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[ntex::test]

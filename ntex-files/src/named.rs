@@ -10,11 +10,18 @@ use std::os::unix::fs::MetadataExt;
 use bitflags::bitflags;
 use futures::stream::TryStreamExt;
 use mime_guess::from_path;
+use ntex::error::Failure;
 use ntex::http::body::SizedStream;
 use ntex::http::header::ContentEncoding;
-use ntex::http::{self, Method, StatusCode};
-use ntex::web::{BodyEncoding, HttpRequest, HttpResponse, Responder, State};
+use ntex::http::{self, Method, StatusCode, error::BlockingError};
+use ntex::router::ResourceDef;
+use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
+use ntex::web::error::{WebError, WebResponseError};
+use ntex::web::{self, BodyEncoding, HttpRequest, HttpResponse, Responder, State};
+use ntex::web::{WebRequest, WebResponse};
+use ntex::{Ctx, Service, ServiceFactory};
 
+use crate::error::FilesError;
 use crate::{ChunkedReadFile, header, header::StandardHeader, range::HttpRange};
 
 bitflags! {
@@ -225,6 +232,48 @@ impl NamedFile {
     #[inline]
     pub fn path(&self) -> &Path {
         self.path.as_path()
+    }
+
+    /// Returns the file metadata captured at construction.
+    #[inline]
+    pub fn metadata(&self) -> &Metadata {
+        &self.md
+    }
+
+    /// Returns the modification time captured at construction.
+    ///
+    /// Returns `None` if the platform or filesystem does not report it; see
+    /// [`Metadata::modified`].
+    #[inline]
+    pub fn modified(&self) -> Option<SystemTime> {
+        self.modified
+    }
+
+    /// Returns the `Content-Type` used when serving this file.
+    ///
+    /// When [`Self::prefer_utf8`] is enabled, a `charset=utf-8` parameter may
+    /// still be added to the header for text types.
+    #[inline]
+    pub fn content_type(&self) -> &mime::Mime {
+        &self.content_type
+    }
+
+    /// Returns the `Content-Disposition` value used when serving this file.
+    ///
+    /// The header is only sent when it is enabled; see
+    /// [`Self::disable_content_disposition`].
+    #[inline]
+    pub fn content_disposition(&self) -> &header::ContentDisposition {
+        &self.content_disposition
+    }
+
+    /// Returns the response encoding override set by [`Self::set_content_encoding`].
+    ///
+    /// `None` means no override is set, so the response may be compressed by
+    /// ntex's encoding middleware.
+    #[inline]
+    pub fn content_encoding(&self) -> Option<ContentEncoding> {
+        self.encoding
     }
 
     /// Sets the response status, which defaults to `200 OK`.
@@ -741,6 +790,141 @@ impl<St: State> Responder<St> for NamedFile {
     }
 }
 
+/// Registers the file as a service at the URL equal to its path.
+///
+/// The URL is [`NamedFile::path`] converted with
+/// [`Path::to_string_lossy`], with a leading `/` added when missing, and is
+/// matched exactly; for example `NamedFile::open("Cargo.toml")` is served at
+/// `/Cargo.toml`. The path is used as a route pattern, so `{` and `}` start
+/// dynamic segments. To serve a file at another URL, return a [`NamedFile`]
+/// from a handler instead. See the [`ServiceFactory`] implementation for
+/// request handling.
+///
+/// ```rust,no_run
+/// use ntex::web::App;
+/// use ntex_files::NamedFile;
+///
+/// # fn main() -> std::io::Result<()> {
+/// let app = App::default().service(NamedFile::open("robots.txt")?);
+/// # Ok(())
+/// # }
+/// ```
+impl<St: State, In: 'static> WebServiceFactory<St, In> for NamedFile
+where
+    FilesError: WebResponseError<St, St::Error>,
+{
+    fn register(self, config: &mut WebServiceConfig<St, In>) {
+        let mut path = self.path.to_string_lossy().into_owned();
+        if !path.starts_with('/') {
+            path.insert(0, '/');
+        }
+        config.register_service(ResourceDef::new(path), None, None, self)
+    }
+}
+
+/// Creates a service that serves this file for every request.
+///
+/// This can be used, for example, as [`Files::default_handler`](crate::Files::default_handler)
+/// or an application default service. The service keeps the configured status,
+/// content type, disposition, encoding override, custom `ETag`, flags, and read
+/// mode threshold, but reopens [`NamedFile::path`] on the blocking thread pool
+/// for each request, so metadata and validators reflect the current file. A
+/// display path passed to [`NamedFile::from_file`] must therefore name a
+/// readable file.
+///
+/// Only `GET` and `HEAD` requests are served; other methods return
+/// `405 Method Not Allowed`, and a file that cannot be opened returns
+/// `404 Not Found`, with the default web error handler.
+impl<St: State, In: 'static> ServiceFactory<St, WebRequest<In>> for NamedFile
+where
+    FilesError: WebResponseError<St, St::Error>,
+{
+    type Res = WebResponse;
+    type Error = WebError<St, St::Error>;
+    type Service = NamedFileService;
+    type InitError = Failure;
+
+    async fn create(&self, _: &St) -> Result<Self::Service, Self::InitError> {
+        Ok(NamedFileService {
+            config: Rc::new(NamedFileConfig {
+                path: self.path.clone(),
+                etag: self.etag.clone(),
+                flags: self.flags.clone(),
+                status_code: self.status_code,
+                content_type: self.content_type.clone(),
+                content_disposition: self.content_disposition.clone(),
+                encoding: self.encoding,
+                precompressed: self.precompressed,
+                read_mode_threshold: self.read_mode_threshold,
+            }),
+        })
+    }
+}
+
+/// Response settings of a [`NamedFile`] applied to each reopened file.
+#[derive(Debug)]
+struct NamedFileConfig {
+    path: PathBuf,
+    etag: Option<header::EntityTag>,
+    flags: Flags,
+    status_code: StatusCode,
+    content_type: mime::Mime,
+    content_disposition: header::ContentDisposition,
+    encoding: Option<ContentEncoding>,
+    precompressed: Option<ContentEncoding>,
+    read_mode_threshold: u64,
+}
+
+/// The request-handling service created by the [`NamedFile`] service factory.
+#[derive(Debug)]
+pub struct NamedFileService {
+    config: Rc<NamedFileConfig>,
+}
+
+impl<St: State, In> Service<St, WebRequest<In>> for NamedFileService
+where
+    FilesError: WebResponseError<St, St::Error>,
+{
+    type Res = WebResponse;
+    type Error = WebError<St, St::Error>;
+
+    async fn call(
+        &self,
+        req: WebRequest<In>,
+        ctx: Ctx<'_, Self, St>,
+    ) -> Result<Self::Res, Self::Error> {
+        if !matches!(*req.method(), Method::GET | Method::HEAD) {
+            return Ok(req.error_response(ctx.st(), &FilesError::MethodNotAllowed));
+        }
+
+        let path = self.config.path.clone();
+        let mut file = match web::block(move || NamedFile::open(path)).await {
+            Ok(file) => file,
+            Err(BlockingError::Error(e)) => {
+                return Ok(req.error_response(ctx.st(), &FilesError::from(e)));
+            }
+            Err(BlockingError::Canceled) => {
+                let e = io::Error::other("Operation is canceled");
+                return Ok(req.error_response(ctx.st(), &FilesError::from(e)));
+            }
+        };
+
+        let cfg = &*self.config;
+        file.etag.clone_from(&cfg.etag);
+        file.flags = cfg.flags.clone();
+        file.status_code = cfg.status_code;
+        file.content_type = cfg.content_type.clone();
+        file.content_disposition = cfg.content_disposition.clone();
+        file.encoding = cfg.encoding;
+        file.precompressed = cfg.precompressed;
+        file.read_mode_threshold = cfg.read_mode_threshold;
+
+        let (req, _, _) = req.into_parts();
+        let resp = file.into_response(&req);
+        Ok(WebResponse::new(resp, req))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -762,6 +946,47 @@ mod tests {
         assert!(std::fs::metadata(&path).unwrap().modified().unwrap() < UNIX_EPOCH);
 
         NamedFile::open(&path).unwrap()
+    }
+
+    /// STATEMENT: The getters report the captured metadata and the response settings,
+    /// including later overrides.
+    ///
+    /// HOW:
+    /// - Open a temporary `data.json` and compare `metadata` and `modified` with
+    ///   `std::fs::metadata`.
+    /// - Check the inferred `application/json` type, the `inline` disposition with
+    ///   the file name, and no encoding override.
+    /// - Apply content type, disposition, and encoding overrides and check the
+    ///   getters return them.
+    #[test]
+    fn test_getters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.json");
+        std::fs::write(&path, b"{}").unwrap();
+        let md = std::fs::metadata(&path).unwrap();
+
+        let file = NamedFile::open(&path).unwrap();
+        assert_eq!(file.metadata().len(), 2);
+        assert_eq!(file.modified(), md.modified().ok());
+        assert_eq!(file.content_type(), &mime::APPLICATION_JSON);
+        assert_eq!(
+            file.content_disposition().disposition,
+            header::DispositionType::Inline
+        );
+        assert_eq!(file.content_disposition().get_filename(), Some("data.json"));
+        assert_eq!(file.content_encoding(), None);
+
+        let cd = header::ContentDisposition {
+            disposition: header::DispositionType::Attachment,
+            parameters: Vec::new(),
+        };
+        let file = file
+            .set_content_type(mime::TEXT_PLAIN)
+            .set_content_disposition(cd.clone())
+            .set_content_encoding(ContentEncoding::Gzip);
+        assert_eq!(file.content_type(), &mime::TEXT_PLAIN);
+        assert_eq!(file.content_disposition(), &cd);
+        assert_eq!(file.content_encoding(), Some(ContentEncoding::Gzip));
     }
 
     #[ntex::test]
