@@ -10,6 +10,12 @@ pub struct HttpRange {
     pub length: u64,
 }
 
+/// Error returned by [`HttpRange::parse`] for an invalid or unsatisfiable
+/// `Range` header.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("invalid Range header: unable to parse bytes")]
+pub struct ParseRangeErr(());
+
 static PREFIX: &str = "bytes=";
 const PREFIX_LEN: usize = 6;
 
@@ -28,19 +34,21 @@ impl HttpRange {
     ///
     /// # Errors
     ///
-    /// Returns `Err(())` for an unsupported prefix, malformed positions in a
+    /// Returns [`ParseRangeErr`] for an unsupported prefix, malformed positions in a
     /// considered range (including extra `-` components such as `bytes=0-1-2`),
     /// reversed bounds, or a nonempty set of entirely unsatisfiable ranges.
     ///
     /// ```
-    /// use ntex_files::HttpRange;
+    /// use ntex_files::{HttpRange, ParseRangeErr};
     ///
     /// let ranges = HttpRange::parse("bytes=0-9,-5", 100).unwrap();
     /// assert_eq!((ranges[0].start, ranges[0].length), (0, 10));
     /// assert_eq!((ranges[1].start, ranges[1].length), (95, 5));
-    /// assert!(HttpRange::parse("bytes=0-1-2", 100).is_err());
+    ///
+    /// let err: ParseRangeErr = HttpRange::parse("bytes=0-1-2", 100).unwrap_err();
+    /// assert_eq!(err.to_string(), "invalid Range header: unable to parse bytes");
     /// ```
-    pub fn parse(header: &str, size: u64) -> Result<Vec<HttpRange>, ()> {
+    pub fn parse(header: &str, size: u64) -> Result<Vec<HttpRange>, ParseRangeErr> {
         if header.is_empty() {
             return Ok(Vec::new());
         }
@@ -48,7 +56,7 @@ impl HttpRange {
             .get(..PREFIX_LEN)
             .is_some_and(|unit| unit.eq_ignore_ascii_case(PREFIX))
         {
-            return Err(());
+            return Err(ParseRangeErr(()));
         }
 
         let mut no_overlap = false;
@@ -58,7 +66,7 @@ impl HttpRange {
             .map(|x| x.trim())
             .filter(|x| !x.is_empty())
             .map(|ra| {
-                let (start_str, end_str) = ra.split_once('-').ok_or(())?;
+                let (start_str, end_str) = ra.split_once('-').ok_or(ParseRangeErr(()))?;
                 let (start_str, end_str) = (start_str.trim(), end_str.trim());
 
                 if start_str.is_empty() {
@@ -84,7 +92,7 @@ impl HttpRange {
                     } else {
                         let end = parse_pos(end_str)?;
                         if start > end {
-                            return Err(());
+                            return Err(ParseRangeErr(()));
                         }
                         Some(end)
                     };
@@ -105,7 +113,7 @@ impl HttpRange {
         let ranges: Vec<HttpRange> = all_ranges.into_iter().flatten().collect();
 
         if no_overlap && ranges.is_empty() {
-            return Err(());
+            return Err(ParseRangeErr(()));
         }
 
         Ok(ranges)
@@ -114,9 +122,9 @@ impl HttpRange {
 
 /// Parses a byte position, a value too large for `u64` saturates
 /// since it lies past the end of any file.
-fn parse_pos(s: &str) -> Result<u64, ()> {
+fn parse_pos(s: &str) -> Result<u64, ParseRangeErr> {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(());
+        return Err(ParseRangeErr(()));
     }
     Ok(s.parse().unwrap_or(u64::MAX))
 }

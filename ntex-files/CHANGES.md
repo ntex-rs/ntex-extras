@@ -2,6 +2,14 @@
 
 ## [4.5.0] - unreleased
 
+* Add `Files::guard` to register resource guards; requests rejected by them are routed to other services
+
+* Add `Files::with_permanent_redirect` to use `308 Permanent Redirect` for directory redirects
+
+* `Files::redirect_to_slash_directory` also redirects when directory listings are enabled without an index file
+
+* `HttpRange::parse` returns the new public `ParseRangeErr` error type instead of `()`
+
 * Do not serve hidden files through Windows short-name aliases
 
 * Add `Files::prefer_utf8` and `NamedFile::prefer_utf8`, enabled by default: text content types are sent with `charset=utf-8`
