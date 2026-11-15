@@ -1,6 +1,12 @@
 # Changes
 
-## [4.5.0] - unreleased
+## [4.5.0] - 2026-11-15
+
+* `NamedFile` can be registered as a service, served at its path, or used as a default handler; the file is reopened for each request
+
+* Add `NamedFile::metadata`, `modified`, `content_type`, `content_disposition`, and `content_encoding` getters
+
+* Add `Files::path_filter` to reject request paths before filesystem access
 
 * Add `Files::try_compressed` to serve precompressed `.br`, `.zst`, and `.gz` sibling files based on `Accept-Encoding`
 
