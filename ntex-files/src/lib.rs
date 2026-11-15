@@ -32,7 +32,9 @@
 //! response headers and status codes.
 use std::fs::{DirEntry, File};
 use std::path::{Path, PathBuf};
-use std::{cmp, fmt::Write, io, io::Read, io::Seek, pin::Pin, rc::Rc, task::Context, task::Poll};
+use std::{
+    cmp, fmt, fmt::Write, io, io::Read, io::Seek, pin::Pin, rc::Rc, task::Context, task::Poll,
+};
 
 use futures::{Future, Stream, future::FutureExt, future::LocalBoxFuture};
 use mime_guess::from_ext;
@@ -55,7 +57,10 @@ mod named;
 mod range;
 
 use self::error::{FilesError, UriSegmentError};
-pub use crate::{named::NamedFile, range::HttpRange};
+pub use crate::{
+    named::NamedFile,
+    range::{HttpRange, ParseRangeErr},
+};
 
 type HttpService<St: State, In> =
     BoxService<St, WebRequest<In>, WebResponse, WebError<St, St::Error>>;
@@ -292,9 +297,10 @@ type MimeOverride = dyn Fn(&mime::Name) -> header::DispositionType;
 /// Resolved paths outside the base, including symlink targets and index files,
 /// are rejected unless [`Self::follow_symlinks`] is enabled.
 ///
-/// With the default web error handler, rejected methods or guards return
-/// `405 Method Not Allowed`; resolution failures and directories without a
-/// listing return `404 Not Found`. [`Self::default_handler`] handles resolution
+/// With the default web error handler, rejected methods or [`Self::use_guards`]
+/// guards return `405 Method Not Allowed`; resolution failures and directories
+/// without a listing return `404 Not Found`. Requests rejected by
+/// [`Self::guard`] are routed to other services. [`Self::default_handler`] handles resolution
 /// failures only.
 ///
 /// ```rust
@@ -310,12 +316,14 @@ pub struct Files<St: State, In> {
     index: Option<String>,
     show_index: bool,
     redirect_to_slash: bool,
+    permanent_redirect: bool,
     default: Option<HttpServiceFactory<St, In>>,
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
     file_flags: named::Flags,
     read_mode_threshold: u64,
     guards: Option<Rc<dyn Guard>>,
+    resource_guards: Vec<Rc<dyn Guard>>,
     follow_symlinks: bool,
     hidden_files: bool,
 }
@@ -327,6 +335,7 @@ impl<St: State, In> Clone for Files<St, In> {
             index: self.index.clone(),
             show_index: self.show_index,
             redirect_to_slash: self.redirect_to_slash,
+            permanent_redirect: self.permanent_redirect,
             default: self.default.clone(),
             renderer: self.renderer.clone(),
             file_flags: self.file_flags.clone(),
@@ -334,6 +343,7 @@ impl<St: State, In> Clone for Files<St, In> {
             path: self.path.clone(),
             mime_override: self.mime_override.clone(),
             guards: self.guards.clone(),
+            resource_guards: self.resource_guards.clone(),
             follow_symlinks: self.follow_symlinks,
             hidden_files: self.hidden_files,
         }
@@ -367,12 +377,14 @@ impl<St: State, In: 'static> Files<St, In> {
             index: None,
             show_index: false,
             redirect_to_slash: false,
+            permanent_redirect: false,
             default: None,
             renderer: Rc::new(directory_listing),
             mime_override: None,
             file_flags: named::Flags::default(),
             read_mode_threshold: 0,
             guards: None,
+            resource_guards: Vec::new(),
             follow_symlinks: false,
             hidden_files: false,
         }
@@ -400,13 +412,24 @@ impl<St: State, In: 'static> Files<St, In> {
         self
     }
 
-    /// Enables `302 Found` redirects to slash-ended directory paths.
+    /// Enables redirects to slash-ended directory paths.
     ///
-    /// Disabled by default, and only effective when an index file is configured.
-    /// The redirect uses the request path with `/` appended, without its query
-    /// string, before attempting to open the index file.
+    /// Disabled by default, and only effective when an index file or directory
+    /// listings are configured. The redirect uses the request path with `/`
+    /// appended, without its query string, before attempting to open the index
+    /// file or render the listing. It uses `302 Found` unless
+    /// [`Self::with_permanent_redirect`] is set.
     pub fn redirect_to_slash_directory(mut self) -> Self {
         self.redirect_to_slash = true;
+        self
+    }
+
+    /// Uses `308 Permanent Redirect` for slash-ended directory redirects.
+    ///
+    /// Redirects use `302 Found` by default. This does not enable redirects;
+    /// call [`Self::redirect_to_slash_directory`] separately.
+    pub fn with_permanent_redirect(mut self) -> Self {
+        self.permanent_redirect = true;
         self
     }
 
@@ -501,6 +524,18 @@ impl<St: State, In: 'static> Files<St, In> {
         self
     }
 
+    /// Adds a resource guard that selects this service during routing.
+    ///
+    /// Can be called multiple times; all guards must match. A request that does
+    /// not match is routed to the next matching service or the application
+    /// default service, unlike [`Self::use_guards`] which rejects requests that
+    /// already selected this service. Use it, for example, with
+    /// [`guard::Host`](ntex::web::guard::Host) to serve files for one host only.
+    pub fn guard<G: Guard + 'static>(mut self, guard: G) -> Self {
+        self.resource_guards.push(Rc::new(guard));
+        self
+    }
+
     /// Replaces the default `GET`/`HEAD` check with a custom guard.
     ///
     /// A failed guard returns `405 Method Not Allowed` with the default web
@@ -556,7 +591,30 @@ where
         } else {
             ResourceDef::prefix(&self.path)
         };
-        config.register_service(rdef, None, None, self)
+        let guards = if self.resource_guards.is_empty() {
+            None
+        } else {
+            Some(
+                self.resource_guards
+                    .iter()
+                    .map(|guard| Box::new(SharedGuard(guard.clone())) as Box<dyn Guard>)
+                    .collect(),
+            )
+        };
+        config.register_service(rdef, guards, None, self)
+    }
+}
+
+/// A guard shared between clones of a [`Files`] configuration.
+struct SharedGuard(Rc<dyn Guard>);
+
+impl Guard for SharedGuard {
+    fn check(&self, request: &ntex::http::RequestHead) -> bool {
+        self.0.check(request)
+    }
+
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -577,6 +635,7 @@ where
             index: self.index.clone(),
             show_index: self.show_index,
             redirect_to_slash: self.redirect_to_slash,
+            permanent_redirect: self.permanent_redirect,
             default: None,
             renderer: self.renderer.clone(),
             mime_override: self.mime_override.clone(),
@@ -612,6 +671,7 @@ pub struct FilesService<St: State, In> {
     index: Option<String>,
     show_index: bool,
     redirect_to_slash: bool,
+    permanent_redirect: bool,
     default: Option<HttpService<St, In>>,
     renderer: Rc<DirectoryRenderer>,
     mime_override: Option<Rc<MimeOverride>>,
@@ -672,7 +732,9 @@ where
 
         let directory = self.directory.clone();
         let index = self.index.clone();
-        let redirect = self.redirect_to_slash && !req.path().ends_with('/');
+        let redirect = self.redirect_to_slash
+            && (self.index.is_some() || self.show_index)
+            && !req.path().ends_with('/');
         let follow_symlinks = self.follow_symlinks;
         let hidden_files = self.hidden_files;
         let target = web::block(move || {
@@ -701,9 +763,13 @@ where
             }
             Ok(Target::Redirect) => {
                 let redirect_to = format!("{}/", req.path());
-                Ok(req.into_response(
+                let mut resp = if self.permanent_redirect {
+                    HttpResponse::PermanentRedirect()
+                } else {
                     HttpResponse::Found()
-                        .header(http::header::LOCATION, redirect_to)
+                };
+                Ok(req.into_response(
+                    resp.header(http::header::LOCATION, redirect_to)
                         .body("")
                         .into_body(),
                 ))
@@ -770,8 +836,10 @@ fn resolve(
     if !path.is_dir() {
         return NamedFile::open(path).map(|file| Target::File(Box::new(file)));
     }
+    if redirect {
+        return Ok(Target::Redirect);
+    }
     match index {
-        Some(_) if redirect => Ok(Target::Redirect),
         Some(index) => {
             NamedFile::open(contained(path.join(index))?).map(|file| Target::File(Box::new(file)))
         }
@@ -2117,6 +2185,51 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// STATEMENT: Resource guards select the `Files` service during routing, so
+    /// requests rejected by them fall through to other services.
+    ///
+    /// HOW:
+    /// - Register two `Files` services for the same prefix with different `Host`
+    ///   guards, plus a third with a header guard, then a fallback resource.
+    /// - Check each host is served its own directory, a request matching both
+    ///   `Files::guard` calls on one service is served, and an unmatched request
+    ///   reaches the fallback.
+    #[ntex::test]
+    async fn test_files_resource_guards() {
+        let srv = test::init_service(
+            App::new()
+                .service(Files::new("/", "tests").guard(guard::Host("a.example")))
+                .service(Files::new("/", ".").guard(guard::Host("b.example")))
+                .service(
+                    Files::new("/", ".")
+                        .guard(guard::Host("c.example"))
+                        .guard(guard::Header("x-files", "1")),
+                )
+                .default_service(web::to(|| async { HttpResponse::Gone() })),
+        )
+        .await;
+
+        let get = |host: &'static str, uri: &'static str| {
+            TestRequest::with_uri(uri)
+                .header(http::header::HOST, host)
+                .to_request()
+        };
+        let resp = test::call_service(&srv, get("a.example", "/test.binary")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = test::call_service(&srv, get("b.example", "/tests/test.binary")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = test::call_service(&srv, get("c.example", "/Cargo.toml")).await;
+        assert_eq!(resp.status(), StatusCode::GONE);
+        let req = TestRequest::with_uri("/Cargo.toml")
+            .header(http::header::HOST, "c.example")
+            .header("x-files", "1")
+            .to_request();
+        let resp = test::call_service(&srv, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = test::call_service(&srv, get("d.example", "/Cargo.toml")).await;
+        assert_eq!(resp.status(), StatusCode::GONE);
+    }
+
     #[ntex::test]
     async fn test_named_file_content_encoding() {
         let srv = test::init_service(App::new().middleware(Compress::default()).service(
@@ -2200,6 +2313,17 @@ mod tests {
         assert!(format!("{:?}", bytes).contains("/tests/test.png"));
     }
 
+    /// STATEMENT: Directory redirects require an index file or listing and use
+    /// `302 Found` unless permanent redirects are enabled.
+    ///
+    /// HOW:
+    /// - Request a directory without a trailing slash with neither index nor listing
+    ///   and check `404 Not Found`.
+    /// - With an index file, check `302 Found` and a `404` for a missing path.
+    /// - With a listing and no index, check `302 Found` with a slash-ended `Location`,
+    ///   and that the slash-ended path renders the listing.
+    /// - With `with_permanent_redirect`, check `308 Permanent Redirect` for both an
+    ///   index file and a listing.
     #[ntex::test]
     async fn test_redirect_to_slash_directory() {
         // should not redirect if no index
@@ -2228,6 +2352,47 @@ mod tests {
         let req = TestRequest::with_uri("/not_existing").to_request();
         let resp = test::call_service(&srv, req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // should redirect if listing is enabled
+        let srv = test::init_service(
+            App::new().service(
+                Files::new("/", ".")
+                    .show_files_listing()
+                    .redirect_to_slash_directory(),
+            ),
+        )
+        .await;
+        let req = TestRequest::with_uri("/tests").to_request();
+        let resp = test::call_service(&srv, req).await;
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        assert_eq!(
+            resp.headers().get(http::header::LOCATION).unwrap(),
+            "/tests/"
+        );
+        let req = TestRequest::with_uri("/tests/").to_request();
+        let resp = test::call_service(&srv, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        for files in [
+            Files::new("/", ".").index_file("test.png"),
+            Files::new("/", ".").show_files_listing(),
+        ] {
+            let srv = test::init_service(
+                App::new().service(
+                    files
+                        .redirect_to_slash_directory()
+                        .with_permanent_redirect(),
+                ),
+            )
+            .await;
+            let req = TestRequest::with_uri("/tests").to_request();
+            let resp = test::call_service(&srv, req).await;
+            assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(
+                resp.headers().get(http::header::LOCATION).unwrap(),
+                "/tests/"
+            );
+        }
     }
 
     #[ntex::test]
