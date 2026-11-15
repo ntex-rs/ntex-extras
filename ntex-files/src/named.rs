@@ -52,6 +52,8 @@ pub struct NamedFile {
     pub(crate) content_type: mime::Mime,
     pub(crate) content_disposition: header::ContentDisposition,
     pub(crate) encoding: Option<ContentEncoding>,
+    /// Encoding of the file bytes, sent as `Content-Encoding` as is.
+    pub(crate) precompressed: Option<ContentEncoding>,
     pub(crate) read_mode_threshold: u64,
 }
 
@@ -172,6 +174,7 @@ impl NamedFile {
             modified,
             etag: None,
             encoding,
+            precompressed: None,
             status_code: StatusCode::OK,
             flags: Flags::default(),
             read_mode_threshold: 0,
@@ -447,6 +450,9 @@ impl NamedFile {
             if let Some(current_encoding) = self.encoding {
                 resp.encoding(current_encoding);
             }
+            if let Some(enc) = self.precompressed {
+                resp.header(http::header::CONTENT_ENCODING, enc.as_str());
+            }
             resp.header(http::header::CONTENT_TYPE, self.content_type_value());
             let reader = ChunkedReadFile {
                 size: self.md.len(),
@@ -531,6 +537,10 @@ impl NamedFile {
         // default compressing
         if let Some(current_encoding) = self.encoding {
             resp.encoding(current_encoding);
+        }
+        // an existing `Content-Encoding` header also stops the encoding middleware
+        if let Some(enc) = self.precompressed {
+            resp.header(http::header::CONTENT_ENCODING, enc.as_str());
         }
         if let Some(lm) = last_modified {
             resp.header(

@@ -2,6 +2,8 @@
 
 ## [4.5.0] - unreleased
 
+* Add `Files::try_compressed` to serve precompressed `.br`, `.zst`, and `.gz` sibling files based on `Accept-Encoding`
+
 * Add `Files::guard` to register resource guards; requests rejected by them are routed to other services
 
 * Add `Files::with_permanent_redirect` to use `308 Permanent Redirect` for directory redirects

@@ -39,6 +39,7 @@ use std::{
 use futures::{Future, Stream, future::FutureExt, future::LocalBoxFuture};
 use mime_guess::from_ext;
 use ntex::error::{Failure, IntoFailure};
+use ntex::http::header::{ACCEPT_ENCODING, ContentEncoding, HeaderMap, HeaderValue, VARY};
 use ntex::http::{Method, Payload, error::BlockingError};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
@@ -326,6 +327,7 @@ pub struct Files<St: State, In> {
     resource_guards: Vec<Rc<dyn Guard>>,
     follow_symlinks: bool,
     hidden_files: bool,
+    try_compressed: bool,
 }
 
 impl<St: State, In> Clone for Files<St, In> {
@@ -346,6 +348,7 @@ impl<St: State, In> Clone for Files<St, In> {
             resource_guards: self.resource_guards.clone(),
             follow_symlinks: self.follow_symlinks,
             hidden_files: self.hidden_files,
+            try_compressed: self.try_compressed,
         }
     }
 }
@@ -387,6 +390,7 @@ impl<St: State, In: 'static> Files<St, In> {
             resource_guards: Vec::new(),
             follow_symlinks: false,
             hidden_files: false,
+            try_compressed: false,
         }
     }
 
@@ -524,6 +528,26 @@ impl<St: State, In: 'static> Files<St, In> {
         self
     }
 
+    /// Serves precompressed sibling files when the client accepts their encoding.
+    ///
+    /// Disabled by default. For a resolved file, including an index file, looks
+    /// for a sibling with a `.br`, `.zst`, or `.gz` suffix, for example
+    /// `app.js.gz`, in the order of the `Accept-Encoding` header's `q` values;
+    /// ties prefer `br`, then `zstd`, then `gzip`, and `q=0` excludes an encoding.
+    /// The original file must exist; siblings are subject to the same base
+    /// directory checks and are ignored if they cannot be opened.
+    ///
+    /// A sibling is served with `Content-Encoding` set to its encoding, so the
+    /// compress middleware leaves it unchanged. `Content-Type` and
+    /// `Content-Disposition` come from the original file name, while `ETag`,
+    /// `Last-Modified`, length, and ranges come from the sibling. Every file
+    /// response, including one for the original file, carries
+    /// `Vary: accept-encoding`.
+    pub fn try_compressed(mut self) -> Self {
+        self.try_compressed = true;
+        self
+    }
+
     /// Adds a resource guard that selects this service during routing.
     ///
     /// Can be called multiple times; all guards must match. A request that does
@@ -644,6 +668,7 @@ where
             guards: self.guards.clone(),
             follow_symlinks: self.follow_symlinks,
             hidden_files: self.hidden_files,
+            try_compressed: self.try_compressed,
         };
 
         if let Some(default) = self.default.as_ref() {
@@ -680,6 +705,7 @@ pub struct FilesService<St: State, In> {
     guards: Option<Rc<dyn Guard>>,
     follow_symlinks: bool,
     hidden_files: bool,
+    try_compressed: bool,
 }
 
 impl<St: State, In> FilesService<St, In>
@@ -737,6 +763,11 @@ where
             && !req.path().ends_with('/');
         let follow_symlinks = self.follow_symlinks;
         let hidden_files = self.hidden_files;
+        let encodings = if self.try_compressed {
+            accepted_encodings(req.headers())
+        } else {
+            Vec::new()
+        };
         let target = web::block(move || {
             resolve(
                 &directory,
@@ -745,6 +776,7 @@ where
                 redirect,
                 follow_symlinks,
                 hidden_files,
+                &encodings,
             )
         })
         .await;
@@ -759,7 +791,12 @@ where
                 named_file.flags = self.file_flags.clone();
                 named_file.read_mode_threshold = self.read_mode_threshold;
                 let (req, _, _) = req.into_parts();
-                Ok(WebResponse::new((*named_file).into_response(&req), req))
+                let mut resp = (*named_file).into_response(&req);
+                if self.try_compressed {
+                    resp.headers_mut()
+                        .append(VARY, HeaderValue::from_static("accept-encoding"));
+                }
+                Ok(WebResponse::new(resp, req))
             }
             Ok(Target::Redirect) => {
                 let redirect_to = format!("{}/", req.path());
@@ -811,6 +848,8 @@ enum Target {
 /// A canonical path outside of `directory` is reported as not found,
 /// unless `follow_symlinks` is set. On Windows, a canonical path with a hidden
 /// component is reported as not found as well, unless `hidden_files` is set.
+/// A resolved file is replaced by the first contained precompressed sibling
+/// for `encodings`.
 fn resolve(
     directory: &Path,
     path: PathBuf,
@@ -818,6 +857,7 @@ fn resolve(
     redirect: bool,
     follow_symlinks: bool,
     hidden_files: bool,
+    encodings: &[ContentEncoding],
 ) -> io::Result<Target> {
     let contained = |path: PathBuf| -> io::Result<PathBuf> {
         let path = path.canonicalize()?;
@@ -832,19 +872,120 @@ fn resolve(
         }
     };
 
-    let path = contained(directory.join(path))?;
+    // `joined` is the requested path, `path` its canonical form
+    let open = |joined: PathBuf, path: PathBuf| -> io::Result<Target> {
+        for &enc in encodings {
+            let mut sibling = joined.clone().into_os_string();
+            sibling.push(compressed_suffix(enc));
+            let Ok(sibling) = contained(sibling.into()) else {
+                continue;
+            };
+            if !sibling.is_file() {
+                continue;
+            }
+            if let Ok(file) = File::open(&sibling) {
+                let mut file = NamedFile::from_file(file, &path)?;
+                file.precompressed = Some(enc);
+                return Ok(Target::File(Box::new(file)));
+            }
+        }
+        NamedFile::open(path).map(|file| Target::File(Box::new(file)))
+    };
+
+    let joined = directory.join(path);
+    let path = contained(joined.clone())?;
     if !path.is_dir() {
-        return NamedFile::open(path).map(|file| Target::File(Box::new(file)));
+        return open(joined, path);
     }
     if redirect {
         return Ok(Target::Redirect);
     }
     match index {
         Some(index) => {
-            NamedFile::open(contained(path.join(index))?).map(|file| Target::File(Box::new(file)))
+            let joined = path.join(index);
+            open(joined.clone(), contained(joined)?)
         }
         None => Ok(Target::Dir(path)),
     }
+}
+
+/// Encodings with precompressed sibling files, in server preference order.
+const PRECOMPRESSED: [ContentEncoding; 3] = [
+    ContentEncoding::Br,
+    ContentEncoding::Zstd,
+    ContentEncoding::Gzip,
+];
+
+/// File name suffix of a precompressed sibling.
+fn compressed_suffix(enc: ContentEncoding) -> &'static str {
+    match enc {
+        ContentEncoding::Br => ".br",
+        ContentEncoding::Zstd => ".zst",
+        _ => ".gz",
+    }
+}
+
+/// Returns the precompressed encodings accepted by `Accept-Encoding`, most preferred first.
+///
+/// Entries are ranked by `q`, ties follow [`PRECOMPRESSED`]. `*` covers encodings
+/// that are not listed, and `q=0` or a malformed `q` excludes an encoding.
+fn accepted_encodings(headers: &HeaderMap) -> Vec<ContentEncoding> {
+    let mut listed: Vec<(ContentEncoding, u16)> = Vec::new();
+    let mut wildcard = None;
+    let items = headers
+        .get_all(ACCEPT_ENCODING)
+        .filter_map(|val| val.to_str().ok())
+        .flat_map(|val| val.split(','));
+    for item in items {
+        let mut parts = item.split(';');
+        let name = parts.next().unwrap_or_default().trim();
+        if name.is_empty() {
+            continue;
+        }
+        let q = parts
+            .filter_map(|param| param.split_once('='))
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case("q"))
+            .map_or(Some(1000), |(_, val)| parse_q(val.trim()))
+            .unwrap_or(0);
+        if name == "*" {
+            wildcard.get_or_insert(q);
+        } else {
+            listed.push((ContentEncoding::from(name), q));
+        }
+    }
+
+    let mut accepted: Vec<_> = PRECOMPRESSED
+        .into_iter()
+        .filter_map(|enc| {
+            let q = listed
+                .iter()
+                .find(|(e, _)| *e == enc)
+                .map(|(_, q)| *q)
+                .or(wildcard)?;
+            (q > 0).then_some((enc, q))
+        })
+        .collect();
+    accepted.sort_by_key(|(_, q)| cmp::Reverse(*q));
+    accepted.into_iter().map(|(enc, _)| enc).collect()
+}
+
+/// Parses an RFC 9110 `qvalue` into thousandths.
+fn parse_q(val: &str) -> Option<u16> {
+    let (int, frac) = val.split_once('.').unwrap_or((val, ""));
+    if frac.len() > 3 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let int = match int {
+        "0" => 0,
+        "1" => 1000,
+        _ => return None,
+    };
+    let frac = frac
+        .bytes()
+        .zip([100, 10, 1])
+        .map(|(b, scale)| u16::from(b - b'0') * scale)
+        .sum::<u16>();
+    (int + frac <= 1000).then_some(int + frac)
 }
 
 /// Reports whether a component of `path` below `directory` starts with a dot.
@@ -2275,6 +2416,171 @@ mod tests {
                 .unwrap(),
             "gzip"
         );
+    }
+
+    /// STATEMENT: `Files::try_compressed` serves the precompressed sibling preferred by
+    /// `Accept-Encoding` with the original file's headers, and the original otherwise.
+    ///
+    /// HOW:
+    /// - Create `app.js` with `.br` and `.gz` siblings, and `docs/index.html` with a
+    ///   `.gz` sibling, and serve them behind `Compress` with `try_compressed`.
+    /// - For each `Accept-Encoding` value, check the body, `Content-Encoding`, and
+    ///   `Vary: accept-encoding`.
+    /// - Check `Content-Type` and `Content-Disposition` match the original file, and
+    ///   that the index file uses its `.gz` sibling as `text/html`.
+    #[ntex::test]
+    async fn test_files_try_compressed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("app.js"), b"plain").unwrap();
+        fs::write(dir.path().join("app.js.gz"), b"gzip-bytes").unwrap();
+        fs::write(dir.path().join("app.js.br"), b"br-bytes").unwrap();
+        fs::create_dir(dir.path().join("docs")).unwrap();
+        fs::write(dir.path().join("docs/index.html"), b"<p>").unwrap();
+        fs::write(dir.path().join("docs/index.html.gz"), b"index-gzip").unwrap();
+        let srv = test::init_service(
+            App::new().middleware(Compress::default()).service(
+                Files::new("/", dir.path())
+                    .index_file("index.html")
+                    .try_compressed(),
+            ),
+        )
+        .await;
+        let get = |uri: &str, accept: Option<&str>| {
+            let mut req = TestRequest::get().uri(uri);
+            if let Some(accept) = accept {
+                req = req.header(http::header::ACCEPT_ENCODING, accept);
+            }
+            req.to_request()
+        };
+
+        let plain = test::call_service(&srv, get("/app.js", None)).await;
+        let content_type = plain
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            plain
+                .headers()
+                .get(http::header::CONTENT_DISPOSITION)
+                .unwrap(),
+            "inline; filename=\"app.js\""
+        );
+
+        for (accept, body, encoding) in [
+            (None, "plain", None),
+            (Some("gzip, br"), "br-bytes", Some("br")),
+            (Some("gzip, br;q=0.5"), "gzip-bytes", Some("gzip")),
+            (Some("br;q=0, gzip"), "gzip-bytes", Some("gzip")),
+            (Some("*"), "br-bytes", Some("br")),
+            (Some("gzip;q=0.5, *;q=0"), "gzip-bytes", Some("gzip")),
+            (Some("zstd, identity"), "plain", None),
+            (Some("gzip;q=bogus, br;q=0"), "plain", None),
+        ] {
+            let resp = test::call_service(&srv, get("/app.js", accept)).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{accept:?}");
+            let headers = resp.headers();
+            assert_eq!(
+                headers
+                    .get(http::header::CONTENT_ENCODING)
+                    .map(|v| v.to_str().unwrap()),
+                encoding,
+                "{accept:?}"
+            );
+            assert_eq!(headers.get(http::header::VARY).unwrap(), "accept-encoding");
+            assert_eq!(headers.get(http::header::CONTENT_TYPE), Some(&content_type));
+            assert_eq!(
+                headers.get(http::header::CONTENT_DISPOSITION).unwrap(),
+                "inline; filename=\"app.js\""
+            );
+            assert_eq!(test::read_body(resp).await, body.as_bytes(), "{accept:?}");
+        }
+
+        let resp = test::call_service(&srv, get("/docs/", Some("gzip"))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(http::header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
+        assert!(
+            resp.headers()
+                .get(http::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        assert_eq!(test::read_body(resp).await, "index-gzip".as_bytes());
+    }
+
+    /// STATEMENT: Precompressed siblings are ignored unless enabled and usable, and
+    /// ranges and validators apply to the sibling's bytes.
+    ///
+    /// HOW:
+    /// - Without `try_compressed`, request `data.txt` with `gzip` and check the plain
+    ///   body and no `Vary` header.
+    /// - With it, request a `bytes=0-3` range and check `206`, `Content-Encoding: gzip`,
+    ///   and a `Content-Range` of the sibling's length, then compare the `ETag` with
+    ///   the plain response.
+    /// - Make `.br` a directory and, on Unix, `.gz` of another file a symlink outside
+    ///   the base, and check both requests fall back to the original file.
+    #[ntex::test]
+    async fn test_files_try_compressed_sibling_handling() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("data.txt"), b"plain-data").unwrap();
+        fs::write(dir.path().join("data.txt.gz"), b"0123456789abcdef").unwrap();
+        fs::create_dir(dir.path().join("data.txt.br")).unwrap();
+        fs::write(dir.path().join("other.txt"), b"other").unwrap();
+        fs::write(outside.path().join("secret.gz"), b"secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.gz"),
+            dir.path().join("other.txt.gz"),
+        )
+        .unwrap();
+        let get = |uri: &str, accept: &str| {
+            TestRequest::get()
+                .uri(uri)
+                .header(http::header::ACCEPT_ENCODING, accept)
+        };
+
+        let srv = test::init_service(App::new().service(Files::new("/", dir.path()))).await;
+        let resp = test::call_service(&srv, get("/data.txt", "gzip").to_request()).await;
+        assert!(!resp.headers().contains_key(http::header::CONTENT_ENCODING));
+        assert!(!resp.headers().contains_key(http::header::VARY));
+        assert_eq!(test::read_body(resp).await, "plain-data".as_bytes());
+
+        let srv =
+            test::init_service(App::new().service(Files::new("/", dir.path()).try_compressed()))
+                .await;
+        let req = get("/data.txt", "gzip").header(http::header::RANGE, "bytes=0-3");
+        let resp = test::call_service(&srv, req.to_request()).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            resp.headers().get(http::header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
+        assert_eq!(
+            resp.headers().get(http::header::CONTENT_RANGE).unwrap(),
+            "bytes 0-3/16"
+        );
+        let etag = resp.headers().get(http::header::ETAG).cloned();
+        assert_eq!(test::read_body(resp).await, "0123".as_bytes());
+
+        let resp = test::call_service(&srv, get("/data.txt", "identity").to_request()).await;
+        assert_ne!(resp.headers().get(http::header::ETAG).cloned(), etag);
+
+        for (uri, body) in [("/data.txt", "plain-data"), ("/other.txt", "other")] {
+            let accept = if uri == "/data.txt" { "br" } else { "gzip" };
+            let resp = test::call_service(&srv, get(uri, accept).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            assert!(
+                !resp.headers().contains_key(http::header::CONTENT_ENCODING),
+                "{uri}"
+            );
+            assert_eq!(test::read_body(resp).await, body.as_bytes(), "{uri}");
+        }
     }
 
     #[ntex::test]
