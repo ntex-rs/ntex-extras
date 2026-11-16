@@ -362,8 +362,9 @@ impl<St: State, In: 'static> Files<St, In> {
     ///
     /// Canonicalizes `dir` immediately. If this fails, logs the error and retains
     /// the supplied path; later request resolution may still fail. Resolution,
-    /// metadata access, and file opening for requests run on the blocking
-    /// thread pool, as do file reads unless [`Self::read_mode_threshold`] is set.
+    /// metadata access, and file opening for requests run on the web worker
+    /// unless [`Self::open_on_thread_pool`] is set. File reads run on the
+    /// blocking thread pool unless [`Self::read_mode_threshold`] is set.
     /// Directory rendering runs on the web worker.
     ///
     /// Request resolution failures use [`Self::default_handler`] when configured,
@@ -514,10 +515,23 @@ impl<St: State, In: 'static> Files<St, In> {
     /// Sets the body size below which file chunks are read on the web worker.
     ///
     /// Defaults to `0`, so all reads run on the blocking thread pool. See
-    /// [`NamedFile::read_mode_threshold`]. Path resolution and file opening
-    /// still run on the blocking thread pool.
+    /// [`NamedFile::read_mode_threshold`]. Path resolution and file opening are
+    /// controlled separately by [`Self::open_on_thread_pool`].
     pub fn read_mode_threshold(mut self, size: u64) -> Self {
         self.read_mode_threshold = size;
+        self
+    }
+
+    #[inline]
+    /// Resolves paths and opens files on the blocking thread pool when `value` is `true`.
+    ///
+    /// Defaults to `false`, so path resolution, metadata access, precompressed
+    /// sibling lookup, and file opening run on the web worker. This avoids a
+    /// thread pool round trip per request, but a slow filesystem, such as a
+    /// network mount or an uncached disk, blocks the worker. File reads are
+    /// controlled separately by [`Self::read_mode_threshold`].
+    pub fn open_on_thread_pool(mut self, value: bool) -> Self {
+        self.file_flags.set(named::Flags::POOL_OPEN, value);
         self
     }
 
@@ -797,30 +811,47 @@ where
             return self.handle_io_error(e, req, ctx).await;
         }
 
-        let directory = self.directory.clone();
-        let index = self.index.clone();
         let redirect = self.redirect_to_slash
             && (self.index.is_some() || self.show_index)
             && !req.path().ends_with('/');
-        let follow_symlinks = self.follow_symlinks;
-        let hidden_files = self.hidden_files;
         let encodings = if self.try_compressed {
             accepted_encodings(req.headers())
         } else {
             Vec::new()
         };
-        let target = web::block(move || {
+        let target = if self.file_flags.contains(named::Flags::POOL_OPEN) {
+            let directory = self.directory.clone();
+            let index = self.index.clone();
+            let follow_symlinks = self.follow_symlinks;
+            let hidden_files = self.hidden_files;
+            let target = web::block(move || {
+                resolve(
+                    &directory,
+                    real_path.0,
+                    index.as_deref(),
+                    redirect,
+                    follow_symlinks,
+                    hidden_files,
+                    &encodings,
+                )
+            })
+            .await;
+            match target {
+                Ok(target) => Ok(target),
+                Err(BlockingError::Error(e)) => Err(e),
+                Err(BlockingError::Canceled) => Err(io::Error::other("Operation is canceled")),
+            }
+        } else {
             resolve(
-                &directory,
+                &self.directory,
                 real_path.0,
-                index.as_deref(),
+                self.index.as_deref(),
                 redirect,
-                follow_symlinks,
-                hidden_files,
+                self.follow_symlinks,
+                self.hidden_files,
                 &encodings,
             )
-        })
-        .await;
+        };
 
         match target {
             Ok(Target::File(mut named_file)) => {
@@ -868,11 +899,7 @@ where
                     ))
                 }
             }
-            Err(BlockingError::Error(e)) => self.handle_io_error(e, req, ctx).await,
-            Err(BlockingError::Canceled) => {
-                let e = io::Error::other("Operation is canceled");
-                self.handle_io_error(e, req, ctx).await
-            }
+            Err(e) => self.handle_io_error(e, req, ctx).await,
         }
     }
 }
@@ -884,7 +911,10 @@ enum Target {
     Redirect,
 }
 
-/// Resolves a request path inside of `directory`, runs on the blocking thread pool.
+/// Resolves a request path inside of `directory`.
+///
+/// Runs on the web worker, or on the blocking thread pool when
+/// [`Files::open_on_thread_pool`] is set.
 ///
 /// A canonical path outside of `directory` is reported as not found,
 /// unless `follow_symlinks` is set. On Windows, a canonical path with a hidden
@@ -3407,6 +3437,37 @@ mod tests {
             panic!("expected a ready chunk");
         };
         assert_eq!(chunk, fs::read("tests/test.binary").unwrap()[10..20]);
+    }
+
+    /// STATEMENT: `Files` resolves and opens files on the web worker by default, and on
+    /// the blocking thread pool when `Files::open_on_thread_pool` is enabled.
+    ///
+    /// HOW:
+    /// - Call the default service for `/Cargo.toml`, poll the response future once with
+    ///   a no-op waker, and require a ready `200 OK`.
+    /// - Repeat with `open_on_thread_pool(true)`; require the first poll to be pending
+    ///   and the awaited response to be `200 OK`.
+    #[ntex::test]
+    async fn test_files_open_on_thread_pool() {
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        let st = Files::new("/", ".").pipeline(()).await.unwrap();
+        let mut fut =
+            std::pin::pin!(st.call(TestRequest::with_uri("/Cargo.toml").to_srv_request()));
+        let Poll::Ready(Ok(resp)) = fut.as_mut().poll(&mut cx) else {
+            panic!("expected a ready response");
+        };
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let st = Files::new("/", ".")
+            .open_on_thread_pool(true)
+            .pipeline(())
+            .await
+            .unwrap();
+        let mut fut =
+            std::pin::pin!(st.call(TestRequest::with_uri("/Cargo.toml").to_srv_request()));
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(fut.await.unwrap().status(), StatusCode::OK);
     }
 
     /// STATEMENT: Listings hide dot entries, escape ampersands, and mark visible directories with a slash.

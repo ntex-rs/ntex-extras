@@ -1,5 +1,9 @@
 # Changes
 
+## [4.6.0] - 2026-11-17
+
+* `Files` and registered `NamedFile` services resolve paths and open files on the web worker instead of the blocking thread pool; add `Files::open_on_thread_pool` and `NamedFile::open_on_thread_pool` to restore the previous behavior
+
 ## [4.5.0] - 2026-11-15
 
 * `NamedFile` can be registered as a service, served at its path, or used as a default handler; the file is reopened for each request

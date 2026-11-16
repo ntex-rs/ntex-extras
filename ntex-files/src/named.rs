@@ -31,12 +31,13 @@ bitflags! {
         const LAST_MD = 0b0000_0010;
         const CONTENT_DISPOSITION = 0b0000_0100;
         const PREFER_UTF8 = 0b0000_1000;
+        const POOL_OPEN = 0b0001_0000;
     }
 }
 
 impl Default for Flags {
     fn default() -> Self {
-        Flags::all()
+        Flags::all() - Flags::POOL_OPEN
     }
 }
 
@@ -370,6 +371,19 @@ impl NamedFile {
     /// round trip per chunk, but a slow or uncached read blocks the worker.
     pub fn read_mode_threshold(mut self, size: u64) -> Self {
         self.read_mode_threshold = size;
+        self
+    }
+
+    #[inline]
+    /// Reopens the file on the blocking thread pool when `value` is `true`.
+    ///
+    /// Applies only when the file is registered as a service. Defaults to
+    /// `false`, so the service reopens [`Self::path`] on the web worker for each
+    /// request. This avoids a thread pool round trip, but a slow filesystem,
+    /// such as a network mount or an uncached disk, blocks the worker. File
+    /// reads are controlled separately by [`Self::read_mode_threshold`].
+    pub fn open_on_thread_pool(mut self, value: bool) -> Self {
+        self.flags.set(Flags::POOL_OPEN, value);
         self
     }
 
@@ -827,10 +841,10 @@ where
 /// This can be used, for example, as [`Files::default_handler`](crate::Files::default_handler)
 /// or an application default service. The service keeps the configured status,
 /// content type, disposition, encoding override, custom `ETag`, flags, and read
-/// mode threshold, but reopens [`NamedFile::path`] on the blocking thread pool
-/// for each request, so metadata and validators reflect the current file. A
-/// display path passed to [`NamedFile::from_file`] must therefore name a
-/// readable file.
+/// mode threshold, but reopens [`NamedFile::path`] for each request, so metadata
+/// and validators reflect the current file. A display path passed to
+/// [`NamedFile::from_file`] must therefore name a readable file. The file is
+/// reopened on the web worker unless [`NamedFile::open_on_thread_pool`] is set.
 ///
 /// Only `GET` and `HEAD` requests are served; other methods return
 /// `405 Method Not Allowed`, and a file that cannot be opened returns
@@ -897,19 +911,22 @@ where
             return Ok(req.error_response(ctx.st(), &FilesError::MethodNotAllowed));
         }
 
-        let path = self.config.path.clone();
-        let mut file = match web::block(move || NamedFile::open(path)).await {
+        let cfg = &*self.config;
+        let opened = if cfg.flags.contains(Flags::POOL_OPEN) {
+            let path = cfg.path.clone();
+            match web::block(move || NamedFile::open(path)).await {
+                Ok(file) => Ok(file),
+                Err(BlockingError::Error(e)) => Err(e),
+                Err(BlockingError::Canceled) => Err(io::Error::other("Operation is canceled")),
+            }
+        } else {
+            NamedFile::open(&cfg.path)
+        };
+        let mut file = match opened {
             Ok(file) => file,
-            Err(BlockingError::Error(e)) => {
-                return Ok(req.error_response(ctx.st(), &FilesError::from(e)));
-            }
-            Err(BlockingError::Canceled) => {
-                let e = io::Error::other("Operation is canceled");
-                return Ok(req.error_response(ctx.st(), &FilesError::from(e)));
-            }
+            Err(e) => return Ok(req.error_response(ctx.st(), &FilesError::from(e))),
         };
 
-        let cfg = &*self.config;
         file.etag.clone_from(&cfg.etag);
         file.flags = cfg.flags.clone();
         file.status_code = cfg.status_code;
@@ -1243,5 +1260,40 @@ mod tests {
                 assert!(body.is_empty());
             }
         }
+    }
+
+    /// STATEMENT: A `NamedFile` service reopens its file on the web worker by default,
+    /// and on the blocking thread pool when `NamedFile::open_on_thread_pool` is enabled.
+    ///
+    /// HOW:
+    /// - Create the service from `Cargo.toml`, poll a request future once with a no-op
+    ///   waker, and require a ready `200 OK`.
+    /// - Repeat with `open_on_thread_pool(true)`; require the first poll to be pending
+    ///   and the awaited response to be `200 OK`.
+    #[ntex::test]
+    async fn named_file_service_open_on_thread_pool() {
+        use std::task::{Context, Poll};
+
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        let file = NamedFile::open("Cargo.toml").unwrap();
+        let srv = ServiceFactory::<(), WebRequest<()>>::pipeline(&file, ())
+            .await
+            .unwrap();
+        let mut fut = std::pin::pin!(srv.call(TestRequest::default().to_srv_request()));
+        let Poll::Ready(Ok(resp)) = fut.as_mut().poll(&mut cx) else {
+            panic!("expected a ready response");
+        };
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let file = NamedFile::open("Cargo.toml")
+            .unwrap()
+            .open_on_thread_pool(true);
+        let srv = ServiceFactory::<(), WebRequest<()>>::pipeline(&file, ())
+            .await
+            .unwrap();
+        let mut fut = std::pin::pin!(srv.call(TestRequest::default().to_srv_request()));
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(fut.await.unwrap().status(), StatusCode::OK);
     }
 }
