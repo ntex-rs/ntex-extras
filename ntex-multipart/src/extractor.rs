@@ -81,8 +81,13 @@ where
 
         // ensure limits are shared for all fields with this name
         let mut field_limits = HashMap::<String, Option<usize>>::default();
+        let mut fields_remaining =
+            T::max_parts().map_or(config.max_parts, |limit| limit.min(config.max_parts));
 
         while let Some(field) = multipart.try_next().await? {
+            fields_remaining = fields_remaining
+                .checked_sub(1)
+                .ok_or(MultipartError::FieldLimitExceeded)?;
             // Retrieve the limit for this field
             let entry = field_limits
                 .entry(field.form_field_name.clone())

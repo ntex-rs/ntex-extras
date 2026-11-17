@@ -28,6 +28,13 @@ pub trait MultipartCollect: Sized {
     /// reset for each part. `None` disables only the field-specific limit.
     fn limit(field_name: &str) -> Option<usize>;
 
+    /// An optional maximum number of fields for this form.
+    ///
+    /// The extractor also applies the limit from [`MultipartFormConfig`]. The lower limit wins.
+    fn max_parts() -> Option<usize> {
+        None
+    }
+
     /// Handles one part in arrival order, storing processed values in `state`.
     ///
     /// Readers must debit `limits`; the extractor retains the remaining budget
@@ -96,23 +103,29 @@ impl<T: MultipartCollect> MultipartForm<T> {
 
 /// Body-byte budgets for the [`struct@MultipartForm`] extractor.
 ///
-/// Register with `App::app_state`; absent configuration defaults to 50 MiB total
-/// and 2 MiB memory. Built-in readers debit field-body bytes, not headers/framing
-/// or ignored parts. These are cumulative byte budgets, not bounds on actual
-/// parser buffering, allocator overhead, or deserialized values.
+/// Register with `App::app_state`; absent configuration defaults to 50 MiB total,
+/// 2 MiB memory and 1000 max fields. Built-in readers debit field-body bytes,
+/// not headers/framing or ignored parts. These are cumulative byte budgets,
+/// not bounds on actual parser buffering, allocator overhead, or deserialized values.
 #[derive(Clone)]
 pub struct MultipartFormConfig {
     pub(crate) total_limit: usize,
     pub(crate) memory_limit: usize,
+    pub(crate) max_parts: usize,
 }
 
 impl MultipartFormConfig {
+    /// Default contructor with default values
+    pub const fn default() -> Self {
+        DEFAULT_CONFIG
+    }
+
     /// Sets the cumulative processed field-body budget in bytes (default: 50 MiB).
     ///
     /// Counts both in-memory and disk-backed readers. Multipart framing, headers,
     /// and ignored fields do not count. A reader exceeding it returns
     /// [`MultipartError::Payload`] with `PayloadError::Overflow`.
-    pub fn total_limit(mut self, total_limit: usize) -> Self {
+    pub const fn total_limit(mut self, total_limit: usize) -> Self {
         self.total_limit = total_limit;
         self
     }
@@ -123,8 +136,14 @@ impl MultipartFormConfig {
     /// [`Bytes`](crate::form::bytes::Bytes) debit this budget;
     /// [`TempFile`](crate::form::temp_file::TempFile) does not. It is not a limit on
     /// all memory used by the request parser or by deserialization.
-    pub fn memory_limit(mut self, memory_limit: usize) -> Self {
+    pub const fn memory_limit(mut self, memory_limit: usize) -> Self {
         self.memory_limit = memory_limit;
+        self
+    }
+
+    /// Sets
+    pub const fn max_parts(mut self, max_parts: usize) -> Self {
+        self.max_parts = max_parts;
         self
     }
 
@@ -137,10 +156,5 @@ impl MultipartFormConfig {
 const DEFAULT_CONFIG: MultipartFormConfig = MultipartFormConfig {
     total_limit: 52_428_800, // 50 MiB
     memory_limit: 2_097_152, // 2 MiB
+    max_parts: 1000, // low enough to bound CPU cost and high enough to never break legitimate forms.
 };
-
-impl Default for MultipartFormConfig {
-    fn default() -> Self {
-        DEFAULT_CONFIG
-    }
-}

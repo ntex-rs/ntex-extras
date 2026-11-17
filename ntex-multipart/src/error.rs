@@ -113,6 +113,10 @@ pub enum MultipartError {
         #[from]
         BlockingError,
     ),
+
+    /// Max fields limits exceeded
+    #[display("Payload Too Large")]
+    FieldLimitExceeded,
 }
 
 /// Renders multipart errors as 400 Bad Request.

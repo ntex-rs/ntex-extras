@@ -27,6 +27,7 @@ enum DuplicateField {
 struct MultipartFormAttrs {
     deny_unknown_fields: bool,
     duplicate_field: DuplicateField,
+    max_parts: Option<usize>,
 }
 
 #[allow(clippy::disallowed_names)] // false positive in macro expansion
@@ -265,6 +266,14 @@ fn expand(input: syn::DeriveInput) -> proc_macro2::TokenStream {
         ));
     }
 
+    let max_parts_impl = attrs.max_parts.map(|limit| {
+        quote! {
+            fn max_parts() -> ::std::option::Option<usize> {
+                ::std::option::Option::Some(#limit)
+            }
+        }
+    });
+
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let generation = quote! {
         impl #impl_generics ::ntex_multipart::MultipartCollect for #name #ty_generics #where_clause {
@@ -294,6 +303,7 @@ fn expand(input: syn::DeriveInput) -> proc_macro2::TokenStream {
                 })
             }
 
+            #max_parts_impl
         }
     };
     generation
