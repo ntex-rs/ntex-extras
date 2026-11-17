@@ -127,7 +127,6 @@ impl<St> WebResponseError<St, DefaultError> for MultipartError {
     fn error_response(&self, _: &St) -> HttpResponse {
         let status = match self {
             MultipartError::Field { source, .. } => source.status(),
-            MultipartError::FieldLimitExceeded => StatusCode::PAYLOAD_TOO_LARGE,
             _ => StatusCode::BAD_REQUEST,
         };
         HttpResponse::render_with(status, self)

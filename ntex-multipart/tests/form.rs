@@ -65,7 +65,6 @@ async fn config_from_app_state_limits_form() {
     ));
 }
 
-#[derive(Default)]
 struct Part<'a> {
     name: &'a str,
     data: &'a [u8],
