@@ -17,6 +17,13 @@ rust-version = "1.97"
 name = "ntex_files"
 path = "src/lib.rs"
 
+[features]
+default = []
+compress = ["compress-gzip", "compress-brotli", "compress-zstd"]
+compress-gzip = []
+compress-brotli = []
+compress-zstd = []
+
 [dependencies]
 ntex = { workspace = true }
 ntex-http = { workspace = true }

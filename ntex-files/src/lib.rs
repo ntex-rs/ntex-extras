@@ -68,6 +68,12 @@ type HttpService<St: State, In> =
 type HttpServiceFactory<St: State, In> =
     BoxServiceFactory<St, WebRequest<In>, WebResponse, WebError<St, St::Error>, Failure>;
 
+const TRY_COMPRESSED: bool = cfg!(any(
+    feature = "compress-brotli",
+    feature = "compress-gzip",
+    feature = "compress-zstd",
+));
+
 /// Return the MIME type associated with a filename extension (case-insensitive).
 /// If `ext` is empty or no associated type for the extension was found, returns
 /// the type `application/octet-stream`.
@@ -329,7 +335,6 @@ pub struct Files<St: State, In> {
     resource_guards: Vec<Rc<dyn Guard>>,
     follow_symlinks: bool,
     hidden_files: bool,
-    try_compressed: bool,
     path_filter: Option<Rc<PathFilter>>,
 }
 
@@ -351,7 +356,6 @@ impl<St: State, In> Clone for Files<St, In> {
             resource_guards: self.resource_guards.clone(),
             follow_symlinks: self.follow_symlinks,
             hidden_files: self.hidden_files,
-            try_compressed: self.try_compressed,
             path_filter: self.path_filter.clone(),
         }
     }
@@ -395,7 +399,6 @@ impl<St: State, In: 'static> Files<St, In> {
             resource_guards: Vec::new(),
             follow_symlinks: false,
             hidden_files: false,
-            try_compressed: false,
             path_filter: None,
         }
     }
@@ -547,26 +550,6 @@ impl<St: State, In: 'static> Files<St, In> {
         self
     }
 
-    /// Serves precompressed sibling files when the client accepts their encoding.
-    ///
-    /// Disabled by default. For a resolved file, including an index file, looks
-    /// for a sibling with a `.br`, `.zst`, or `.gz` suffix, for example
-    /// `app.js.gz`, in the order of the `Accept-Encoding` header's `q` values;
-    /// ties prefer `br`, then `zstd`, then `gzip`, and `q=0` excludes an encoding.
-    /// The original file must exist; siblings are subject to the same base
-    /// directory checks and are ignored if they cannot be opened.
-    ///
-    /// A sibling is served with `Content-Encoding` set to its encoding, so the
-    /// compress middleware leaves it unchanged. `Content-Type` and
-    /// `Content-Disposition` come from the original file name, while `ETag`,
-    /// `Last-Modified`, length, and ranges come from the sibling. Every file
-    /// response, including one for the original file, carries
-    /// `Vary: accept-encoding`.
-    pub fn try_compressed(mut self) -> Self {
-        self.try_compressed = true;
-        self
-    }
-
     /// Sets a filter that accepts or rejects request paths before filesystem access.
     ///
     /// The filter receives the decoded path relative to the base directory, after
@@ -714,7 +697,6 @@ where
             guards: self.guards.clone(),
             follow_symlinks: self.follow_symlinks,
             hidden_files: self.hidden_files,
-            try_compressed: self.try_compressed,
             path_filter: self.path_filter.clone(),
         };
 
@@ -752,7 +734,6 @@ pub struct FilesService<St: State, In> {
     guards: Option<Rc<dyn Guard>>,
     follow_symlinks: bool,
     hidden_files: bool,
-    try_compressed: bool,
     path_filter: Option<Rc<PathFilter>>,
 }
 
@@ -814,7 +795,7 @@ where
         let redirect = self.redirect_to_slash
             && (self.index.is_some() || self.show_index)
             && !req.path().ends_with('/');
-        let encodings = if self.try_compressed {
+        let encodings = if TRY_COMPRESSED {
             accepted_encodings(req.headers())
         } else {
             Vec::new()
@@ -864,7 +845,7 @@ where
                 named_file.read_mode_threshold = self.read_mode_threshold;
                 let (req, _, _) = req.into_parts();
                 let mut resp = (*named_file).into_response(&req);
-                if self.try_compressed {
+                if TRY_COMPRESSED {
                     resp.headers_mut()
                         .append(VARY, HeaderValue::from_static("accept-encoding"));
                 }
@@ -947,7 +928,9 @@ fn resolve(
     let open = |joined: PathBuf, path: PathBuf| -> io::Result<Target> {
         for &enc in encodings {
             let mut sibling = joined.clone().into_os_string();
-            sibling.push(compressed_suffix(enc));
+            if TRY_COMPRESSED {
+                sibling.push(compressed_suffix(enc));
+            }
             let Ok(sibling) = contained(sibling.into()) else {
                 continue;
             };
@@ -981,9 +964,16 @@ fn resolve(
 }
 
 /// Encodings with precompressed sibling files, in server preference order.
-const PRECOMPRESSED: [ContentEncoding; 3] = [
+/// Perf note: a &'static [_] is just a (ptr, len) pair with both values
+/// known at compile time — no heap, no indirection. Because the slice is
+/// built from a `const`, LLVM can still see its length and unroll/vectorize
+/// the loop, so it compiles down to the same code as a fixed-size array.
+const PRECOMPRESSED: &[ContentEncoding] = &[
+    #[cfg(feature = "compress-brotli")]
     ContentEncoding::Br,
+    #[cfg(feature = "compress-zstd")]
     ContentEncoding::Zstd,
+    #[cfg(feature = "compress-gzip")]
     ContentEncoding::Gzip,
 ];
 
@@ -1026,18 +1016,18 @@ fn accepted_encodings(headers: &HeaderMap) -> Vec<ContentEncoding> {
     }
 
     let mut accepted: Vec<_> = PRECOMPRESSED
-        .into_iter()
+        .iter()
         .filter_map(|enc| {
             let q = listed
                 .iter()
-                .find(|(e, _)| *e == enc)
+                .find(|(e, _)| *e == *enc)
                 .map(|(_, q)| *q)
                 .or(wildcard)?;
             (q > 0).then_some((enc, q))
         })
         .collect();
     accepted.sort_by_key(|(_, q)| cmp::Reverse(*q));
-    accepted.into_iter().map(|(enc, _)| enc).collect()
+    accepted.into_iter().map(|(enc, _)| *enc).collect()
 }
 
 /// Parses an RFC 9110 `qvalue` into thousandths.
@@ -2489,7 +2479,7 @@ mod tests {
         );
     }
 
-    /// STATEMENT: `Files::try_compressed` serves the precompressed sibling preferred by
+    /// STATEMENT: `compress` feature serves the precompressed sibling preferred by
     /// `Accept-Encoding` with the original file's headers, and the original otherwise.
     ///
     /// HOW:
@@ -2500,6 +2490,7 @@ mod tests {
     /// - Check `Content-Type` and `Content-Disposition` match the original file, and
     ///   that the index file uses its `.gz` sibling as `text/html`.
     #[ntex::test]
+    #[cfg(all(feature = "compress-gzip", feature = "compress-brotli",))]
     async fn test_files_try_compressed() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("app.js"), b"plain").unwrap();
@@ -2509,11 +2500,9 @@ mod tests {
         fs::write(dir.path().join("docs/index.html"), b"<p>").unwrap();
         fs::write(dir.path().join("docs/index.html.gz"), b"index-gzip").unwrap();
         let srv = test::init_service(
-            App::new().middleware(Compress::default()).service(
-                Files::new("/", dir.path())
-                    .index_file("index.html")
-                    .try_compressed(),
-            ),
+            App::new()
+                .middleware(Compress::default())
+                .service(Files::new("/", dir.path()).index_file("index.html")),
         )
         .await;
         let get = |uri: &str, accept: Option<&str>| {
@@ -2588,14 +2577,46 @@ mod tests {
     /// ranges and validators apply to the sibling's bytes.
     ///
     /// HOW:
-    /// - Without `try_compressed`, request `data.txt` with `gzip` and check the plain
+    /// - Without any `compress` feature, request `data.txt` with `gzip` and check the plain
     ///   body and no `Vary` header.
+    #[ntex::test]
+    #[cfg(not(any(
+        feature = "compress-gzip",
+        feature = "compress-brotli",
+        feature = "compress-zstd"
+    )))]
+    async fn test_files_try_compressed_sibling_handling() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("data.txt"), b"plain-data").unwrap();
+        fs::write(dir.path().join("data.txt.gz"), b"0123456789abcdef").unwrap();
+        fs::write(dir.path().join("data.txt.br"), b"0123456789abcdef").unwrap();
+        fs::write(dir.path().join("data.txt.zst"), b"0123456789abcdef").unwrap();
+        let get = |uri: &str, accept: &str| {
+            TestRequest::get()
+                .uri(uri)
+                .header(http::header::ACCEPT_ENCODING, accept)
+        };
+
+        let srv = test::init_service(App::new().service(Files::new("/", dir.path()))).await;
+        for accept in ["gzip", "brotli", "zstd"] {
+            let resp = test::call_service(&srv, get("/data.txt", accept).to_request()).await;
+            assert!(!resp.headers().contains_key(http::header::CONTENT_ENCODING));
+            assert!(!resp.headers().contains_key(http::header::VARY));
+            assert_eq!(test::read_body(resp).await, "plain-data".as_bytes());
+        }
+    }
+
+    /// STATEMENT: Precompressed siblings are ignored unless enabled and usable, and
+    /// ranges and validators apply to the sibling's bytes.
+    ///
+    /// HOW:
     /// - With it, request a `bytes=0-3` range and check `206`, `Content-Encoding: gzip`,
     ///   and a `Content-Range` of the sibling's length, then compare the `ETag` with
     ///   the plain response.
     /// - Make `.br` a directory and, on Unix, `.gz` of another file a symlink outside
     ///   the base, and check both requests fall back to the original file.
     #[ntex::test]
+    #[cfg(all(feature = "compress-gzip", feature = "compress-brotli",))]
     async fn test_files_try_compressed_sibling_handling() {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -2617,14 +2638,6 @@ mod tests {
         };
 
         let srv = test::init_service(App::new().service(Files::new("/", dir.path()))).await;
-        let resp = test::call_service(&srv, get("/data.txt", "gzip").to_request()).await;
-        assert!(!resp.headers().contains_key(http::header::CONTENT_ENCODING));
-        assert!(!resp.headers().contains_key(http::header::VARY));
-        assert_eq!(test::read_body(resp).await, "plain-data".as_bytes());
-
-        let srv =
-            test::init_service(App::new().service(Files::new("/", dir.path()).try_compressed()))
-                .await;
         let req = get("/data.txt", "gzip").header(http::header::RANGE, "bytes=0-3");
         let resp = test::call_service(&srv, req.to_request()).await;
         assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
@@ -2652,6 +2665,65 @@ mod tests {
             );
             assert_eq!(test::read_body(resp).await, body.as_bytes(), "{uri}");
         }
+    }
+
+    /// STAMENENT: disable one compressed option and sees preference correct order
+    #[ntex::test]
+    #[cfg(all(feature = "compress-gzip", not(feature = "compress-brotli"),))]
+    async fn test_files_try_compressed_preference_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("data.txt"), b"plain-data").unwrap();
+        fs::write(dir.path().join("data.txt.gz"), b"gziped").unwrap();
+        fs::write(dir.path().join("data.txt.br"), b"brotliped").unwrap();
+
+        let srv = test::init_service(App::new().service(Files::new("/", dir.path()))).await;
+        let get = |uri: &str, accept: &str| {
+            TestRequest::get()
+                .uri(uri)
+                .header(http::header::ACCEPT_ENCODING, accept)
+        };
+
+        let req1 = get("/data.txt", "br, gzip").header(http::header::RANGE, "bytes=0-3");
+
+        let resp1 = test::call_service(&srv, req1.to_request()).await;
+        assert_eq!(
+            resp1.headers().get(http::header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
+
+        let req2 = get("/data.txt", "br").header(http::header::RANGE, "bytes=0-3");
+        let resp2 = test::call_service(&srv, req2.to_request()).await;
+        assert!(!resp2.headers().contains_key(http::header::CONTENT_ENCODING));
+    }
+
+    /// STAMENENT: disable one compressed option and sees preference correct order
+    #[ntex::test]
+    #[cfg(all(not(feature = "compress-gzip"), feature = "compress-brotli",))]
+    async fn test_files_try_compressed_preference_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("data.txt"), b"plain-data").unwrap();
+        fs::write(dir.path().join("data.txt.gz"), b"gziped").unwrap();
+        fs::write(dir.path().join("data.txt.br"), b"brotliped").unwrap();
+
+        let srv = test::init_service(App::new().service(Files::new("/", dir.path()))).await;
+        let get = |uri: &str, accept: &str| {
+            TestRequest::get()
+                .uri(uri)
+                .header(http::header::ACCEPT_ENCODING, accept)
+        };
+
+        let req1 = get("/data.txt", "br, gzip").header(http::header::RANGE, "bytes=0-3");
+
+        let resp1 = test::call_service(&srv, req1.to_request()).await;
+        assert_eq!(
+            resp1.headers().get(http::header::CONTENT_ENCODING).unwrap(),
+            "br"
+        );
+
+        let req2 = get("/data.txt", "gzip").header(http::header::RANGE, "bytes=0-3");
+        let resp2 = test::call_service(&srv, req2.to_request()).await;
+        println!("{:?}", resp2.headers());
+        assert!(!resp2.headers().contains_key(http::header::CONTENT_ENCODING));
     }
 
     /// STATEMENT: `path_filter` sees the decoded relative path and request head before

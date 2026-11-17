@@ -48,6 +48,25 @@ jobs:
           command: test
           args: --all --all-features --no-fail-fast -- --nocapture
 
+      - name: Run ntex-files no compress
+        uses: actions-rs/cargo@v1
+        timeout-minutes: 40
+        with:
+          command: test
+          args: -p ntex-files --no-fail-fast -- --nocapture
+
+      - name: Run ntex-files compress preference brotli
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p ntex-files --features compress-brotli tests::test_files_try_compressed_preference_when_disable
+
+      - name: Run ntex-files compress preference gzip
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p ntex-files --features compress-gzip tests::test_files_try_compressed_preference_when_disable
+
       - name: Install cargo-cache
         continue-on-error: true
         run: |
