@@ -6,6 +6,7 @@ use ntex::web::{
     FromRequest,
     test::{TestRequest, read_body},
 };
+
 use ntex_multipart::form::{
     FieldReader,
     bytes::Bytes,
@@ -64,6 +65,7 @@ async fn config_from_app_state_limits_form() {
     ));
 }
 
+#[derive(Default)]
 struct Part<'a> {
     name: &'a str,
     data: &'a [u8],
@@ -900,4 +902,97 @@ async fn empty_field_name_is_ignored() {
     .await
     .unwrap();
     assert_eq!(form.required.0, 1);
+}
+
+#[derive(MultipartForm)]
+struct DefaultMaxParts {
+    files: Vec<Bytes>,
+}
+
+#[ntex::test]
+async fn test_default_max_parts() {
+    for (count, expected_error) in [(1000, false), (1001, true)] {
+        let parts: Vec<_> = (0..count).map(|_| Part::new("files", b"")).collect();
+
+        let result = extract::<DefaultMaxParts>(multipart_request(&parts)).await;
+
+        if expected_error {
+            assert!(matches!(result, Err(MultipartError::FieldLimitExceeded)));
+        } else {
+            assert_eq!(result.unwrap().files.len(), count);
+        }
+    }
+}
+#[derive(MultipartForm)]
+#[multipart(max_parts = 2)]
+struct DerivedMaxParts {
+    files: Vec<Bytes>,
+}
+
+#[ntex::test]
+async fn test_derived_max_parts() {
+    for (config_limit, count, expected_error) in
+        [(100, 2, false), (100, 3, true), (1, 1, false), (1, 2, true)]
+    {
+        let parts: Vec<_> = (0..count).map(|_| Part::new("files", b"")).collect();
+
+        let result = extract::<DerivedMaxParts>(
+            multipart_request(&parts)
+                .app_value(MultipartFormConfig::default().max_parts(config_limit)),
+        )
+        .await;
+
+        if expected_error {
+            assert!(matches!(result, Err(MultipartError::FieldLimitExceeded)));
+        } else {
+            assert_eq!(result.unwrap().files.len(), count);
+        }
+    }
+}
+#[derive(MultipartForm)]
+struct ConfiguredMaxParts {
+    files: Vec<TempFile>,
+}
+
+#[ntex::test]
+async fn test_configured_max_parts() {
+    for limit in [0, 2, 101] {
+        for (count, expected_error) in [(limit, false), (limit + 1, true)] {
+            let parts: Vec<_> = (0..count)
+                .map(|_| Part::new("files", b"").file_name("test.txt"))
+                .collect();
+
+            let result = extract::<ConfiguredMaxParts>(
+                multipart_request(&parts)
+                    .app_value(MultipartFormConfig::default().max_parts(limit)),
+            )
+            .await;
+
+            if expected_error {
+                assert!(matches!(result, Err(MultipartError::FieldLimitExceeded)));
+            } else {
+                assert_eq!(result.unwrap().files.len(), count);
+            }
+        }
+    }
+}
+
+#[derive(MultipartForm)]
+#[allow(dead_code)]
+struct IgnoreFieldsMaxParts {
+    field: Text<String>,
+}
+
+#[ntex::test]
+async fn test_discarded_fields_count_towards_max_parts() {
+    for name in ["field", "unknown"] {
+        let parts = [Part::new("field", b"first_value"), Part::new(name, b"")];
+
+        let result = extract::<IgnoreFieldsMaxParts>(
+            multipart_request(&parts).app_value(MultipartFormConfig::default().max_parts(1)),
+        )
+        .await;
+
+        assert!(matches!(result, Err(MultipartError::FieldLimitExceeded)));
+    }
 }
