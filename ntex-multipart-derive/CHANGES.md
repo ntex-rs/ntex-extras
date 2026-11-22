@@ -1,8 +1,10 @@
 # Changes
 
-## [Unreleased]
+## [4.3.0] - 2026-11-22
 
 * Add the `#[multipart(max_parts = N)]` struct attribute to lower a form's part limit
+
+* Drain unknown parts with `form::discard_field` so they count toward the total byte budget
 
 ## [4.2.0] - 2026-11-06
 
