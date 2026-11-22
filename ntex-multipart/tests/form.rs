@@ -14,7 +14,8 @@ use ntex_multipart::form::{
     text::{Text, TextConfig},
 };
 use ntex_multipart::{
-    Multipart, MultipartCollect, MultipartError, MultipartForm, MultipartFormConfig,
+    Multipart, MultipartCollect, MultipartConfig, MultipartError, MultipartForm,
+    MultipartFormConfig,
 };
 
 #[derive(MultipartForm)]
@@ -62,6 +63,33 @@ async fn config_from_app_state_limits_form() {
             ntex::http::error::PayloadError::Overflow
         ))
     ));
+}
+
+/// STATEMENT: A `MultipartConfig` added to app state sets the buffer limit of both extractors.
+///
+/// HOW:
+/// - Register `MultipartConfig` with a 16-byte buffer limit, smaller than the 47-byte header block.
+/// - Confirm the first `Multipart` field and the `MultipartForm` extraction both fail with
+///   `PayloadError::Overflow`.
+#[ntex::test]
+async fn buffer_limit_from_app_state_applies_to_extractors() {
+    let overflow = |res| {
+        matches!(
+            res,
+            Err(MultipartError::Payload(
+                ntex::http::error::PayloadError::Overflow
+            ))
+        )
+    };
+    let config = MultipartConfig::default().buffer_limit(16);
+
+    let (req, mut pl, ()) = request().app_value(config.clone()).to_http_parts();
+    let mut multipart = Multipart::from_request(&(), &req, &mut pl).await.unwrap();
+    assert!(overflow(multipart.next().await.unwrap().map(drop)));
+
+    let (req, mut pl, ()) = request().app_value(config).to_http_parts();
+    let res = MultipartForm::<Form<Bytes>>::from_request(&(), &req, &mut pl).await;
+    assert!(overflow(res.map(drop)));
 }
 
 struct Part<'a> {

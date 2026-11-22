@@ -23,7 +23,6 @@ cookie-policy = ["cookie/secure", "ntex/cookie"]
 
 [dependencies]
 ntex = { workspace = true }
-futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 cookie = { workspace = true, features = ["private"] }

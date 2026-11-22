@@ -19,7 +19,6 @@ path = "src/lib.rs"
 [dependencies]
 ntex = { workspace = true }
 derive_more = { workspace = true, features = ["from", "display"] }
-futures = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

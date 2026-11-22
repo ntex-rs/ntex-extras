@@ -1,10 +1,24 @@
 # Changes
 
-## [4.3.0] - 2026-11-22 (Unreleased)
+## [4.3.0] - 2026-11-22
 
 * Limit `MultipartForm` to 100 parts by default, counting empty, unknown, and ignored parts; add `MultipartFormConfig::max_parts`, `MultipartCollect::max_parts`, and `MultipartError::TooManyParts`
 
 * Charge ignored unknown and duplicate parts to the total and field byte budgets when draining them; add `form::discard_field`
+
+* Render `MultipartError::Payload(PayloadError::Overflow)` as 413 Payload Too Large instead of 400
+
+* Render `MultipartError::IncompatibleContentType` as 415 Unsupported Media Type instead of 400
+
+* Mark `MultipartError` as `#[non_exhaustive]`
+
+* Accept RFC 2046 transport padding (spaces and tabs) between boundary delimiters and their line breaks
+
+* Reject a `boundary=` parameter that does not follow RFC 2046 (empty, longer than 70 characters, a trailing space, or characters outside `bchars`) with `MultipartError::Boundary`
+
+* Bound the parser buffer to 64 KiB by default; a boundary line, preamble line, or part-header block that does not fit is rejected with `PayloadError::Overflow`. Add `MultipartConfig::buffer_limit` (registered as app state) and `Multipart::with_config`
+
+* Speed up field scanning for binary, CSV, SQL and untyped parts by searching for the boundary instead of stopping at every CR; text, JSON, XML and YAML parts keep the CR search
 
 ## [4.2.0] - 2026-11-06
 

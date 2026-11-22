@@ -12,6 +12,13 @@ use std::task::{Context, Poll};
 /// Maximum size of a boundary line or of a part's header block.
 pub(crate) const MAX_LINE_SIZE: usize = 16 * 1024;
 
+/// Default maximum number of unprocessed body bytes held by the parser.
+pub(crate) const DEFAULT_BUFFER_LIMIT: usize = 64 * 1024;
+
+/// Maximum number of ready stream chunks taken per poll, so a fast stream cannot
+/// monopolize the task.
+const MAX_READY_CHUNKS: usize = 16;
+
 pub(crate) struct PayloadRef {
     payload: Rc<RefCell<PayloadBuffer>>,
 }
@@ -48,37 +55,78 @@ pub(crate) struct PayloadBuffer {
     pub(crate) eof: bool,
     pub(crate) buf: BytesMut,
     pub(crate) stream: LocalBoxStream<'static, Result<Bytes, PayloadError>>,
+    /// Stream data received but not yet moved into `buf` because of `limit`.
+    pending: Option<Bytes>,
+    /// Maximum length of `buf`.
+    limit: usize,
 }
 
 impl PayloadBuffer {
-    /// Create new `PayloadBuffer` instance
+    /// Create new `PayloadBuffer` instance with the default buffer limit
     pub(crate) fn new<S>(stream: S) -> Self
     where
         S: Stream<Item = Result<Bytes, PayloadError>> + 'static,
     {
+        Self::with_limit(stream, DEFAULT_BUFFER_LIMIT)
+    }
+
+    /// Create new `PayloadBuffer` instance that buffers at most `limit` bytes
+    pub(crate) fn with_limit<S>(stream: S, limit: usize) -> Self
+    where
+        S: Stream<Item = Result<Bytes, PayloadError>> + 'static,
+    {
         PayloadBuffer {
+            limit,
             eof: false,
+            pending: None,
             buf: BytesMut::new(),
             stream: stream.boxed_local(),
         }
     }
 
+    /// Moves ready stream data into `buf`, keeping it within `limit`.
+    ///
+    /// Data that does not fit is kept in `pending`. Takes at most
+    /// `MAX_READY_CHUNKS` chunks per call. When it stops without waiting on the
+    /// stream, it wakes the task so the data is read after the parser consumes `buf`.
     pub(crate) fn poll_stream(&mut self, cx: &mut Context) -> Result<(), PayloadError> {
-        loop {
-            match Pin::new(&mut self.stream).poll_next(cx) {
-                Poll::Ready(Some(Ok(data))) => self.buf.extend_from_slice(&data),
-                Poll::Ready(Some(Err(e))) => return Err(e),
-                Poll::Ready(None) => {
-                    self.eof = true;
-                    return Ok(());
+        for _ in 0..MAX_READY_CHUNKS {
+            // with a full buffer, still poll once to observe eof or hold the next chunk
+            let mut data = if let Some(data) = self.pending.take() {
+                data
+            } else {
+                match Pin::new(&mut self.stream).poll_next(cx) {
+                    Poll::Ready(Some(Ok(data))) => data,
+                    Poll::Ready(Some(Err(e))) => return Err(e),
+                    Poll::Ready(None) => {
+                        self.eof = true;
+                        return Ok(());
+                    }
+                    Poll::Pending => return Ok(()),
                 }
-                Poll::Pending => return Ok(()),
+            };
+
+            let room = self.limit - self.buf.len();
+            if data.len() > room {
+                self.buf.extend_from_slice(&data[..room]);
+                data.advance_to(room);
+                self.pending = Some(data);
+                break;
             }
+            self.buf.extend_from_slice(&data);
         }
+
+        cx.waker().wake_by_ref();
+        Ok(())
     }
 
-    /// Read exact number of bytes
-    #[cfg(test)]
+    /// Returns `true` if `buf` cannot take more data.
+    ///
+    /// A parser that needs more data while the buffer is full cannot make progress.
+    pub(crate) fn is_full(&self) -> bool {
+        self.buf.len() >= self.limit
+    }
+
     pub(crate) fn read_exact(&mut self, size: usize) -> Option<Bytes> {
         if size <= self.buf.len() {
             Some(self.buf.split_to(size))
@@ -307,5 +355,78 @@ mod tests {
             payload.get_mut(&parent).unwrap().read_max(1),
             Err(MultipartError::Incomplete)
         ));
+    }
+
+    /// STATEMENT: `poll_stream` never buffers more than the configured limit and keeps the excess.
+    ///
+    /// HOW:
+    /// - Feed 8-byte chunks into a buffer limited to 12 bytes and poll repeatedly.
+    /// - Confirm the buffer stops at 12 bytes, a second poll without consuming adds nothing,
+    ///   and consumed room is refilled from the held remainder in order.
+    #[ntex::test]
+    async fn poll_stream_keeps_buffer_within_limit() {
+        let (sender, payload) = bstream::channel();
+        let mut payload = PayloadBuffer::with_limit(payload, 12);
+        sender.feed_data(Bytes::from("12345678"));
+        sender.feed_data(Bytes::from("abcdefgh"));
+
+        lazy(|cx| payload.poll_stream(cx)).await.unwrap();
+        assert_eq!(payload.buf, "12345678abcd");
+        lazy(|cx| payload.poll_stream(cx)).await.unwrap();
+        assert_eq!(payload.buf, "12345678abcd");
+
+        assert_eq!(payload.read_exact(10).unwrap(), "12345678ab");
+        lazy(|cx| payload.poll_stream(cx)).await.unwrap();
+        assert_eq!(payload.buf, "cdefgh");
+    }
+
+    /// STATEMENT: `poll_stream` wakes the task when it stops before the stream is pending.
+    ///
+    /// HOW:
+    /// - Poll with a counting waker after feeding more than `MAX_READY_CHUNKS` chunks, then
+    ///   with a full buffer, then with an empty stream.
+    /// - Confirm the first two polls wake the task and the pending stream does not.
+    #[ntex::test]
+    async fn poll_stream_wakes_when_data_may_remain() {
+        let (sender, payload) = bstream::channel();
+        let mut payload = PayloadBuffer::with_limit(payload, 32);
+        for _ in 0..MAX_READY_CHUNKS + 4 {
+            sender.feed_data(Bytes::from("x"));
+        }
+        let (waker, count) = futures_test::task::new_count_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        payload.poll_stream(&mut cx).unwrap();
+        assert_eq!(payload.buf.len(), MAX_READY_CHUNKS);
+        assert_eq!(count.get(), 1);
+
+        sender.feed_data(Bytes::from("y".repeat(32)));
+        payload.poll_stream(&mut cx).unwrap();
+        assert_eq!(payload.buf.len(), 32);
+        assert_eq!(count.get(), 2);
+
+        payload.buf.clear();
+        payload.poll_stream(&mut cx).unwrap();
+        assert_eq!(payload.buf.len(), 20);
+        assert_eq!(count.get(), 2);
+    }
+
+    /// STATEMENT: `poll_stream` observes end of stream even when the buffer is full.
+    ///
+    /// HOW:
+    /// - Fill a 4-byte buffer exactly, then close the stream.
+    /// - Confirm the next poll sets `eof` without consuming the buffered bytes.
+    #[ntex::test]
+    async fn poll_stream_observes_eof_with_full_buffer() {
+        let (sender, payload) = bstream::channel();
+        let mut payload = PayloadBuffer::with_limit(payload, 4);
+        sender.feed_data(Bytes::from("1234"));
+        lazy(|cx| payload.poll_stream(cx)).await.unwrap();
+        assert!(payload.is_full() && !payload.eof);
+
+        sender.feed_eof();
+        lazy(|cx| payload.poll_stream(cx)).await.unwrap();
+        assert!(payload.eof);
+        assert_eq!(payload.buf, "1234");
     }
 }

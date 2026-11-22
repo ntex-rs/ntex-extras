@@ -6,10 +6,11 @@ use ntex::web::{self, FromRequest, HttpRequest, WebResponseError};
 use ntex::{http::Payload, util::HashMap};
 
 use crate::form::{Limits, State};
-use crate::multipart::Multipart;
+use crate::multipart::{Multipart, MultipartConfig};
 use crate::{MultipartCollect, MultipartError, MultipartForm, multipart_form::MultipartFormConfig};
 
-/// Takes the request payload as a streaming [`Multipart`] parser.
+/// Takes the request payload as a streaming [`Multipart`] parser configured by the
+/// app-state [`MultipartConfig`], or the default configuration if none is registered.
 ///
 /// Extraction itself is infallible: request-header errors appear as the first
 /// stream item. All `multipart/*` request subtypes are accepted, but nested parts
@@ -39,11 +40,16 @@ impl<St> FromRequest<St> for Multipart {
         req: &HttpRequest,
         payload: &mut Payload,
     ) -> Result<Self, Self::Error> {
-        Ok(Multipart::new(req.headers(), payload.take()))
+        Ok(Multipart::with_config(
+            req.headers(),
+            payload.take(),
+            MultipartConfig::from_req(req),
+        ))
     }
 }
 
-/// Reads and collects a complete `multipart/form-data` body using request app-state configuration.
+/// Reads and collects a complete `multipart/form-data` body using request app-state
+/// [`MultipartFormConfig`] and [`MultipartConfig`].
 ///
 /// # Errors
 ///
@@ -63,7 +69,11 @@ where
         req: &HttpRequest,
         payload: &mut Payload,
     ) -> Result<Self, Self::Error> {
-        let mut multipart = Multipart::new(req.headers(), payload.take());
+        let mut multipart = Multipart::with_config(
+            req.headers(),
+            payload.take(),
+            MultipartConfig::from_req(req),
+        );
 
         let content_type = match multipart.content_type() {
             Ok(content_type) => content_type,
