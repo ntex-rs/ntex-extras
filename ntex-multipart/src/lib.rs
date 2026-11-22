@@ -107,7 +107,8 @@
 //!
 //! The streaming parser separately limits boundary/preamble lines and each entire
 //! part-header block to 16 KiB, including their delimiters, with at most 32 headers
-//! per part. An oversized line or header block yields
+//! per part, and buffers at most 64 KiB of unprocessed body data
+//! ([`MultipartConfig::buffer_limit`]). An oversized line or header block yields
 //! [`MultipartError::Payload`] containing [`PayloadError::Overflow`](ntex::http::error::PayloadError::Overflow),
 //! regardless of how the input is chunked. In boundary-delimited field data, a
 //! boundary match must be followed by CRLF or `--`; other matching prefixes remain
@@ -126,5 +127,5 @@ pub(crate) mod safety;
 
 pub use self::error::MultipartError;
 pub use self::field::Field;
-pub use self::multipart::Multipart;
+pub use self::multipart::{Multipart, MultipartConfig};
 pub use self::multipart_form::{MultipartCollect, MultipartForm, MultipartFormConfig};

@@ -2,14 +2,15 @@
 
 use crate::Field;
 use crate::error::MultipartError;
-use crate::field::InnerField;
-use crate::payload::{PayloadBuffer, PayloadRef};
+use crate::field::{BoundarySearch, InnerField};
+use crate::payload::{DEFAULT_BUFFER_LIMIT, PayloadBuffer, PayloadRef};
 use crate::safety::Safety;
 use futures::stream::Stream;
 use mime::Mime;
 use ntex::http::error::{DecodeError, PayloadError};
 use ntex::http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use ntex::util::Bytes;
+use ntex::web::HttpRequest;
 use ntex_files::header::DispositionType;
 use ntex_files::header::{ContentDisposition, Header};
 use std::cell::RefCell;
@@ -17,6 +18,62 @@ use std::task::{Context, Poll};
 use std::{convert::TryFrom, pin::Pin, rc::Rc};
 
 const MAX_HEADERS: usize = 32;
+/// Maximum boundary length (RFC 2046 §5.1.1).
+const MAX_BOUNDARY_LEN: usize = 70;
+
+/// Checks the RFC 2046 §5.1.1 boundary syntax: 1 to 70 `bchars`, not ending with a space.
+fn is_valid_boundary(boundary: &str) -> bool {
+    let b = boundary.as_bytes();
+    (1..=MAX_BOUNDARY_LEN).contains(&b.len())
+        && b.last() != Some(&b' ')
+        && b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || b" '()+_,-./:=?".contains(c))
+}
+
+/// Parser configuration for the [`Multipart`] and
+/// [`MultipartForm`](struct@crate::MultipartForm) extractors.
+///
+/// Register with `App::app_state`; absent configuration uses the defaults. Use
+/// [`Multipart::with_config`] to apply it to a manually constructed parser.
+#[derive(Clone, Debug)]
+pub struct MultipartConfig {
+    buffer_limit: usize,
+}
+
+impl MultipartConfig {
+    /// Creates the default configuration.
+    pub const fn new() -> Self {
+        DEFAULT_CONFIG
+    }
+
+    /// Sets the maximum number of unprocessed body bytes the parser buffers
+    /// (default: 64 KiB).
+    ///
+    /// The parser stops reading the body while this many bytes are buffered, and
+    /// field chunks are at most this long. Each boundary line, preamble line, and
+    /// part-header block must fit in the buffer; otherwise the body is rejected with
+    /// [`MultipartError::Payload`] containing [`PayloadError::Overflow`]. A zero
+    /// limit rejects every body.
+    pub fn buffer_limit(mut self, buffer_limit: usize) -> Self {
+        self.buffer_limit = buffer_limit;
+        self
+    }
+
+    /// Returns configuration from request app state, or the default if none is registered.
+    pub(crate) fn from_req(req: &HttpRequest) -> &Self {
+        req.app_value::<Self>().unwrap_or(&DEFAULT_CONFIG)
+    }
+}
+
+const DEFAULT_CONFIG: MultipartConfig = MultipartConfig {
+    buffer_limit: DEFAULT_BUFFER_LIMIT,
+};
+
+impl Default for MultipartConfig {
+    fn default() -> Self {
+        DEFAULT_CONFIG
+    }
+}
 
 /// Streaming parser for a `multipart/*` request body.
 ///
@@ -31,10 +88,14 @@ const MAX_HEADERS: usize = 32;
 /// dropped first, polling the surviving field returns [`MultipartError::NotConsumed`].
 ///
 /// Part-header blocks and boundary/preamble lines are limited to 16 KiB including
-/// delimiters; a part may have at most 32 headers. Field bodies have no aggregate
-/// size limit here; use [`MultipartForm`](struct@crate::MultipartForm) for reader-managed limits.
+/// delimiters; a part may have at most 32 headers. The parser buffers at most
+/// [`MultipartConfig::buffer_limit`] unprocessed body bytes (64 KiB by default).
+/// Field bodies have no aggregate size limit here; use
+/// [`MultipartForm`](struct@crate::MultipartForm) for reader-managed limits.
 /// In boundary-delimited bodies, a boundary prefix ends a field only when followed
-/// by CRLF or `--`. A closing boundary does not require a trailing CRLF.
+/// by `--`, or by CRLF after optional transport padding (spaces and tabs, RFC 2046
+/// §5.1.1). Delimiter lines accept the same padding before their line break, and a
+/// closing boundary does not require a trailing CRLF.
 ///
 /// # Errors
 ///
@@ -76,15 +137,26 @@ struct InnerMultipart {
 }
 
 impl Multipart {
-    /// Creates a parser from the request headers and a stream of body chunks.
+    /// Creates a parser from the request headers and a stream of body chunks,
+    /// using the default [`MultipartConfig`].
     ///
     /// The `Content-Type` must be a parseable `multipart/*` media type with a
-    /// `boundary` parameter. Validation failures are stored, not returned here.
+    /// `boundary` parameter that follows RFC 2046: 1 to 70 letters, digits, spaces,
+    /// or `'()+_,-./:=?`, not ending with a space. Validation failures are stored,
+    /// not returned here.
     ///
     /// The first stream item reports [`MultipartError::NoContentType`],
     /// [`MultipartError::ParseContentType`], [`MultipartError::IncompatibleContentType`],
     /// or [`MultipartError::Boundary`] if request-header validation fails.
     pub fn new<S>(headers: &HeaderMap, stream: S) -> Multipart
+    where
+        S: Stream<Item = Result<Bytes, PayloadError>> + Unpin + 'static,
+    {
+        Self::with_config(headers, stream, &DEFAULT_CONFIG)
+    }
+
+    /// Creates a parser like [`Multipart::new`], using the given configuration.
+    pub fn with_config<S>(headers: &HeaderMap, stream: S, config: &MultipartConfig) -> Multipart
     where
         S: Stream<Item = Result<Bytes, PayloadError>> + Unpin + 'static,
     {
@@ -95,7 +167,10 @@ impl Multipart {
                 inner: Some(Rc::new(RefCell::new(InnerMultipart {
                     boundary,
                     content_type: ct,
-                    payload: PayloadRef::new(PayloadBuffer::new(Box::new(stream))),
+                    payload: PayloadRef::new(PayloadBuffer::with_limit(
+                        Box::new(stream),
+                        config.buffer_limit,
+                    )),
                     state: InnerState::FirstBoundary,
                     item: InnerMultipartItem::None,
                 }))),
@@ -114,7 +189,9 @@ impl Multipart {
             if let Ok(content_type) = content_type.to_str() {
                 if let Ok(ct) = content_type.parse::<Mime>() {
                     if ct.type_() == mime::MULTIPART {
-                        if let Some(boundary) = ct.get_param(mime::BOUNDARY) {
+                        if let Some(boundary) = ct.get_param(mime::BOUNDARY)
+                            && is_valid_boundary(boundary.as_str())
+                        {
                             Ok((ct.clone(), boundary.as_str().to_owned()))
                         } else {
                             Err(MultipartError::Boundary)
@@ -158,7 +235,15 @@ impl Stream for Multipart {
             if let Some(mut payload) = inner.payload.get_mut(&this.safety) {
                 payload.poll_stream(cx)?;
             }
-            inner.poll(&this.safety, cx)
+            let res = inner.poll(&this.safety, cx);
+            if res.is_pending()
+                && let Some(payload) = inner.payload.get_mut(&this.safety)
+                && payload.is_full()
+            {
+                // a boundary line or header block does not fit in the buffer
+                return Poll::Ready(Some(Err(PayloadError::Overflow.into())));
+            }
+            res
         } else if !self.safety.is_clean() {
             Poll::Ready(Some(Err(MultipartError::NotConsumed)))
         } else {
@@ -217,17 +302,21 @@ impl InnerMultipart {
                 }
             }
             Some(chunk) => {
-                if chunk.len() < boundary.len() + 4
-                    || &chunk[..2] != b"--"
-                    || &chunk[2..boundary.len() + 2] != boundary.as_bytes()
+                let Some(rest) = chunk
+                    .strip_prefix(b"--")
+                    .and_then(|c| c.strip_prefix(boundary.as_bytes()))
+                else {
+                    return Err(MultipartError::Boundary);
+                };
+                // an intermediate delimiter needs CRLF, preceded only by padding
+                if let Some(padding) = rest.strip_suffix(b"\r\n")
+                    && trim_transport_padding(padding).is_empty()
                 {
-                    Err(MultipartError::Boundary)
-                } else if &chunk[boundary.len() + 2..] == b"\r\n" {
-                    Ok(Some(false))
-                } else if &chunk[boundary.len() + 2..boundary.len() + 4] == b"--"
-                    && (chunk.len() == boundary.len() + 4
-                        || &chunk[boundary.len() + 4..] == b"\r\n")
-                {
+                    return Ok(Some(false));
+                }
+                // a closing delimiter may omit CRLF at eof
+                let rest = rest.strip_suffix(b"\r\n").unwrap_or(rest);
+                if trim_transport_padding(rest) == b"--" {
                     Ok(Some(true))
                 } else {
                     Err(MultipartError::Boundary)
@@ -245,6 +334,7 @@ impl InnerMultipart {
                 Some(chunk) => {
                     let line = chunk.strip_suffix(b"\n").unwrap_or(&chunk);
                     let line = line.strip_suffix(b"\r").unwrap_or(line);
+                    let line = trim_transport_padding(line);
                     if let Some(rest) = line
                         .strip_prefix(b"--")
                         .and_then(|l| l.strip_prefix(boundary.as_bytes()))
@@ -391,9 +481,11 @@ impl InnerMultipart {
                 return Poll::Ready(Some(Err(MultipartError::Nested)));
             }
 
+            let search = BoundarySearch::new(&self.boundary, field_content_type.as_ref());
             let field = Rc::new(RefCell::new(InnerField::new(
                 self.payload.clone(),
                 self.boundary.clone(),
+                search,
                 &headers,
             )?));
             self.item = InnerMultipartItem::Field(Rc::clone(&field));
@@ -415,6 +507,16 @@ impl Drop for InnerMultipart {
         // InnerMultipartItem::Field has to be dropped first because of Safety.
         self.item = InnerMultipartItem::None;
     }
+}
+
+/// Strips the transport padding (spaces and tabs) that RFC 2046 §5.1.1 allows
+/// between a boundary delimiter and its line break.
+fn trim_transport_padding(line: &[u8]) -> &[u8] {
+    let end = line
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t')
+        .map_or(0, |i| i + 1);
+    &line[..end]
 }
 
 #[cfg(test)]
@@ -469,6 +571,49 @@ mod tests {
             Multipart::boundary(&headers).unwrap().1,
             "5c02368e880e436dab70ed54e1c58209"
         );
+    }
+
+    /// STATEMENT: Only boundaries matching RFC 2046 (1 to 70 `bchars`, not ending with a space) are accepted.
+    ///
+    /// HOW:
+    /// - Parse `Content-Type` headers whose boundaries use every `bchars` punctuation character, an inner
+    ///   space, and exactly 70 characters; confirm each value is returned.
+    /// - Parse empty, 71-character, trailing-space, and non-`bchars` boundaries that `mime` accepts;
+    ///   confirm each fails with `Boundary`.
+    #[ntex::test]
+    async fn boundary_syntax_follows_rfc_2046() {
+        let boundary = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(&format!("multipart/form-data; boundary={value}")).unwrap(),
+            );
+            Multipart::boundary(&headers).map(|(_, b)| b)
+        };
+        let max = "b".repeat(MAX_BOUNDARY_LEN);
+
+        for (value, expected) in [
+            ("\"a'()+_,-./:=?Z9\"", "a'()+_,-./:=?Z9"),
+            ("\"a b\"", "a b"),
+            (max.as_str(), max.as_str()),
+        ] {
+            assert_eq!(boundary(value).unwrap(), expected, "{value}");
+        }
+
+        for value in [
+            "",
+            &format!("{max}b"),
+            "\"a \"",
+            "a!b",
+            "a*b",
+            "a#b",
+            "\"a;b\"",
+        ] {
+            assert!(
+                matches!(boundary(value), Err(MultipartError::Boundary)),
+                "{value}"
+            );
+        }
     }
 
     fn create_stream() -> (
@@ -933,7 +1078,8 @@ mod tests {
     /// STATEMENT: Boundary delimiters with wrong names or trailing garbage are rejected after length-delimited data.
     ///
     /// HOW:
-    /// - Read a valid four-byte field followed by short, wrong, truncated, or garbage-suffixed delimiter lines.
+    /// - Read a valid four-byte field followed by short, wrong, truncated, or garbage-suffixed delimiter lines,
+    ///   including garbage after transport padding and padding before the closing `--`.
     /// - Confirm field data is intact and advancing to the next field returns `Boundary`.
     #[ntex::test]
     async fn malformed_following_boundaries_are_rejected() {
@@ -943,6 +1089,10 @@ mod tests {
             "--abc-extra\r\n",
             "--abc--garbage\r\n",
             "--ab",
+            "--abc \tx\r\n",
+            "--abc --\r\n",
+            "--abc-- x\r\n",
+            "--abc \t",
         ] {
             let mut multipart = multipart_body(format!(
                 "--abc\r\nContent-Disposition: form-data; name=\"f\"\r\nContent-Length: 4\r\n\r\ndata\r\n{closing}"
@@ -975,6 +1125,89 @@ mod tests {
         assert_eq!(get_whole_field(&mut field).await, data);
         drop(field);
         assert!(multipart.next().await.is_none());
+    }
+
+    /// STATEMENT: Spaces and tabs between a boundary delimiter and its line break are accepted as RFC 2046 transport padding.
+    ///
+    /// HOW:
+    /// - Build a body with padded opening, intermediate, and closing delimiters around unknown-length and
+    ///   `Content-Length` fields.
+    /// - Parse it from one chunk and byte-by-byte with pending polls.
+    /// - Confirm each field's name and data, then the end of the stream.
+    #[ntex::test]
+    async fn transport_padding_after_delimiters_is_accepted() {
+        let body = "--abc  \r\n\
+             Content-Disposition: form-data; name=\"first\"\r\n\r\n\
+             test\r\n--abc\t\r\n\
+             Content-Disposition: form-data; name=\"second\"\r\nContent-Length: 4\r\n\r\n\
+             data\r\n--abc \t\r\n\
+             Content-Disposition: form-data; name=\"third\"\r\n\r\n\
+             last\r\n--abc-- \t\r\n";
+        let fragmented = stream::iter(body.as_bytes().to_vec())
+            .map(|byte| Ok(Bytes::copy_from_slice(&[byte])))
+            .interleave_pending();
+        for mut multipart in [
+            multipart_body(body),
+            Multipart::new(&form_data_headers("abc"), fragmented),
+        ] {
+            for (name, data) in [("first", "test"), ("second", "data"), ("third", "last")] {
+                let mut field = multipart.next().await.unwrap().unwrap();
+                assert_eq!(field.name(), Some(name));
+                assert_eq!(get_whole_field(&mut field).await, data);
+            }
+            assert!(multipart.next().await.is_none());
+        }
+    }
+
+    /// STATEMENT: In unknown-length fields, a boundary followed by padding and anything other than CRLF stays field data.
+    ///
+    /// HOW:
+    /// - Build a field whose data contains `\r\n--abc` followed by padding and a non-CRLF byte, and by
+    ///   padding before `--`.
+    /// - Parse it from one chunk and byte-by-byte with pending polls.
+    /// - Confirm the whole data is returned and the closing boundary ends the stream.
+    #[ntex::test]
+    async fn padded_boundary_like_data_is_preserved() {
+        let data = "a\r\n--abc \tX\r\n--abc --b\r\n--abc \rc";
+        let body =
+            format!("--abc\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n{data}\r\n--abc--");
+        let fragmented = stream::iter(body.clone().into_bytes())
+            .map(|byte| Ok(Bytes::copy_from_slice(&[byte])))
+            .interleave_pending();
+        for mut multipart in [
+            multipart_body(body),
+            Multipart::new(&form_data_headers("abc"), fragmented),
+        ] {
+            let mut field = multipart.next().await.unwrap().unwrap();
+            assert_eq!(get_whole_field(&mut field).await, data);
+            drop(field);
+            assert!(multipart.next().await.is_none());
+        }
+    }
+
+    /// STATEMENT: Unterminated transport padding after a boundary in field data is bounded by `MAX_LINE_SIZE`.
+    ///
+    /// HOW:
+    /// - Keep the stream open and send an unknown-length field followed by `\r\n--abc` and
+    ///   `MAX_LINE_SIZE` spaces without a line break.
+    /// - Confirm the data before the delimiter is returned and the next read fails with
+    ///   `PayloadError::Overflow` instead of waiting for more data.
+    #[ntex::test]
+    async fn unterminated_delimiter_padding_overflows() {
+        let (sender, payload) = create_stream();
+        let mut body =
+            b"--abc\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\ndata\r\n--abc".to_vec();
+        body.resize(body.len() + crate::payload::MAX_LINE_SIZE, b' ');
+        sender.send(Ok(Bytes::from(body))).unwrap();
+
+        let mut multipart = Multipart::new(&form_data_headers("abc"), payload);
+        let mut field = multipart.next().await.unwrap().unwrap();
+        assert_eq!(field.next().await.unwrap().unwrap(), "data");
+        assert!(matches!(
+            field.next().await,
+            Some(Err(MultipartError::Payload(PayloadError::Overflow)))
+        ));
+        drop(sender);
     }
 
     /// STATEMENT: A live field prevents advancing the parent stream, and dropping it drains unread data before yielding the next field.
@@ -1326,5 +1559,246 @@ mod tests {
             Some(Err(MultipartError::NoContentType))
         ));
         assert!(multipart.next().await.is_none());
+    }
+
+    /// STATEMENT: A body parses identically for every buffer limit that fits its header blocks,
+    /// and field chunks never exceed the limit.
+    ///
+    /// HOW:
+    /// - Parse a two-part body with each limit from 44 bytes, the header-block size, to past
+    ///   the body length, delivered as one chunk and as one-byte chunks with pending polls.
+    /// - Confirm every run yields the same field names and data with no chunk longer than
+    ///   the limit, including runs where a delimiter starts a full buffer.
+    #[ntex::test]
+    async fn fields_parse_with_any_sufficient_buffer_limit() {
+        let a = "a\r\n-a\r".repeat(10);
+        let b = "0123456789".repeat(15);
+        let body = format!(
+            "--abc\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n{a}\r\n\
+             --abc\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\n{b}\r\n--abc--\r\n"
+        );
+        let expected = [("a", a.as_bytes()), ("b", b.as_bytes())];
+        let headers = form_data_headers("abc");
+
+        for limit in 44..body.len() + 2 {
+            let config = MultipartConfig::new().buffer_limit(limit);
+            for chunked in [false, true] {
+                let mut multipart = if chunked {
+                    let chunks: Vec<_> = body
+                        .bytes()
+                        .map(|b| Ok(Bytes::copy_from_slice(&[b])))
+                        .collect();
+                    Multipart::with_config(
+                        &headers,
+                        stream::iter(chunks).interleave_pending(),
+                        &config,
+                    )
+                } else {
+                    Multipart::with_config(
+                        &headers,
+                        stream::iter([Ok(body.clone().into())]),
+                        &config,
+                    )
+                };
+
+                let mut fields = Vec::new();
+                while let Some(field) = multipart.next().await {
+                    let mut field = field.unwrap_or_else(|e| panic!("limit {limit}: {e:?}"));
+                    let mut data = Vec::new();
+                    while let Some(chunk) = field.next().await {
+                        let chunk = chunk.unwrap_or_else(|e| panic!("limit {limit}: {e:?}"));
+                        assert!(chunk.len() <= limit, "limit {limit}");
+                        data.extend_from_slice(&chunk);
+                    }
+                    fields.push((field.name().unwrap().to_owned(), data));
+                }
+                assert_eq!(fields.len(), expected.len(), "limit {limit}");
+                for ((name, data), (exp_name, exp_data)) in fields.iter().zip(expected) {
+                    assert_eq!((name.as_str(), data.as_slice()), (exp_name, exp_data));
+                }
+            }
+        }
+    }
+
+    /// STATEMENT: A preamble line, header block, or delimiter line that does not fit the buffer
+    /// limit is rejected with `PayloadError::Overflow`, and a zero limit rejects any body.
+    ///
+    /// HOW:
+    /// - With a 48-byte limit, parse bodies with a 60-byte preamble line, a 73-byte header block,
+    ///   and a delimiter followed by 60 bytes of transport padding.
+    /// - With a zero limit, parse a valid body.
+    /// - Poll each stream at most 100 times and confirm it yields `Payload(Overflow)` rather than
+    ///   data or endless self-wakeups.
+    #[ntex::test]
+    async fn lines_exceeding_buffer_limit_overflow() {
+        async fn overflows<S, T>(stream: &mut S) -> bool
+        where
+            S: Stream<Item = Result<T, MultipartError>> + Unpin,
+        {
+            // a parser that cannot progress keeps waking itself, so bound the polls
+            for _ in 0..100 {
+                if let Poll::Ready(res) = futures::poll!(stream.next()) {
+                    return matches!(
+                        res,
+                        Some(Err(MultipartError::Payload(PayloadError::Overflow)))
+                    );
+                }
+            }
+            panic!("parser does not make progress");
+        }
+        let headers = form_data_headers("abc");
+        let part = "--abc\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ndata\r\n";
+        let limited = |body: String, limit| {
+            Multipart::with_config(
+                &headers,
+                stream::iter([Ok(Bytes::from(body))]),
+                &MultipartConfig::new().buffer_limit(limit),
+            )
+        };
+
+        let preamble = format!("{}\r\n{part}--abc--\r\n", "x".repeat(60));
+        assert!(overflows(&mut limited(preamble, 48)).await);
+
+        let header_block = format!(
+            "--abc\r\nContent-Disposition: form-data; name=\"a\"\r\nX-Pad: {}\r\n\r\n\
+             data\r\n--abc--\r\n",
+            "p".repeat(20)
+        );
+        assert!(overflows(&mut limited(header_block, 48)).await);
+
+        let padding = format!("{part}--abc{}\r\n--abc--\r\n", " ".repeat(60));
+        let mut multipart = limited(padding, 48);
+        let mut field = multipart.next().await.unwrap().unwrap();
+        assert_eq!(field.next().await.unwrap().unwrap(), "data");
+        assert!(overflows(&mut field).await);
+
+        assert!(overflows(&mut limited(format!("{part}--abc--\r\n"), 0)).await);
+    }
+
+    async fn read_fields(mut multipart: Multipart) -> Vec<(Vec<u8>, usize)> {
+        let mut fields = Vec::new();
+        while let Some(field) = multipart.next().await {
+            let mut field = field.unwrap();
+            let (mut data, mut chunks) = (Vec::new(), 0);
+            while let Some(chunk) = field.next().await {
+                data.extend_from_slice(&chunk.unwrap());
+                chunks += 1;
+            }
+            fields.push((data, chunks));
+        }
+        fields
+    }
+
+    fn typed_parts(boundary: &str, content_type: Option<&str>, data: &str) -> String {
+        let ct = content_type.map_or(String::new(), |ct| format!("Content-Type: {ct}\r\n"));
+        let part = |name| {
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n{ct}\r\n\
+                 {data}\r\n"
+            )
+        };
+        format!("{}{}--{boundary}--\r\n", part("a"), part("b"))
+    }
+
+    /// STATEMENT: Field data containing near-miss delimiters parses the same with the CR search
+    /// and the marker search, for boundaries with and without leading dashes.
+    ///
+    /// HOW:
+    /// - For boundaries `abc`, `--abc`, `----WebKitFormBoundary7MA4`, `--` and `-`, build 200
+    ///   pseudo-random values from CR, LF, dash, padding and boundary fragments, skipping values
+    ///   that contain a real delimiter.
+    /// - Parse each value as two `text/plain` fields (CR search) and two
+    ///   `application/octet-stream` fields (marker search), delivered whole and in 1- and 7-byte
+    ///   chunks with pending polls.
+    /// - Confirm every field yields exactly the generated value.
+    #[test]
+    fn near_miss_delimiters_parse_the_same_with_both_searches() {
+        futures::executor::block_on(near_miss_delimiters());
+    }
+
+    async fn near_miss_delimiters() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut rand = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+
+        for boundary in ["abc", "--abc", "----WebKitFormBoundary7MA4", "--", "-"] {
+            let delimiter = format!("\r\n--{boundary}");
+            let mut fragments = vec!["\r", "\n", "\r\n", "-", "--", "\r\n--", " ", "\t", "x"];
+            fragments.extend([boundary, &boundary[..1], &boundary[..boundary.len() - 1]]);
+            let headers = form_data_headers(boundary);
+
+            let mut tested = 0;
+            while tested < 200 {
+                let data: String = (0..rand(12))
+                    .map(|_| fragments[rand(fragments.len())])
+                    .collect();
+                // the value is followed by a delimiter, so its end acts as CRLF
+                let real = data.match_indices(&delimiter).any(|(i, _)| {
+                    let rest = &data[i + delimiter.len()..];
+                    let line = rest.trim_start_matches([' ', '\t']);
+                    line.is_empty()
+                        || line.starts_with("\r\n")
+                        || (line.len() == rest.len() && line.starts_with("--"))
+                });
+                if real {
+                    continue;
+                }
+                tested += 1;
+
+                for ct in ["text/plain", "application/octet-stream"] {
+                    let body = typed_parts(boundary, Some(ct), &data);
+                    for size in [body.len(), 1, 7] {
+                        let chunks: Vec<_> = body
+                            .as_bytes()
+                            .chunks(size)
+                            .map(|c| Ok(Bytes::copy_from_slice(c)))
+                            .collect();
+                        let stream = stream::iter(chunks).interleave_pending();
+                        let fields = read_fields(Multipart::new(&headers, stream)).await;
+                        assert_eq!(fields.len(), 2, "{boundary:?} {ct} {size} {data:?}");
+                        for (value, _) in fields {
+                            assert_eq!(value, data.as_bytes(), "{boundary:?} {ct} {size}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// STATEMENT: The field content type selects the search: text, JSON, XML and YAML fields
+    /// stop at every CR, while binary, CSV, SQL and untyped fields skip CRs that cannot start
+    /// the delimiter.
+    ///
+    /// HOW:
+    /// - Send one body chunk whose fields hold fifty `\r\n--x` near-misses, once per content type.
+    /// - Confirm the data is intact and arrives in fifty chunks under the CR search, one per
+    ///   rejected `\r\n--` candidate, and in a single chunk under the marker search.
+    #[ntex::test]
+    async fn content_type_selects_boundary_search() {
+        let data = "\r\n--x".repeat(50);
+        let cases = [
+            (Some("text/plain"), 50),
+            (Some("application/json"), 50),
+            (Some("application/ld+json"), 50),
+            (Some("image/svg+xml"), 50),
+            (Some("application/yaml"), 50),
+            (Some("text/csv"), 1),
+            (Some("application/sql"), 1),
+            (Some("application/octet-stream"), 1),
+            (None, 1),
+        ];
+        for (ct, expected) in cases {
+            let body = typed_parts("abc", ct, &data);
+            let fields = read_fields(multipart_body(body)).await;
+            assert_eq!(fields.len(), 2);
+            for (value, chunks) in fields {
+                assert_eq!(value, data.as_bytes());
+                assert_eq!(chunks, expected, "{ct:?}");
+            }
+        }
     }
 }

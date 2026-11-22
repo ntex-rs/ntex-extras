@@ -26,7 +26,6 @@ cookie-session = ["cookie/secure", "ntex/cookie"]
 ntex = { workspace = true }
 cookie = { workspace = true }
 derive_more = { workspace = true }
-futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
