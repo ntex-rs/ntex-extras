@@ -18,10 +18,10 @@ ntex-multipart-derive = { path = "ntex-multipart-derive" }
 ntex-session = { path = "ntex-session" }
 
 [workspace.dependencies]
-ntex = "4.8"
-ntex-http = "2.1"
+ntex = "4.10"
+ntex-http = "2.2"
 
-ntex-files = "4.5.0"
+ntex-files = "4.6.0"
 ntex-multipart = "4.1.0"
 ntex-multipart-derive = "4.1.0"
 

@@ -27,6 +27,7 @@ enum DuplicateField {
 struct MultipartFormAttrs {
     deny_unknown_fields: bool,
     duplicate_field: DuplicateField,
+    max_parts: Option<usize>,
 }
 
 #[allow(clippy::disallowed_names)] // false positive in macro expansion
@@ -107,6 +108,10 @@ struct ParsedField<'t> {
 ///   with `MultipartError::DuplicateField`, not `UnknownField`.
 /// - `#[multipart(duplicate_field = "replace")]` reads every scalar occurrence and
 ///   retains the last value. Every processed occurrence consumes reader budgets.
+/// - `#[multipart(max_parts = N)]` lowers the number of parts this form accepts.
+///   The lower of `N` and the [`MultipartFormConfig`] limit (100 by default)
+///   applies. Every part counts, including empty, unknown, and ignored parts;
+///   exceeding the limit returns `MultipartError::TooManyParts`.
 ///
 /// The duplicate policy is form-wide, not a field attribute. `Vec<T>` and
 /// `Option<Vec<T>>` always collect all occurrences, regardless of this policy.
@@ -117,7 +122,7 @@ struct ParsedField<'t> {
 /// use ntex_multipart::form::text::Text;
 ///
 /// #[derive(MultipartForm)]
-/// #[multipart(deny_unknown_fields, duplicate_field = "deny")]
+/// #[multipart(deny_unknown_fields, duplicate_field = "deny", max_parts = 10)]
 /// struct Upload {
 ///     title: Text<String>,
 /// }
@@ -232,6 +237,15 @@ fn expand(input: syn::DeriveInput) -> proc_macro2::TokenStream {
         DuplicateField::Replace => quote!(::ntex_multipart::form::DuplicateField::Replace),
     };
 
+    // max_parts() override; the trait default defers to the configured limit
+    let max_parts_impl = attrs.max_parts.map(|max_parts| {
+        quote!(
+            fn max_parts() -> ::std::option::Option<usize> {
+                ::std::option::Option::Some(#max_parts)
+            }
+        )
+    });
+
     // limit() implementation
     let mut limit_impl = quote!();
     for field in &parsed {
@@ -268,6 +282,8 @@ fn expand(input: syn::DeriveInput) -> proc_macro2::TokenStream {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let generation = quote! {
         impl #impl_generics ::ntex_multipart::MultipartCollect for #name #ty_generics #where_clause {
+            #max_parts_impl
+
             fn limit(field_name: &str) -> ::std::option::Option<usize> {
                 match field_name {
                     #limit_impl

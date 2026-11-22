@@ -616,6 +616,83 @@ async fn form_limits_accumulate_across_fields() {
     }
 }
 
+#[derive(MultipartForm)]
+#[multipart(max_parts = 2)]
+struct TwoParts {
+    name: Vec<Bytes>,
+}
+
+/// STATEMENT: The default 100-part limit counts every part, including empty, unknown, and ignored ones.
+///
+/// HOW:
+/// - Submit 100 empty parts cycling through a collected `name`, an unknown name, and a repeated scalar `tail`.
+/// - Confirm extraction succeeds and collects all 34 `name` parts.
+/// - Add one more empty part and confirm extraction fails with `TooManyParts`.
+#[ntex::test]
+async fn default_part_limit_counts_every_part() {
+    let parts = ["name", "unknown", "tail"]
+        .into_iter()
+        .cycle()
+        .take(101)
+        .map(|name| Part::new(name, b""))
+        .collect::<Vec<_>>();
+
+    let form = extract::<LimitedCollection>(multipart_request(&parts[..100]))
+        .await
+        .unwrap();
+    assert_eq!(form.name.len(), 34);
+    assert!(matches!(
+        extract::<LimitedCollection>(multipart_request(&parts)).await,
+        Err(MultipartError::TooManyParts)
+    ));
+}
+
+/// STATEMENT: The lower of the configured and form-level part limits applies, and a zero limit rejects any part.
+///
+/// HOW:
+/// - Extract `TwoParts` (`max_parts = 2`) under the default config and under `max_parts(3)`; two parts pass and three fail.
+/// - Lower the config to `max_parts(1)` and confirm two parts fail.
+/// - Set `max_parts(0)` and confirm a body with no parts passes while a single part fails.
+#[ntex::test]
+async fn lower_of_config_and_form_part_limits_applies() {
+    let parts = [
+        Part::new("name", b"a"),
+        Part::new("name", b"b"),
+        Part::new("name", b"c"),
+    ];
+    for config in [
+        MultipartFormConfig::default(),
+        MultipartFormConfig::default().max_parts(3),
+    ] {
+        let form = extract::<TwoParts>(multipart_request(&parts[..2]).app_value(config.clone()))
+            .await
+            .unwrap();
+        assert_eq!(form.name.len(), 2);
+        assert!(matches!(
+            extract::<TwoParts>(multipart_request(&parts).app_value(config)).await,
+            Err(MultipartError::TooManyParts)
+        ));
+    }
+
+    assert!(matches!(
+        extract::<TwoParts>(
+            multipart_request(&parts[..2]).app_value(MultipartFormConfig::default().max_parts(1))
+        )
+        .await,
+        Err(MultipartError::TooManyParts)
+    ));
+
+    let zero = MultipartFormConfig::default().max_parts(0);
+    let form = extract::<TwoParts>(multipart_request(&[]).app_value(zero.clone()))
+        .await
+        .unwrap();
+    assert!(form.name.is_empty());
+    assert!(matches!(
+        extract::<TwoParts>(multipart_request(&parts[..1]).app_value(zero)).await,
+        Err(MultipartError::TooManyParts)
+    ));
+}
+
 /// STATEMENT: Typed forms reject absent, malformed, and incompatible request media types or missing boundaries.
 ///
 /// HOW:

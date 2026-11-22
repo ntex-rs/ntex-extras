@@ -77,12 +77,18 @@ where
 
         let config = MultipartFormConfig::from_req(req);
         let mut limits = Limits::new(config.total_limit, config.memory_limit);
+        let mut parts_remaining =
+            T::max_parts().map_or(config.max_parts, |max| max.min(config.max_parts));
         let mut state = State::default();
 
         // ensure limits are shared for all fields with this name
         let mut field_limits = HashMap::<String, Option<usize>>::default();
 
         while let Some(field) = multipart.try_next().await? {
+            parts_remaining = parts_remaining
+                .checked_sub(1)
+                .ok_or(MultipartError::TooManyParts)?;
+
             // Retrieve the limit for this field
             let entry = field_limits
                 .entry(field.form_field_name.clone())

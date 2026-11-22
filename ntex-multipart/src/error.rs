@@ -44,6 +44,12 @@ pub enum MultipartError {
     #[display("Multipart stream is incomplete")]
     Incomplete,
 
+    /// A typed form received more parts than its part limit.
+    ///
+    /// See [`MultipartFormConfig::max_parts`](crate::MultipartFormConfig::max_parts).
+    #[display("Multipart form has too many parts")]
+    TooManyParts,
+
     /// A part-header block could not be decoded, including more than 32 headers.
     #[display("{}", _0)]
     Decode(

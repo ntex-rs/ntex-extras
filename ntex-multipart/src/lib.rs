@@ -95,8 +95,11 @@
 //! [`Limits`](form::Limits); framing, headers, and ignored fields are not counted.
 //! These are byte-accounting limits, not caps on the parser's buffering or on
 //! deserialized allocations. A derived `#[multipart(limit = "...")]` budget is
-//! shared by all processed occurrences of the same field name. Unknown fields and
-//! duplicate scalar fields are ignored by default; the derive attributes can
+//! shared by all processed occurrences of the same field name. A form accepts at
+//! most 100 parts by default, counting empty, unknown, and ignored parts.
+//! [`MultipartFormConfig::max_parts`] changes that limit, and a derived
+//! `#[multipart(max_parts = N)]` attribute can lower it for one form. Unknown
+//! fields and duplicate scalar fields are ignored by default; the derive attributes can
 //! reject them, or replace scalar fields with the last occurrence. See the
 //! [derive documentation](https://docs.rs/ntex-multipart-derive/latest/ntex_multipart_derive/derive.MultipartForm.html)
 //! for all supported attributes.

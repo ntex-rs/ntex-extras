@@ -1,5 +1,9 @@
 # Changes
 
+## [Unreleased]
+
+* Add the `#[multipart(max_parts = N)]` struct attribute to lower a form's part limit
+
 ## [4.2.0] - 2026-11-06
 
 * Report size limits that do not fit in `usize` as a compile error instead of panicking
