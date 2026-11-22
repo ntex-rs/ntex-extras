@@ -11,6 +11,7 @@
 use std::any::Any;
 
 use derive_more::{Deref, DerefMut};
+use futures::TryStreamExt;
 use ntex::{http::error::PayloadError, util::HashMap, web::HttpRequest};
 
 pub mod bytes;
@@ -67,7 +68,8 @@ pub trait FieldGroupReader: Sized + Any {
     ///
     /// Returns reader errors, or [`MultipartError::DuplicateField`] when a scalar
     /// group already has a value and `duplicate_field` is [`DuplicateField::Deny`].
-    /// Ignored scalar duplicates are dropped without invoking the reader.
+    /// Ignored scalar duplicates are drained with [`discard_field`] without
+    /// invoking the reader.
     ///
     /// # Panics
     ///
@@ -111,7 +113,7 @@ where
     ) -> Result<(), MultipartError> {
         if state.contains_key(&field.form_field_name) {
             match duplicate_field {
-                DuplicateField::Ignore => return Ok(()),
+                DuplicateField::Ignore => return discard_field(field, limits).await,
 
                 DuplicateField::Deny => {
                     return Err(MultipartError::DuplicateField(field.form_field_name));
@@ -180,7 +182,7 @@ where
     ) -> Result<(), MultipartError> {
         if state.contains_key(&field.form_field_name) {
             match duplicate_field {
-                DuplicateField::Ignore => return Ok(()),
+                DuplicateField::Ignore => return discard_field(field, limits).await,
 
                 DuplicateField::Deny => {
                     return Err(MultipartError::DuplicateField(field.form_field_name));
@@ -243,7 +245,8 @@ where
 /// Policy for repeated scalar fields in a derived form; vector groups ignore it.
 #[doc(hidden)]
 pub enum DuplicateField {
-    /// Keeps the first value; later occurrences bypass the reader and are drained.
+    /// Keeps the first value; later occurrences bypass the reader and are drained
+    /// with [`discard_field`].
     Ignore,
 
     /// Rejects a second scalar occurrence with [`MultipartError::DuplicateField`].
@@ -256,10 +259,11 @@ pub enum DuplicateField {
 /// Remaining byte budgets for a form and its current field name.
 ///
 /// Readers must debit these with [`Self::try_consume_limits`]. The counters measure
-/// body bytes processed by readers, not framing, parser buffers, or deserialized
-/// allocations. Ignored parts are drained without debiting these counters.
+/// body bytes processed by readers or drained by [`discard_field`], not framing,
+/// parser buffers, or deserialized allocations.
 pub struct Limits {
-    /// Remaining body bytes across all processed fields, including disk-backed fields.
+    /// Remaining body bytes across all processed fields, including disk-backed and
+    /// discarded fields.
     pub total_limit_remaining: usize,
     /// Remaining body bytes that readers may count as in-memory data.
     pub memory_limit_remaining: usize,
@@ -320,4 +324,23 @@ impl Limits {
 
         Ok(())
     }
+}
+
+/// Drains a part that will not be retained, debiting its body bytes from `limits`.
+///
+/// The bytes count toward the total and current field-name budgets, but not the
+/// memory budget. Derived forms use this for unknown parts and ignored scalar
+/// duplicates; manual [`MultipartCollect`](crate::MultipartCollect)
+/// implementations can use it for parts they skip. Dropping an unread [`Field`]
+/// also drains it, but without debiting any budget.
+///
+/// # Errors
+///
+/// Returns stream errors from `field`, or [`MultipartError::Payload`] containing
+/// [`PayloadError::Overflow`] if a budget would be exceeded.
+pub async fn discard_field(mut field: Field, limits: &mut Limits) -> Result<(), MultipartError> {
+    while let Some(chunk) = field.try_next().await? {
+        limits.try_consume_limits(chunk.len(), false)?;
+    }
+    Ok(())
 }

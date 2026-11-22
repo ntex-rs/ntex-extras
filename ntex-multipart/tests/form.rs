@@ -617,6 +617,80 @@ async fn form_limits_accumulate_across_fields() {
 }
 
 #[derive(MultipartForm)]
+struct LimitedScalar {
+    #[multipart(limit = "4 B")]
+    name: Bytes,
+}
+
+/// STATEMENT: Ignored unknown and duplicate parts debit the total budget but not the memory budget.
+///
+/// HOW:
+/// - Under a six-byte total and two-byte memory limit, submit a two-byte `name`, a three-byte unknown part, and a one-byte duplicate `name`.
+/// - Confirm extraction succeeds with the first value, so the four ignored bytes were not charged to memory.
+/// - Confirm a five-byte unknown part, or a three-byte duplicate after a one-byte `name` and three-byte unknown part, exceeds the total limit with overflow.
+#[ntex::test]
+async fn ignored_parts_debit_the_total_budget() {
+    let config = || {
+        MultipartFormConfig::default()
+            .total_limit(6)
+            .memory_limit(2)
+    };
+    let form = extract::<LimitedScalar>(
+        multipart_request(&[
+            Part::new("name", b"ab"),
+            Part::new("unknown", b"abc"),
+            Part::new("name", b"a"),
+        ])
+        .app_value(config()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(form.name.data, "ab");
+
+    assert_overflow(
+        extract::<LimitedScalar>(
+            multipart_request(&[Part::new("name", b"ab"), Part::new("unknown", b"abcde")])
+                .app_value(config()),
+        )
+        .await,
+    );
+    assert_overflow(
+        extract::<LimitedScalar>(
+            multipart_request(&[
+                Part::new("name", b"a"),
+                Part::new("unknown", b"abc"),
+                Part::new("name", b"abc"),
+            ])
+            .app_value(config()),
+        )
+        .await,
+    );
+}
+
+/// STATEMENT: An ignored duplicate debits the field limit shared with the retained value.
+///
+/// HOW:
+/// - Submit a two-byte `name` and a two-byte duplicate under a four-byte field limit and confirm the first value is kept.
+/// - Make the duplicate three bytes and confirm the shared field limit overflows.
+#[ntex::test]
+async fn ignored_duplicates_debit_the_field_budget() {
+    let form = extract::<LimitedScalar>(multipart_request(&[
+        Part::new("name", b"ab"),
+        Part::new("name", b"cd"),
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(form.name.data, "ab");
+    assert_overflow(
+        extract::<LimitedScalar>(multipart_request(&[
+            Part::new("name", b"ab"),
+            Part::new("name", b"cde"),
+        ]))
+        .await,
+    );
+}
+
+#[derive(MultipartForm)]
 #[multipart(max_parts = 2)]
 struct TwoParts {
     name: Vec<Bytes>,

@@ -40,7 +40,10 @@ pub trait MultipartCollect: Sized {
     /// Handles one part in arrival order, storing processed values in `state`.
     ///
     /// Readers must debit `limits`; the extractor retains the remaining budget
-    /// for this field name. A dropped unread field is drained before the next part.
+    /// for this field name. To skip a part, pass it to
+    /// [`discard_field`](crate::form::discard_field), which drains it while
+    /// debiting `limits`. A dropped unread field is drained before the next part
+    /// without debiting any budget.
     ///
     /// # Errors
     ///
@@ -81,8 +84,9 @@ pub trait MultipartCollect: Sized {
 /// Only `multipart/form-data` is accepted; other multipart subtypes are rejected.
 /// Register [`MultipartFormConfig`] with `App::app_state` to change the default
 /// 50 MiB total and 2 MiB memory body-byte budgets and the 100-part limit.
-/// Ignored parts do not debit the byte budgets, but every part counts toward the
-/// part limit. Reader configuration is also obtained from request app state.
+/// Ignored unknown and duplicate parts debit the total byte budget but not the
+/// memory budget, and every part counts toward the part limit. Reader
+/// configuration is also obtained from request app state.
 ///
 /// # Errors
 ///
@@ -108,9 +112,10 @@ impl<T: MultipartCollect> MultipartForm<T> {
 /// Body-byte budgets and part limit for the [`struct@MultipartForm`] extractor.
 ///
 /// Register with `App::app_state`; absent configuration defaults to 50 MiB total,
-/// 2 MiB memory, and 100 parts. Built-in readers debit field-body bytes, not
-/// headers/framing or ignored parts. These are cumulative byte budgets, not bounds
-/// on actual parser buffering, allocator overhead, or deserialized values.
+/// 2 MiB memory, and 100 parts. Built-in readers debit field-body bytes, and
+/// ignored parts debit the total budget; headers and framing are not counted.
+/// These are cumulative byte budgets, not bounds on actual parser buffering,
+/// allocator overhead, or deserialized values.
 #[derive(Clone)]
 pub struct MultipartFormConfig {
     pub(crate) total_limit: usize,
@@ -132,8 +137,8 @@ impl MultipartFormConfig {
 
     /// Sets the cumulative processed field-body budget in bytes (default: 50 MiB).
     ///
-    /// Counts both in-memory and disk-backed readers. Multipart framing, headers,
-    /// and ignored fields do not count. A reader exceeding it returns
+    /// Counts in-memory, disk-backed, and ignored (drained) field bodies.
+    /// Multipart framing and headers do not count. Exceeding it returns
     /// [`MultipartError::Payload`] with `PayloadError::Overflow`.
     pub fn total_limit(mut self, total_limit: usize) -> Self {
         self.total_limit = total_limit;

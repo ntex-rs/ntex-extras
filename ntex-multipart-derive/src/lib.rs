@@ -78,8 +78,8 @@ struct ParsedField<'t> {
 ///   of the Rust identifier. Names must be unique after renaming.
 /// - `#[multipart(limit = "size")]` sets a body-byte budget parsed by [`bytesize`]
 ///   (for example, `"2 KiB"` or `"10 MiB"`). It is shared across all processed
-///   occurrences of that name, including vector entries and replaced scalar values.
-///   Ignored parts do not debit the budget. There is no field-specific limit by default.
+///   occurrences of that name, including vector entries, replaced scalar values,
+///   and ignored duplicates. There is no field-specific limit by default.
 ///
 /// Fields are also subject to [`MultipartFormConfig`] budgets (50 MiB total and
 /// 2 MiB in memory by default). Readers must enforce budgets; built-in readers
@@ -103,7 +103,7 @@ struct ParsedField<'t> {
 /// - `#[multipart(deny_unknown_fields)]` rejects unrecognized names with
 ///   `MultipartError::UnknownField`. Unknown parts are ignored by default.
 /// - `#[multipart(duplicate_field = "ignore")]` (default) keeps the first scalar
-///   value; later occurrences are ignored without invoking the reader.
+///   value; later occurrences are drained without invoking the reader.
 /// - `#[multipart(duplicate_field = "deny")]` rejects the second scalar occurrence
 ///   with `MultipartError::DuplicateField`, not `UnknownField`.
 /// - `#[multipart(duplicate_field = "replace")]` reads every scalar occurrence and
@@ -115,7 +115,10 @@ struct ParsedField<'t> {
 ///
 /// The duplicate policy is form-wide, not a field attribute. `Vec<T>` and
 /// `Option<Vec<T>>` always collect all occurrences, regardless of this policy.
-/// Ignored parts are drained by the multipart parser and still must be well-formed.
+/// Ignored unknown and duplicate parts are drained with
+/// `ntex_multipart::form::discard_field`: their body bytes debit the total budget
+/// and the field-name budget, but not the memory budget, and they must still be
+/// well-formed.
 ///
 /// ```
 /// use ntex_multipart::MultipartForm;
@@ -227,7 +230,7 @@ fn expand(input: syn::DeriveInput) -> proc_macro2::TokenStream {
             ::ntex_multipart::MultipartError::UnknownField(field.name().unwrap().to_string())
         ))
     } else {
-        quote!(::std::result::Result::Ok(()))
+        quote!(::ntex_multipart::form::discard_field(field, limits).await)
     };
 
     // Value for duplicate action
