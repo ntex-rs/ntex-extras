@@ -22,6 +22,15 @@ pub use ntex_multipart_derive::MultipartForm;
 /// Usually implemented with the `MultipartForm` derive macro, available with the
 /// `derive` feature. Implement it manually to customize field routing and assembly.
 pub trait MultipartCollect: Sized {
+    /// Returns an optional form-specific maximum number of parts.
+    ///
+    /// The extractor applies the lower of this value and
+    /// [`MultipartFormConfig::max_parts`]; a form cannot raise the configured limit.
+    /// The default implementation returns `None`, which uses the configured limit.
+    fn max_parts() -> Option<usize> {
+        None
+    }
+
     /// Returns an optional body-byte budget for a multipart field name.
     ///
     /// The budget is shared across all processed occurrences of that name, not
@@ -71,8 +80,9 @@ pub trait MultipartCollect: Sized {
 ///
 /// Only `multipart/form-data` is accepted; other multipart subtypes are rejected.
 /// Register [`MultipartFormConfig`] with `App::app_state` to change the default
-/// 50 MiB total and 2 MiB memory body-byte budgets. Ignored parts do not debit
-/// those budgets. Reader configuration is also obtained from request app state.
+/// 50 MiB total and 2 MiB memory body-byte budgets and the 100-part limit.
+/// Ignored parts do not debit the byte budgets, but every part counts toward the
+/// part limit. Reader configuration is also obtained from request app state.
 ///
 /// # Errors
 ///
@@ -81,6 +91,7 @@ pub trait MultipartCollect: Sized {
 /// [`MultipartError::DuplicateField`] according to their required fields and
 /// attributes. Exceeding a reader budget returns [`MultipartError::Payload`]
 /// containing [`PayloadError::Overflow`](ntex::http::error::PayloadError::Overflow).
+/// Exceeding the part limit returns [`MultipartError::TooManyParts`].
 #[derive(Deref, DerefMut)]
 pub struct MultipartForm<T: MultipartCollect>(
     /// The extracted typed form.
@@ -94,19 +105,31 @@ impl<T: MultipartCollect> MultipartForm<T> {
     }
 }
 
-/// Body-byte budgets for the [`struct@MultipartForm`] extractor.
+/// Body-byte budgets and part limit for the [`struct@MultipartForm`] extractor.
 ///
-/// Register with `App::app_state`; absent configuration defaults to 50 MiB total
-/// and 2 MiB memory. Built-in readers debit field-body bytes, not headers/framing
-/// or ignored parts. These are cumulative byte budgets, not bounds on actual
-/// parser buffering, allocator overhead, or deserialized values.
+/// Register with `App::app_state`; absent configuration defaults to 50 MiB total,
+/// 2 MiB memory, and 100 parts. Built-in readers debit field-body bytes, not
+/// headers/framing or ignored parts. These are cumulative byte budgets, not bounds
+/// on actual parser buffering, allocator overhead, or deserialized values.
 #[derive(Clone)]
 pub struct MultipartFormConfig {
     pub(crate) total_limit: usize,
     pub(crate) memory_limit: usize,
+    pub(crate) max_parts: usize,
 }
 
 impl MultipartFormConfig {
+    /// Sets the maximum number of parts accepted by each form (default: 100).
+    ///
+    /// Every part counts, including empty, unknown, and ignored duplicate parts.
+    /// A form's [`MultipartCollect::max_parts`] can lower this limit but not raise
+    /// it. Zero rejects every part. Exceeding the limit returns
+    /// [`MultipartError::TooManyParts`].
+    pub fn max_parts(mut self, max_parts: usize) -> Self {
+        self.max_parts = max_parts;
+        self
+    }
+
     /// Sets the cumulative processed field-body budget in bytes (default: 50 MiB).
     ///
     /// Counts both in-memory and disk-backed readers. Multipart framing, headers,
@@ -137,6 +160,7 @@ impl MultipartFormConfig {
 const DEFAULT_CONFIG: MultipartFormConfig = MultipartFormConfig {
     total_limit: 52_428_800, // 50 MiB
     memory_limit: 2_097_152, // 2 MiB
+    max_parts: 100,
 };
 
 impl Default for MultipartFormConfig {

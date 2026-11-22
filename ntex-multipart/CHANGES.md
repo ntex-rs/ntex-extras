@@ -1,5 +1,9 @@
 # Changes
 
+## [4.3.0] - 2026-11-22 (Unreleased)
+
+* Limit `MultipartForm` to 100 parts by default, counting empty, unknown, and ignored parts; add `MultipartFormConfig::max_parts`, `MultipartCollect::max_parts`, and `MultipartError::TooManyParts`
+
 ## [4.2.0] - 2026-11-06
 
 * Treat a bare `\r--boundary` inside field data as data; only CRLF starts a delimiter
