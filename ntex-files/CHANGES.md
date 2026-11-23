@@ -1,5 +1,17 @@
 # Changes
 
+## [4.7.0] - 2026-11-23
+
+* `Files` caches file metadata per worker for symlink-free regular files, enabled by default with 1024 entries for 1 second; add `Files::metadata_cache` to configure or disable it
+
+* The `Files` metadata cache keeps the formatted `ETag` and `Last-Modified` header values of each file version
+
+* `Files` resolves paths on unix without `canonicalize` when no path component is a symlink
+
+* Read file chunks on 64-bit unix with `pread` directly into the response buffer
+
+* Raise the default read mode threshold to 512 KiB
+
 ## [4.6.0] - 2026-11-17
 
 * `Files` and registered `NamedFile` services resolve paths and open files on the web worker instead of the blocking thread pool; add `Files::open_on_thread_pool` and `NamedFile::open_on_thread_pool` to restore the previous behavior
