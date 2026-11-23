@@ -2,7 +2,7 @@ use std::fs::{File, Metadata};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{error::Error, io, rc::Rc};
+use std::{error::Error, io, rc::Rc, sync::Arc};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -12,7 +12,7 @@ use futures::stream::TryStreamExt;
 use mime_guess::from_path;
 use ntex::error::Failure;
 use ntex::http::body::SizedStream;
-use ntex::http::header::ContentEncoding;
+use ntex::http::header::{ContentEncoding, HeaderValue};
 use ntex::http::{self, Method, StatusCode, error::BlockingError};
 use ntex::router::ResourceDef;
 use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
@@ -41,6 +41,9 @@ impl Default for Flags {
     }
 }
 
+/// Default [`NamedFile::read_mode_threshold`].
+pub(crate) const DEFAULT_READ_MODE_THRESHOLD: u64 = 512 * 1024;
+
 /// An opened file with a path used to select response headers.
 ///
 /// Return this type from a web handler or call [`Self::into_response`] to stream
@@ -63,6 +66,85 @@ pub struct NamedFile {
     /// Encoding of the file bytes, sent as `Content-Encoding` as is.
     pub(crate) precompressed: Option<ContentEncoding>,
     pub(crate) read_mode_threshold: u64,
+    /// Validators of `md` shared through the metadata cache, see [`Self::use_cached_validators`].
+    validators: Option<Arc<Validators>>,
+}
+
+/// The computed `ETag` and `Last-Modified` validators of a file version with their header values.
+#[derive(Debug)]
+pub(crate) struct Validators {
+    /// Inode, length, and modification time the validators are computed from.
+    ino: u64,
+    len: u64,
+    modified: Option<SystemTime>,
+    etag: Option<(header::EntityTag, HeaderValue)>,
+    last_modified: Option<(header::HttpDate, HeaderValue)>,
+}
+
+impl Validators {
+    /// Computes the selected validators of a file with metadata `md`.
+    fn new(modified: Option<SystemTime>, md: &Metadata, etag: bool, last_modified: bool) -> Self {
+        Validators {
+            ino: file_ino(md),
+            len: md.len(),
+            modified,
+            etag: default_etag(modified, md).filter(|_| etag).and_then(|tag| {
+                let value = HeaderValue::try_from(header::ETag(tag.clone()).to_string()).ok()?;
+                Some((tag, value))
+            }),
+            last_modified: http_date(modified)
+                .filter(|_| last_modified)
+                .and_then(|date| {
+                    let value =
+                        HeaderValue::try_from(header::LastModified(date).to_string()).ok()?;
+                    Some((date, value))
+                }),
+        }
+    }
+
+    /// Returns true if the validators are computed from a file with these attributes.
+    fn matches(&self, modified: Option<SystemTime>, md: &Metadata) -> bool {
+        self.modified == modified && self.len == md.len() && self.ino == file_ino(md)
+    }
+}
+
+/// Returns the inode number of a file, or 0 where it is not available.
+fn file_ino(md: &Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        md.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = md;
+        0
+    }
+}
+
+/// Returns the default strong `ETag` of a file, similar to Apache's.
+///
+/// A modification time before the UNIX epoch gets no `ETag`.
+fn default_etag(modified: Option<SystemTime>, md: &Metadata) -> Option<header::EntityTag> {
+    let dur = modified?.duration_since(UNIX_EPOCH).ok()?;
+    Some(header::EntityTag::strong(format!(
+        "{:x}:{:x}:{:x}:{:x}",
+        file_ino(md),
+        md.len(),
+        dur.as_secs(),
+        dur.subsec_nanos()
+    )))
+}
+
+/// Returns the `Last-Modified` date of a modification time.
+fn http_date(modified: Option<SystemTime>) -> Option<header::HttpDate> {
+    // `httpdate` can only represent times from 1970 up to the end of year
+    // 9999, and converting any other time into an `HttpDate` panics.
+    let mtime = modified?;
+    let dur = mtime.duration_since(UNIX_EPOCH).ok()?;
+    if dur.as_secs() >= 253_402_300_800 {
+        return None;
+    }
+    Some(mtime.into())
 }
 
 impl std::fmt::Debug for Flags {
@@ -118,62 +200,27 @@ impl NamedFile {
     /// ```
     pub fn from_file<P: AsRef<Path>>(file: File, path: P) -> io::Result<NamedFile> {
         let path = path.as_ref().to_path_buf();
-
-        // Get the name of the file and use it to construct default Content-Type
-        // and Content-Disposition values
-        let (content_type, content_disposition) = {
-            let filename = match path.file_name() {
-                Some(name) => name.to_string_lossy(),
-                None => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Provided path has no filename",
-                    ));
-                }
-            };
-
-            let ct = from_path(&path).first_or_octet_stream();
-            let disposition = match ct.type_() {
-                mime::IMAGE | mime::TEXT | mime::AUDIO | mime::VIDEO => {
-                    header::DispositionType::Inline
-                }
-                mime::APPLICATION => match ct.subtype() {
-                    mime::JAVASCRIPT | mime::JSON => header::DispositionType::Inline,
-                    name if name == "wasm" || name == "xhtml" => header::DispositionType::Inline,
-                    _ => header::DispositionType::Attachment,
-                },
-                _ => header::DispositionType::Attachment,
-            };
-
-            // replace special characters in filenames which could occur on some filesystems
-            let filename_s = filename
-                .replace('\n', "%0A") // \n line break
-                .replace('\x0B', "%0B") // \v vertical tab
-                .replace('\x0C', "%0C") // \f form feed
-                .replace('\r', "%0D"); // \r carriage return
-            let mut parameters = vec![header::DispositionParam::Filename(filename_s)];
-
-            if !filename.is_ascii() {
-                parameters.push(header::DispositionParam::FilenameExt(
-                    header::parsing::ExtendedValue {
-                        charset: header::Charset::Ext(String::from("UTF-8")),
-                        language_tag: None,
-                        value: filename.into_owned().into_bytes(),
-                    },
-                ))
-            }
-
-            let cd = header::ContentDisposition {
-                disposition,
-                parameters,
-            };
-            (ct, cd)
-        };
-
+        let (content_type, content_disposition) = content_type_and_disposition(&path)?;
         let md = file.metadata()?;
+        Ok(Self::from_parts(
+            path,
+            file,
+            md,
+            content_type,
+            content_disposition,
+        ))
+    }
+
+    /// Creates a response file from parts computed by [`Self::from_file`].
+    pub(crate) fn from_parts(
+        path: PathBuf,
+        file: File,
+        md: Metadata,
+        content_type: mime::Mime,
+        content_disposition: header::ContentDisposition,
+    ) -> NamedFile {
         let modified = md.modified().ok();
-        let encoding = None;
-        Ok(NamedFile {
+        NamedFile {
             path,
             file,
             content_type,
@@ -181,12 +228,30 @@ impl NamedFile {
             md,
             modified,
             etag: None,
-            encoding,
+            encoding: None,
             precompressed: None,
             status_code: StatusCode::OK,
             flags: Flags::default(),
-            read_mode_threshold: 0,
-        })
+            read_mode_threshold: DEFAULT_READ_MODE_THRESHOLD,
+            validators: None,
+        }
+    }
+
+    /// Serves the validators in `cache` if they are of this file version, or
+    /// computes them and stores them in `cache`.
+    pub(crate) fn use_cached_validators(&mut self, cache: &mut Option<Arc<Validators>>) {
+        if !cache
+            .as_ref()
+            .is_some_and(|v| v.matches(self.modified, &self.md))
+        {
+            *cache = Some(Arc::new(Validators::new(
+                self.modified,
+                &self.md,
+                true,
+                true,
+            )));
+        }
+        self.validators.clone_from(cache);
     }
 
     /// Opens `path` read-only and constructs a [`NamedFile`] with that path.
@@ -365,10 +430,11 @@ impl NamedFile {
     #[inline]
     /// Sets the body size below which file chunks are read on the web worker.
     ///
-    /// Defaults to `0`, so all reads run on the blocking thread pool. When the
-    /// response body, or the selected range, is smaller than `size` bytes, each
-    /// chunk is read on the current thread instead. This avoids a thread pool
-    /// round trip per chunk, but a slow or uncached read blocks the worker.
+    /// Defaults to 512 KiB. When the response body, or the selected range, is
+    /// smaller than `size` bytes, each chunk is read on the current thread;
+    /// larger bodies are read on the blocking thread pool. This avoids a thread
+    /// pool round trip per chunk, but a slow or uncached read blocks the worker.
+    /// Use `0` to run all reads on the blocking thread pool.
     pub fn read_mode_threshold(mut self, size: u64) -> Self {
         self.read_mode_threshold = size;
         self
@@ -430,45 +496,16 @@ impl NamedFile {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn etag(&self) -> Option<header::EntityTag> {
-        if let Some(ref etag) = self.etag {
-            return Some(etag.clone());
-        }
-
-        // This etag format is similar to Apache's.
-        // A modification time before the UNIX epoch gets no etag.
-        let dur = self.modified?.duration_since(UNIX_EPOCH).ok()?;
-        Some({
-            let ino = {
-                #[cfg(unix)]
-                {
-                    self.md.ino()
-                }
-                #[cfg(not(unix))]
-                {
-                    0
-                }
-            };
-
-            header::EntityTag::strong(format!(
-                "{:x}:{:x}:{:x}:{:x}",
-                ino,
-                self.md.len(),
-                dur.as_secs(),
-                dur.subsec_nanos()
-            ))
-        })
+        self.etag
+            .clone()
+            .or_else(|| default_etag(self.modified, &self.md))
     }
 
+    #[cfg(test)]
     pub(crate) fn last_modified(&self) -> Option<header::HttpDate> {
-        // `httpdate` can only represent times from 1970 up to the end of year
-        // 9999, and converting any other time into an `HttpDate` panics.
-        let mtime = self.modified?;
-        let dur = mtime.duration_since(UNIX_EPOCH).ok()?;
-        if dur.as_secs() >= 253_402_300_800 {
-            return None;
-        }
-        Some(mtime.into())
+        http_date(self.modified)
     }
 
     /// Builds a streaming response, evaluating `req` against the captured metadata.
@@ -528,15 +565,34 @@ impl NamedFile {
             return resp.streaming(reader);
         }
 
-        let etag = if self.flags.contains(Flags::ETAG) {
-            self.etag()
-        } else {
-            None
+        let computed;
+        let validators = match self.validators {
+            Some(ref validators) => &**validators,
+            None => {
+                computed = Validators::new(
+                    self.modified,
+                    &self.md,
+                    self.flags.contains(Flags::ETAG) && self.etag.is_none(),
+                    self.flags.contains(Flags::LAST_MD),
+                );
+                &computed
+            }
         };
-        let last_modified = if self.flags.contains(Flags::LAST_MD) {
-            self.last_modified()
+        // a custom tag is formatted for the response, a computed one is preformatted
+        let (etag, etag_value) = if !self.flags.contains(Flags::ETAG) {
+            (None, None)
+        } else if let Some(ref tag) = self.etag {
+            (Some(tag), None)
+        } else if let Some((ref tag, ref value)) = validators.etag {
+            (Some(tag), Some(value))
         } else {
-            None
+            (None, None)
+        };
+        let (last_modified, last_modified_value) = match validators.last_modified {
+            Some((date, ref value)) if self.flags.contains(Flags::LAST_MD) => {
+                (Some(date), Some(value))
+            }
+            _ => (None, None),
         };
 
         // conditional headers are ignored for methods that neither select nor
@@ -550,7 +606,7 @@ impl NamedFile {
         // check preconditions, in the order of RFC 9110 section 13.2.2
         let precondition_failed = if ignore_preconditions {
             false
-        } else if !any_match(etag.as_ref(), req) {
+        } else if !any_match(etag, req) {
             true
         } else if req.headers().contains_key(&http::header::IF_MATCH) {
             false
@@ -570,7 +626,7 @@ impl NamedFile {
         // check last modified
         let not_modified = if ignore_preconditions {
             false
-        } else if !none_match(etag.as_ref(), req) {
+        } else if !none_match(etag, req) {
             true
         } else if !is_get_or_head || req.headers().contains_key(&http::header::IF_NONE_MATCH) {
             false
@@ -588,7 +644,7 @@ impl NamedFile {
         };
 
         // check If-Range: a validator that does not match makes Range ignored
-        let range_allowed = if_range_matches(etag.as_ref(), last_modified, req);
+        let range_allowed = if_range_matches(etag, last_modified, req);
 
         let mut resp = HttpResponse::builder(self.status_code);
         if self.flags.contains(Flags::CONTENT_DISPOSITION) {
@@ -605,14 +661,13 @@ impl NamedFile {
         if let Some(enc) = self.precompressed {
             resp.header(http::header::CONTENT_ENCODING, enc.as_str());
         }
-        if let Some(lm) = last_modified {
-            resp.header(
-                http::header::LAST_MODIFIED,
-                header::LastModified(lm).to_string(),
-            );
+        if let Some(value) = last_modified_value {
+            resp.header(http::header::LAST_MODIFIED, value.clone());
         }
-        if let Some(etag) = etag {
-            resp.header(http::header::ETAG, header::ETag(etag).to_string());
+        if let Some(value) = etag_value {
+            resp.header(http::header::ETAG, value.clone());
+        } else if let Some(etag) = etag {
+            resp.header(http::header::ETAG, header::ETag(etag.clone()).to_string());
         }
 
         resp.header(http::header::CONTENT_TYPE, self.content_type_value());
@@ -683,6 +738,58 @@ impl NamedFile {
             }),
         ))
     }
+}
+
+/// Returns the default `Content-Type` and `Content-Disposition` for the file name of `path`.
+///
+/// See [`NamedFile::from_file`].
+pub(crate) fn content_type_and_disposition(
+    path: &Path,
+) -> io::Result<(mime::Mime, header::ContentDisposition)> {
+    let filename = match path.file_name() {
+        Some(name) => name.to_string_lossy(),
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Provided path has no filename",
+            ));
+        }
+    };
+
+    let ct = from_path(path).first_or_octet_stream();
+    let disposition = match ct.type_() {
+        mime::IMAGE | mime::TEXT | mime::AUDIO | mime::VIDEO => header::DispositionType::Inline,
+        mime::APPLICATION => match ct.subtype() {
+            mime::JAVASCRIPT | mime::JSON => header::DispositionType::Inline,
+            name if name == "wasm" || name == "xhtml" => header::DispositionType::Inline,
+            _ => header::DispositionType::Attachment,
+        },
+        _ => header::DispositionType::Attachment,
+    };
+
+    // replace special characters in filenames which could occur on some filesystems
+    let filename_s = filename
+        .replace('\n', "%0A") // \n line break
+        .replace('\x0B', "%0B") // \v vertical tab
+        .replace('\x0C', "%0C") // \f form feed
+        .replace('\r', "%0D"); // \r carriage return
+    let mut parameters = vec![header::DispositionParam::Filename(filename_s)];
+
+    if !filename.is_ascii() {
+        parameters.push(header::DispositionParam::FilenameExt(
+            header::parsing::ExtendedValue {
+                charset: header::Charset::Ext(String::from("UTF-8")),
+                language_tag: None,
+                value: filename.into_owned().into_bytes(),
+            },
+        ))
+    }
+
+    let cd = header::ContentDisposition {
+        disposition,
+        parameters,
+    };
+    Ok((ct, cd))
 }
 
 /// Returns the UTF-8 charset variant of a text content type.

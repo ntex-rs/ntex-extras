@@ -30,11 +30,12 @@
 //! `.`, and confines resolved paths to its base directory unless
 //! [`Files::follow_symlinks`] is enabled. See [`NamedFile::into_response`] for
 //! response headers and status codes.
-use std::fs::{DirEntry, File};
-use std::path::{Path, PathBuf};
-use std::{
-    cmp, fmt, fmt::Write, io, io::Read, io::Seek, pin::Pin, rc::Rc, task::Context, task::Poll,
-};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::fs::{DirEntry, File, Metadata};
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
+use std::{cmp, fmt, fmt::Write, io, pin::Pin, rc::Rc, sync::Arc, task::Context, task::Poll};
 
 use futures::{Future, Stream, future::FutureExt, future::LocalBoxFuture};
 use mime_guess::from_ext;
@@ -43,12 +44,14 @@ use ntex::http::header::{ACCEPT_ENCODING, ContentEncoding, HeaderMap, HeaderValu
 use ntex::http::{Method, Payload, RequestHead, error::BlockingError};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
+use ntex::time::Millis;
 use ntex::url::Url;
+use ntex::util::{Bytes, BytesMut};
 use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
 use ntex::web::error::{WebError, WebResponseError};
 use ntex::web::guard::Guard;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse, State, WebRequest, WebResponse};
-use ntex::{Ctx, IntoServiceFactory, Service, ServiceFactory, util::Bytes};
+use ntex::{Ctx, IntoServiceFactory, Service, ServiceFactory};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 mod error;
@@ -91,14 +94,89 @@ pub struct ChunkedReadFile {
     sync: bool,
 }
 
-fn read_chunk(mut file: File, offset: u64, max_bytes: usize) -> io::Result<(File, Bytes)> {
-    let mut buf = Vec::with_capacity(max_bytes);
-    file.seek(io::SeekFrom::Start(offset))?;
-    let nbytes = file.by_ref().take(max_bytes as u64).read_to_end(&mut buf)?;
-    if nbytes == 0 {
+/// Reads up to `max_bytes` at `offset`; fewer bytes are returned only at end of file.
+fn read_chunk(file: File, offset: u64, max_bytes: usize) -> io::Result<(File, Bytes)> {
+    let mut buf = BytesMut::with_capacity(max_bytes);
+    read_into(&file, &mut buf, offset, max_bytes)?;
+    if buf.is_empty() {
         return Err(io::ErrorKind::UnexpectedEof.into());
     }
-    Ok((file, Bytes::from(buf)))
+    Ok((file, buf.freeze()))
+}
+
+/// Appends up to `max_bytes` read at `offset` to the empty `buf`, reading into
+/// the spare capacity without initializing it first.
+#[cfg(all(unix, target_pointer_width = "64"))]
+fn read_into(file: &File, buf: &mut BytesMut, offset: u64, max_bytes: usize) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let mut w = buf.spare_writer(max_bytes);
+    while w.len() < max_bytes {
+        let filled = w.len();
+        let pos = libc::off_t::try_from(offset + filled as u64)
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let spare = &mut w.spare_capacity_mut()[..max_bytes - filled];
+        // SAFETY: `pread` writes at most `spare.len()` bytes into `spare`
+        let n = unsafe {
+            libc::pread(
+                file.as_raw_fd(),
+                spare.as_mut_ptr().cast(),
+                spare.len(),
+                pos,
+            )
+        };
+        match usize::try_from(n) {
+            Ok(0) => break,
+            // SAFETY: `pread` initialized the first `n` bytes of the spare capacity
+            Ok(n) => unsafe { w.advance(n) },
+            Err(_) => {
+                let e = io::Error::last_os_error();
+                if e.kind() != io::ErrorKind::Interrupted {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Appends up to `max_bytes` read at `offset` to the empty `buf`.
+#[cfg(not(all(unix, target_pointer_width = "64")))]
+fn read_into(file: &File, buf: &mut BytesMut, offset: u64, max_bytes: usize) -> io::Result<()> {
+    buf.resize(max_bytes, 0);
+    let mut nbytes = 0;
+    let res = loop {
+        if nbytes == max_bytes {
+            break Ok(());
+        }
+        match read_at(file, &mut buf[nbytes..], offset + nbytes as u64) {
+            Ok(0) => break Ok(()),
+            Ok(n) => nbytes += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => break Err(e),
+        }
+    };
+    buf.truncate(nbytes);
+    res
+}
+
+// 32-bit targets may have a 32-bit `off_t`, std picks the 64-bit `pread` variant
+#[cfg(all(unix, not(target_pointer_width = "64")))]
+fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buf, offset)
+}
+
+#[cfg(windows)]
+fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_at(mut file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::io::{Read, Seek};
+
+    file.seek(io::SeekFrom::Start(offset))?;
+    file.read(buf)
 }
 
 impl Stream for ChunkedReadFile {
@@ -316,6 +394,7 @@ type PathFilter = dyn Fn(&Path, &RequestHead) -> bool;
 pub struct Files<St: State, In> {
     path: String,
     directory: PathBuf,
+    canonical: bool,
     index: Option<String>,
     show_index: bool,
     redirect_to_slash: bool,
@@ -331,12 +410,14 @@ pub struct Files<St: State, In> {
     hidden_files: bool,
     try_compressed: bool,
     path_filter: Option<Rc<PathFilter>>,
+    cache: Option<Rc<MetaCache>>,
 }
 
 impl<St: State, In> Clone for Files<St, In> {
     fn clone(&self) -> Self {
         Self {
             directory: self.directory.clone(),
+            canonical: self.canonical,
             index: self.index.clone(),
             show_index: self.show_index,
             redirect_to_slash: self.redirect_to_slash,
@@ -353,6 +434,7 @@ impl<St: State, In> Clone for Files<St, In> {
             hidden_files: self.hidden_files,
             try_compressed: self.try_compressed,
             path_filter: self.path_filter.clone(),
+            cache: self.cache.clone(),
         }
     }
 }
@@ -363,25 +445,27 @@ impl<St: State, In: 'static> Files<St, In> {
     /// Canonicalizes `dir` immediately. If this fails, logs the error and retains
     /// the supplied path; later request resolution may still fail. Resolution,
     /// metadata access, and file opening for requests run on the web worker
-    /// unless [`Self::open_on_thread_pool`] is set. File reads run on the
-    /// blocking thread pool unless [`Self::read_mode_threshold`] is set.
-    /// Directory rendering runs on the web worker.
+    /// unless [`Self::open_on_thread_pool`] is set. Files smaller than
+    /// [`Self::read_mode_threshold`] are read on the web worker, larger files on
+    /// the blocking thread pool. Directory rendering runs on the web worker.
+    /// Resolved files are kept in a metadata cache, see [`Self::metadata_cache`].
     ///
     /// Request resolution failures use [`Self::default_handler`] when configured,
     /// or return `404 Not Found` with the default web error handler.
     pub fn new<T: Into<PathBuf>>(path: &str, dir: T) -> Self {
         let orig_dir = dir.into();
-        let dir = match orig_dir.canonicalize() {
-            Ok(canon_dir) => canon_dir,
+        let (dir, canonical) = match orig_dir.canonicalize() {
+            Ok(canon_dir) => (canon_dir, cfg!(unix)),
             Err(e) => {
                 log::error!("Cannot resolve static files directory {orig_dir:?}: {e}");
-                orig_dir
+                (orig_dir, false)
             }
         };
 
         Files {
             path: path.to_string(),
             directory: dir,
+            canonical,
             index: None,
             show_index: false,
             redirect_to_slash: false,
@@ -390,14 +474,39 @@ impl<St: State, In: 'static> Files<St, In> {
             renderer: Rc::new(directory_listing),
             mime_override: None,
             file_flags: named::Flags::default(),
-            read_mode_threshold: 0,
+            read_mode_threshold: named::DEFAULT_READ_MODE_THRESHOLD,
             guards: None,
             resource_guards: Vec::new(),
             follow_symlinks: false,
             hidden_files: false,
             try_compressed: false,
             path_filter: None,
+            cache: MetaCache::new(DEFAULT_CACHE_CAPACITY, DEFAULT_CACHE_TTL),
         }
+    }
+
+    /// Sets the capacity and entry lifetime of the metadata cache.
+    ///
+    /// Defaults to 1024 entries for 1 second; `0` for either value disables the
+    /// cache. Each worker caches, per request path, a file found below the base
+    /// without crossing a symlink and its precompressed siblings. A cached
+    /// path skips the per-component lookup: the file is opened without following
+    /// a final symlink and served only if it is still the cached file, compared
+    /// by device and inode; otherwise the path is resolved again. Length,
+    /// modification time, and contents always come from the opened file, so
+    /// files rewritten or replaced on disk are served with their new contents.
+    ///
+    /// Until an entry expires, a precompressed sibling created after the path
+    /// was cached is not served, a cached sibling is still served after the
+    /// original file is removed, and a cached file moved outside the base is
+    /// still served if a symlinked parent directory leads to it from its old path.
+    ///
+    /// The cache is used only on Unix with a canonicalized base and is bypassed
+    /// with [`Self::open_on_thread_pool`]. Directories and index files are not
+    /// cached. Clones of this service share the cache.
+    pub fn metadata_cache(mut self, capacity: usize, ttl: Millis) -> Self {
+        self.cache = MetaCache::new(capacity, ttl.into());
+        self
     }
 
     /// Allows resolved files and directories outside the base when `value` is `true`.
@@ -514,9 +623,9 @@ impl<St: State, In: 'static> Files<St, In> {
     #[inline]
     /// Sets the body size below which file chunks are read on the web worker.
     ///
-    /// Defaults to `0`, so all reads run on the blocking thread pool. See
-    /// [`NamedFile::read_mode_threshold`]. Path resolution and file opening are
-    /// controlled separately by [`Self::open_on_thread_pool`].
+    /// Defaults to 512 KiB. Use `0` to run all reads on the blocking thread pool.
+    /// See [`NamedFile::read_mode_threshold`]. Path resolution and file opening
+    /// are controlled separately by [`Self::open_on_thread_pool`].
     pub fn read_mode_threshold(mut self, size: u64) -> Self {
         self.read_mode_threshold = size;
         self
@@ -529,7 +638,8 @@ impl<St: State, In: 'static> Files<St, In> {
     /// sibling lookup, and file opening run on the web worker. This avoids a
     /// thread pool round trip per request, but a slow filesystem, such as a
     /// network mount or an uncached disk, blocks the worker. File reads are
-    /// controlled separately by [`Self::read_mode_threshold`].
+    /// controlled separately by [`Self::read_mode_threshold`]. The
+    /// [`Self::metadata_cache`] is not used when this is enabled.
     pub fn open_on_thread_pool(mut self, value: bool) -> Self {
         self.file_flags.set(named::Flags::POOL_OPEN, value);
         self
@@ -702,6 +812,7 @@ where
     async fn create(&self, cfg: &St) -> Result<Self::Service, Self::InitError> {
         let mut srv = FilesService {
             directory: self.directory.clone(),
+            canonical: self.canonical,
             index: self.index.clone(),
             show_index: self.show_index,
             redirect_to_slash: self.redirect_to_slash,
@@ -716,6 +827,11 @@ where
             hidden_files: self.hidden_files,
             try_compressed: self.try_compressed,
             path_filter: self.path_filter.clone(),
+            cache: if self.canonical && !self.file_flags.contains(named::Flags::POOL_OPEN) {
+                self.cache.clone()
+            } else {
+                None
+            },
         };
 
         if let Some(default) = self.default.as_ref() {
@@ -740,6 +856,7 @@ where
 /// Configure serving behavior through [`Files`] before creating this service.
 pub struct FilesService<St: State, In> {
     directory: PathBuf,
+    canonical: bool,
     index: Option<String>,
     show_index: bool,
     redirect_to_slash: bool,
@@ -754,6 +871,7 @@ pub struct FilesService<St: State, In> {
     hidden_files: bool,
     try_compressed: bool,
     path_filter: Option<Rc<PathFilter>>,
+    cache: Option<Rc<MetaCache>>,
 }
 
 impl<St: State, In> FilesService<St, In>
@@ -819,20 +937,24 @@ where
         } else {
             Vec::new()
         };
+        let opts = ResolveOpts {
+            canonical: self.canonical,
+            follow_symlinks: self.follow_symlinks,
+            hidden_files: self.hidden_files,
+        };
         let target = if self.file_flags.contains(named::Flags::POOL_OPEN) {
             let directory = self.directory.clone();
             let index = self.index.clone();
-            let follow_symlinks = self.follow_symlinks;
-            let hidden_files = self.hidden_files;
+            let path = real_path.0;
             let target = web::block(move || {
                 resolve(
                     &directory,
-                    real_path.0,
+                    &path,
                     index.as_deref(),
                     redirect,
-                    follow_symlinks,
-                    hidden_files,
+                    opts,
                     &encodings,
+                    None,
                 )
             })
             .await;
@@ -844,12 +966,12 @@ where
         } else {
             resolve(
                 &self.directory,
-                real_path.0,
+                &real_path.0,
                 self.index.as_deref(),
                 redirect,
-                self.follow_symlinks,
-                self.hidden_files,
+                opts,
                 &encodings,
+                self.cache.as_deref(),
             )
         };
 
@@ -911,6 +1033,16 @@ enum Target {
     Redirect,
 }
 
+/// Options for [`resolve`].
+#[derive(Clone, Copy)]
+struct ResolveOpts {
+    /// The base directory was canonicalized on Unix, so symlink-free paths below it
+    /// are canonical as they are.
+    canonical: bool,
+    follow_symlinks: bool,
+    hidden_files: bool,
+}
+
 /// Resolves a request path inside of `directory`.
 ///
 /// Runs on the web worker, or on the blocking thread pool when
@@ -921,39 +1053,67 @@ enum Target {
 /// component is reported as not found as well, unless `hidden_files` is set.
 /// A resolved file is replaced by the first contained precompressed sibling
 /// for `encodings`.
+///
+/// With a canonical base, a path is looked up one component at a time without
+/// canonicalization; it falls back to canonicalization when it crosses a symlink.
+/// The base itself is resolved once, so later changes to its ancestors are not
+/// checked, and names keep the request's case on case-insensitive filesystems.
+/// Regular files found this way are served from and added to `cache`.
 fn resolve(
     directory: &Path,
-    path: PathBuf,
+    path: &Path,
     index: Option<&str>,
     redirect: bool,
-    follow_symlinks: bool,
-    hidden_files: bool,
+    opts: ResolveOpts,
     encodings: &[ContentEncoding],
+    cache: Option<&MetaCache>,
 ) -> io::Result<Target> {
+    if let Some(cache) = cache
+        && let Some(file) = cache.get(path, encodings)
+    {
+        return Ok(Target::File(Box::new(file)));
+    }
+
     let contained = |path: PathBuf| -> io::Result<PathBuf> {
         let path = path.canonicalize()?;
         // Windows short names (`ENV~1`) hide the leading dot from the request path checks
-        if cfg!(windows) && !hidden_files && is_hidden(directory, &path) {
+        if cfg!(windows) && !opts.hidden_files && is_hidden(directory, &path) {
             return Err(io::ErrorKind::NotFound.into());
         }
-        if follow_symlinks || path.starts_with(directory) {
+        if opts.follow_symlinks || path.starts_with(directory) {
             Ok(path)
         } else {
             Err(io::ErrorKind::NotFound.into())
         }
     };
+    let lookup = |base: &Path, rel: &Path| {
+        if opts.canonical {
+            lookup_canonical(base, rel)
+        } else {
+            None
+        }
+    };
 
-    // `joined` is the requested path, `path` its canonical form
-    let open = |joined: PathBuf, path: PathBuf| -> io::Result<Target> {
+    // `path` is canonical, `joined` the requested path, or `None` when `path` is
+    // symlink-free below a canonical base and siblings need no canonicalization
+    let open = |path: PathBuf, joined: Option<PathBuf>| -> io::Result<Target> {
         for &enc in encodings {
-            let mut sibling = joined.clone().into_os_string();
+            let mut sibling = joined.as_ref().unwrap_or(&path).as_os_str().to_owned();
             sibling.push(compressed_suffix(enc));
-            let Ok(sibling) = contained(sibling.into()) else {
-                continue;
+            let sibling = PathBuf::from(sibling);
+            let regular = if joined.is_none() {
+                is_regular_file(&sibling)
+            } else {
+                None
             };
-            if !sibling.is_file() {
-                continue;
-            }
+            let sibling = match regular {
+                Some(true) => sibling,
+                Some(false) => continue,
+                None => match contained(sibling) {
+                    Ok(sibling) if sibling.is_file() => sibling,
+                    _ => continue,
+                },
+            };
             if let Ok(file) = File::open(&sibling) {
                 let mut file = NamedFile::from_file(file, &path)?;
                 file.precompressed = Some(enc);
@@ -963,20 +1123,78 @@ fn resolve(
         NamedFile::open(path).map(|file| Target::File(Box::new(file)))
     };
 
-    let joined = directory.join(path);
-    let path = contained(joined.clone())?;
-    if !path.is_dir() {
-        return open(joined, path);
+    let (path, joined, is_dir) = match lookup(directory, path) {
+        Some(found) => {
+            let (found, md) = found?;
+            if let Some(cache) = cache
+                && md.is_file()
+                && let Some(file) = cache.insert(path, &found, &md, encodings)
+            {
+                return Ok(Target::File(Box::new(file)));
+            }
+            (found, None, md.is_dir())
+        }
+        None => {
+            let joined = directory.join(path);
+            let path = contained(joined.clone())?;
+            let is_dir = path.is_dir();
+            (path, Some(joined), is_dir)
+        }
+    };
+    if !is_dir {
+        return open(path, joined);
     }
     if redirect {
         return Ok(Target::Redirect);
     }
     match index {
-        Some(index) => {
-            let joined = path.join(index);
-            open(joined.clone(), contained(joined)?)
-        }
+        // the directory is canonical in both cases
+        Some(index) => match lookup(&path, Path::new(index)) {
+            Some(found) => open(found?.0, None),
+            None => {
+                let joined = path.join(index);
+                open(contained(joined.clone())?, Some(joined))
+            }
+        },
         None => Ok(Target::Dir(path)),
+    }
+}
+
+/// Looks up `rel` below the canonical `base` with `lstat` on each component.
+///
+/// Returns the joined path, which is canonical, and the metadata of its last
+/// component, or of `base` when `rel` is empty. Returns `None` when `rel` has a
+/// component other than a name or crosses a symlink; the caller then canonicalizes.
+fn lookup_canonical(base: &Path, rel: &Path) -> Option<io::Result<(PathBuf, Metadata)>> {
+    let mut path = base.to_path_buf();
+    let mut md = None;
+    for component in rel.components() {
+        let Component::Normal(name) = component else {
+            return None;
+        };
+        path.push(name);
+        match path.symlink_metadata() {
+            Ok(m) if m.file_type().is_symlink() => return None,
+            Ok(m) => md = Some(m),
+            Err(e) => return Some(Err(e)),
+        }
+    }
+    let md = match md {
+        Some(md) => md,
+        None => match base.metadata() {
+            Ok(md) => md,
+            Err(e) => return Some(Err(e)),
+        },
+    };
+    Some(Ok((path, md)))
+}
+
+/// Reports whether `path` is a regular file, or `None` if it is a symlink.
+fn is_regular_file(path: &Path) -> Option<bool> {
+    match path.symlink_metadata() {
+        Ok(md) if md.file_type().is_symlink() => None,
+        Ok(md) => Some(md.is_file()),
+        Err(_) => Some(false),
     }
 }
 
@@ -993,6 +1211,203 @@ fn compressed_suffix(enc: ContentEncoding) -> &'static str {
         ContentEncoding::Br => ".br",
         ContentEncoding::Zstd => ".zst",
         _ => ".gz",
+    }
+}
+
+/// Index of the precompressed sibling for `enc` in [`CachedFile::siblings`].
+fn sibling_index(enc: ContentEncoding) -> usize {
+    match enc {
+        ContentEncoding::Br => 0,
+        ContentEncoding::Zstd => 1,
+        _ => 2,
+    }
+}
+
+/// Default capacity of the [`Files::metadata_cache`].
+const DEFAULT_CACHE_CAPACITY: usize = 1024;
+
+/// Default entry lifetime of the [`Files::metadata_cache`].
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(1);
+
+/// Device and inode of a file.
+type FileId = (u64, u64);
+
+#[cfg(unix)]
+fn file_id(md: &Metadata) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+
+    Some((md.dev(), md.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(_: &Metadata) -> Option<FileId> {
+    None
+}
+
+/// Opens `path` read-only, failing if its last component is a symlink.
+#[cfg(unix)]
+fn open_nofollow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_nofollow(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+/// Precompressed sibling of a [`CachedFile`].
+enum Sibling {
+    /// Not looked up yet.
+    Unknown,
+    /// Missing or not a regular file.
+    Absent,
+    /// A regular file with its last served validators.
+    Present(PathBuf, FileId, Option<Arc<named::Validators>>),
+    /// A symlink, which is left to [`resolve`].
+    Symlink,
+}
+
+/// A regular file found below a canonical base without crossing a symlink.
+struct CachedFile {
+    /// Canonical path of the file.
+    path: PathBuf,
+    id: FileId,
+    content_type: mime::Mime,
+    content_disposition: header::ContentDisposition,
+    /// Validators the file was last served with.
+    validators: Option<Arc<named::Validators>>,
+    /// Precompressed siblings by [`sibling_index`], looked up on first use.
+    siblings: [Sibling; 3],
+    expires: Instant,
+}
+
+impl CachedFile {
+    /// Opens the first precompressed sibling for `encodings`, or the file itself.
+    ///
+    /// Returns `None` if the opened file is not the cached one, or if the sibling
+    /// to serve is a symlink.
+    fn open(&mut self, encodings: &[ContentEncoding]) -> Option<NamedFile> {
+        let mut precompressed = None;
+        for &enc in encodings {
+            let sibling = &mut self.siblings[sibling_index(enc)];
+            if let Sibling::Unknown = sibling {
+                let mut path = self.path.as_os_str().to_owned();
+                path.push(compressed_suffix(enc));
+                let path = PathBuf::from(path);
+                *sibling = match path.symlink_metadata() {
+                    Ok(md) if md.file_type().is_symlink() => Sibling::Symlink,
+                    Ok(md) if md.is_file() => Sibling::Present(path, file_id(&md)?, None),
+                    _ => Sibling::Absent,
+                };
+            }
+            match sibling {
+                Sibling::Present(..) => {
+                    precompressed = Some(enc);
+                    break;
+                }
+                Sibling::Symlink => return None,
+                Sibling::Unknown | Sibling::Absent => {}
+            }
+        }
+
+        let (path, id, validators) =
+            match precompressed.map(|enc| &mut self.siblings[sibling_index(enc)]) {
+                Some(Sibling::Present(path, id, validators)) => (&*path, *id, validators),
+                _ => (&self.path, self.id, &mut self.validators),
+            };
+        let file = open_nofollow(path).ok()?;
+        let md = file.metadata().ok()?;
+        if file_id(&md)? != id {
+            return None;
+        }
+        let mut file = NamedFile::from_parts(
+            self.path.clone(),
+            file,
+            md,
+            self.content_type.clone(),
+            self.content_disposition.clone(),
+        );
+        file.precompressed = precompressed;
+        file.use_cached_validators(validators);
+        Some(file)
+    }
+}
+
+/// Per-worker cache of resolved files by request path, see [`Files::metadata_cache`].
+struct MetaCache {
+    capacity: usize,
+    ttl: Duration,
+    entries: RefCell<HashMap<PathBuf, CachedFile>>,
+    /// Earliest time to drop expired entries from a full cache.
+    next_sweep: Cell<Instant>,
+}
+
+impl MetaCache {
+    /// Returns `None` if the cache is disabled or unsupported.
+    fn new(capacity: usize, ttl: Duration) -> Option<Rc<Self>> {
+        (cfg!(unix) && capacity > 0 && !ttl.is_zero()).then(|| {
+            Rc::new(Self {
+                capacity,
+                ttl,
+                entries: RefCell::default(),
+                next_sweep: Cell::new(Instant::now()),
+            })
+        })
+    }
+
+    /// Opens the file cached for the request path `rel`.
+    ///
+    /// Drops the entry if it is expired or the file cannot be served from it.
+    fn get(&self, rel: &Path, encodings: &[ContentEncoding]) -> Option<NamedFile> {
+        let mut entries = self.entries.borrow_mut();
+        let entry = entries.get_mut(rel)?;
+        if entry.expires > ntex::time::now()
+            && let Some(file) = entry.open(encodings)
+        {
+            return Some(file);
+        }
+        entries.remove(rel);
+        None
+    }
+
+    /// Opens the regular file at the canonical `path` and caches it for the request path `rel`.
+    ///
+    /// `md` is the `lstat` metadata of `path`. The file is opened even if the
+    /// cache is full; `None` means it cannot be served from a cache entry.
+    fn insert(
+        &self,
+        rel: &Path,
+        path: &Path,
+        md: &Metadata,
+        encodings: &[ContentEncoding],
+    ) -> Option<NamedFile> {
+        let now = ntex::time::now();
+        let (content_type, content_disposition) = named::content_type_and_disposition(path).ok()?;
+        let mut entry = CachedFile {
+            path: path.to_path_buf(),
+            id: file_id(md)?,
+            content_type,
+            content_disposition,
+            validators: None,
+            siblings: [Sibling::Unknown, Sibling::Unknown, Sibling::Unknown],
+            expires: now + self.ttl,
+        };
+        let file = entry.open(encodings)?;
+
+        let mut entries = self.entries.borrow_mut();
+        if entries.len() >= self.capacity && now >= self.next_sweep.get() {
+            entries.retain(|_, entry| entry.expires > now);
+            self.next_sweep.set(now + self.ttl);
+        }
+        if entries.len() < self.capacity {
+            entries.insert(rel.to_path_buf(), entry);
+        }
+        Some(file)
     }
 }
 
@@ -3468,6 +3883,255 @@ mod tests {
             std::pin::pin!(st.call(TestRequest::with_uri("/Cargo.toml").to_srv_request()));
         assert!(fut.as_mut().poll(&mut cx).is_pending());
         assert_eq!(fut.await.unwrap().status(), StatusCode::OK);
+    }
+
+    /// Returns the number of entries in the metadata cache of `files`.
+    fn cached<St: State, In>(files: &Files<St, In>) -> usize {
+        files
+            .cache
+            .as_ref()
+            .map_or(0, |cache| cache.entries.borrow().len())
+    }
+
+    /// STATEMENT: A cached file is served with its current contents after it is rewritten
+    /// or replaced on disk, and is not served once it is removed or its path becomes a
+    /// symlink to it.
+    ///
+    /// HOW:
+    /// - Serve `a.txt` through a metadata cache and check one cached entry.
+    /// - Rewrite it in place with a longer body, then rename another file over it, and
+    ///   check each response returns the new bytes.
+    /// - Remove it and check `404 Not Found` and an empty cache.
+    /// - Recreate and serve it, move it outside of the base, put a symlink to it at its
+    ///   old path, and check `404 Not Found` instead of the cached file.
+    /// - Serve `sub/b.txt`, replace `sub` with a symlink to an outside directory with
+    ///   another `b.txt`, and check `404 Not Found` instead of the outside file.
+    #[cfg(unix)]
+    #[ntex::test]
+    async fn cached_files_follow_disk_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = root.path().join("a.txt");
+        fs::write(&path, "one").unwrap();
+        let files = Files::new("/", root.path()).metadata_cache(16, Millis(60_000));
+        let srv = test::init_service(App::new().service(files.clone())).await;
+        let req = || TestRequest::with_uri("/a.txt").to_request();
+
+        let resp = test::call_service(&srv, req()).await;
+        assert_eq!(test::read_body(resp).await, "one".as_bytes());
+        assert_eq!(cached(&files), 1);
+
+        fs::write(&path, "rewritten").unwrap();
+        let resp = test::call_service(&srv, req()).await;
+        assert_eq!(test::read_body(resp).await, "rewritten".as_bytes());
+
+        let tmp = root.path().join("a.tmp");
+        fs::write(&tmp, "replaced").unwrap();
+        fs::rename(&tmp, &path).unwrap();
+        let resp = test::call_service(&srv, req()).await;
+        assert_eq!(test::read_body(resp).await, "replaced".as_bytes());
+        assert_eq!(cached(&files), 1);
+
+        fs::remove_file(&path).unwrap();
+        let resp = test::call_service(&srv, req()).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(cached(&files), 0);
+
+        fs::write(&path, "moved").unwrap();
+        let resp = test::call_service(&srv, req()).await;
+        assert_eq!(test::read_body(resp).await, "moved".as_bytes());
+        let moved = outside.path().join("a.txt");
+        fs::rename(&path, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &path).unwrap();
+        let resp = test::call_service(&srv, req()).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        fs::create_dir(root.path().join("sub")).unwrap();
+        fs::write(root.path().join("sub/b.txt"), "inside").unwrap();
+        fs::write(outside.path().join("b.txt"), "outside").unwrap();
+        let req = || TestRequest::with_uri("/sub/b.txt").to_request();
+        let resp = test::call_service(&srv, req()).await;
+        assert_eq!(test::read_body(resp).await, "inside".as_bytes());
+        fs::rename(root.path().join("sub"), root.path().join("old")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("sub")).unwrap();
+        let resp = test::call_service(&srv, req()).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// STATEMENT: A cached file serves its precompressed siblings as they are on disk and
+    /// looks up a missing sibling again once the entry expires.
+    ///
+    /// HOW:
+    /// - Serve `app.js` with a `.br` sibling through a metadata cache with a 50 ms
+    ///   lifetime and check a `br` request gets the sibling.
+    /// - Remove the sibling and check the original is served without `Content-Encoding`.
+    /// - Create the sibling again, sleep past the lifetime, and check the new sibling
+    ///   is served with `Content-Encoding: br`.
+    #[cfg(unix)]
+    #[ntex::test]
+    async fn cached_files_follow_sibling_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let br = root.path().join("app.js.br");
+        fs::write(root.path().join("app.js"), "plain").unwrap();
+        fs::write(&br, "br-bytes").unwrap();
+        let files = Files::new("/", root.path())
+            .try_compressed()
+            .metadata_cache(16, Millis(50));
+        let srv = test::init_service(App::new().service(files.clone())).await;
+        let req = || {
+            TestRequest::with_uri("/app.js")
+                .header(http::header::ACCEPT_ENCODING, "br")
+                .to_request()
+        };
+        let encoding = |resp: &http::Response| {
+            resp.headers()
+                .get(http::header::CONTENT_ENCODING)
+                .map(|v| v.to_str().unwrap().to_owned())
+        };
+
+        let resp = test::call_service(&srv, req()).await;
+        assert_eq!(encoding(&resp).as_deref(), Some("br"));
+        assert_eq!(test::read_body(resp).await, "br-bytes".as_bytes());
+        assert_eq!(cached(&files), 1);
+
+        fs::remove_file(&br).unwrap();
+        let resp = test::call_service(&srv, req()).await;
+        assert_eq!(encoding(&resp), None);
+        assert_eq!(test::read_body(resp).await, "plain".as_bytes());
+
+        fs::write(&br, "new-br").unwrap();
+        ntex::time::sleep(Millis(100)).await;
+        let resp = test::call_service(&srv, req()).await;
+        assert_eq!(encoding(&resp).as_deref(), Some("br"));
+        assert_eq!(test::read_body(resp).await, "new-br".as_bytes());
+    }
+
+    /// STATEMENT: The metadata cache is enabled by default, holds at most its capacity,
+    /// and is not used for index files, paths through symlinks, or files opened on the
+    /// thread pool.
+    ///
+    /// HOW:
+    /// - With a capacity of 1, request two files and check both are served while one
+    ///   entry is cached.
+    /// - With the default cache, request a directory with an index file and the index
+    ///   file through a symlinked directory, and check both are served without an
+    ///   entry; then request a file and check it is cached.
+    /// - With `open_on_thread_pool(true)`, request a file and check it is served
+    ///   without an entry.
+    #[cfg(unix)]
+    #[ntex::test]
+    async fn metadata_cache_capacity_and_scope() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a.txt"), "a").unwrap();
+        fs::write(root.path().join("b.txt"), "b").unwrap();
+        fs::create_dir(root.path().join("dir")).unwrap();
+        fs::write(root.path().join("dir/index.html"), "index").unwrap();
+        std::os::unix::fs::symlink(root.path().join("dir"), root.path().join("link")).unwrap();
+        let check = async |files: &Files<_, _>, uri: &str, body: &str, entries: usize| {
+            let srv = test::init_service(App::new().service(files.clone())).await;
+            let resp = test::call_service(&srv, TestRequest::with_uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            assert_eq!(test::read_body(resp).await, body.as_bytes(), "{uri}");
+            assert_eq!(cached(files), entries, "{uri}");
+        };
+
+        let files = Files::new("/", root.path()).metadata_cache(1, Millis(60_000));
+        check(&files, "/a.txt", "a", 1).await;
+        check(&files, "/b.txt", "b", 1).await;
+
+        let files = Files::new("/", root.path()).index_file("index.html");
+        check(&files, "/dir/", "index", 0).await;
+        check(&files, "/link/index.html", "index", 0).await;
+        check(&files, "/a.txt", "a", 1).await;
+
+        let files = Files::new("/", root.path()).open_on_thread_pool(true);
+        check(&files, "/a.txt", "a", 0).await;
+    }
+
+    /// STATEMENT: Files served through the metadata cache send the same `ETag` and
+    /// `Last-Modified` values as freshly opened files, including after in-place changes
+    /// of the modification time or length, and precompressed siblings get their own.
+    ///
+    /// HOW:
+    /// - Serve `a.txt` with a `.br` sibling through a cache with a 60 s lifetime and
+    ///   compare both headers with values formatted from `NamedFile::open`.
+    /// - Change only the modification time, then only the length, and check after each
+    ///   change that the `ETag` changes and both headers match the fresh values.
+    /// - Check `If-None-Match` with the current tag returns `304 Not Modified`.
+    /// - Request the `.br` sibling and the original again, and check each matches its
+    ///   own fresh values.
+    #[cfg(unix)]
+    #[ntex::test]
+    async fn cached_files_send_current_validators() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("a.txt");
+        let br = root.path().join("a.txt.br");
+        fs::write(&br, "br-bytes").unwrap();
+        let set = |content: &str, secs: u64| {
+            fs::write(&path, content).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(secs))
+                .unwrap();
+        };
+        let fresh = |path: &Path| {
+            let file = NamedFile::open(path).unwrap();
+            (
+                header::ETag(file.etag().unwrap()).to_string(),
+                header::LastModified(file.last_modified().unwrap()).to_string(),
+            )
+        };
+        let files = Files::new("/", root.path())
+            .try_compressed()
+            .metadata_cache(16, Millis(60_000));
+        let srv = test::init_service(App::new().service(files.clone())).await;
+        let validators = async |encoding: Option<&str>| {
+            let mut req = TestRequest::with_uri("/a.txt");
+            if let Some(encoding) = encoding {
+                req = req.header(http::header::ACCEPT_ENCODING, encoding);
+            }
+            let resp = test::call_service(&srv, req.to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let value = |name| {
+                resp.headers()
+                    .get(name)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            };
+            (
+                value(http::header::ETAG),
+                value(http::header::LAST_MODIFIED),
+            )
+        };
+
+        set("one", 1_000_000_000);
+        let first = validators(None).await;
+        assert_eq!(first, fresh(&path));
+        assert_eq!(cached(&files), 1);
+
+        set("one", 1_000_000_100);
+        let touched = validators(None).await;
+        assert_ne!(touched.0, first.0);
+        assert_eq!(touched, fresh(&path));
+
+        set("longer", 1_000_000_100);
+        let resized = validators(None).await;
+        assert_ne!(resized.0, touched.0);
+        assert_eq!(resized, fresh(&path));
+        assert_eq!(cached(&files), 1);
+
+        let req = TestRequest::with_uri("/a.txt")
+            .header(http::header::IF_NONE_MATCH, resized.0.as_str())
+            .to_request();
+        let resp = test::call_service(&srv, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+
+        assert_eq!(validators(Some("br")).await, fresh(&br));
+        assert_eq!(validators(None).await, fresh(&path));
     }
 
     /// STATEMENT: Listings hide dot entries, escape ampersands, and mark visible directories with a slash.

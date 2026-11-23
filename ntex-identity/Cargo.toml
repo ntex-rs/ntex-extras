@@ -28,3 +28,6 @@ serde_json = { workspace = true }
 cookie = { workspace = true, features = ["private"] }
 time = { workspace = true, default-features = false, features = ["std"] }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }

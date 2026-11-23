@@ -1,6 +1,6 @@
 [package]
 name = "ntex-files"
-version = "4.6.0"
+version = "4.7.0"
 authors = ["ntex contributors <team@ntex.rs>"]
 description = "Static files support for ntex web."
 readme = "README.md"
@@ -34,6 +34,9 @@ thiserror = { workspace = true }
 v_htmlescape = { workspace = true }
 v_html5escape = { workspace = true }
 unicase = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 ntex = { workspace = true, features = ["openssl", "compress"] }
