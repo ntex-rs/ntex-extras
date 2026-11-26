@@ -21,7 +21,7 @@ ntex-session = { path = "ntex-session" }
 ntex = "4.10"
 ntex-http = "2.2"
 
-ntex-files = "4.7.0"
+ntex-files = "4.8.0"
 ntex-multipart = "4.3.0"
 ntex-multipart-derive = "4.3.0"
 
