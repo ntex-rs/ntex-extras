@@ -1,5 +1,9 @@
 # Changes
 
+## [4.8.0] - 2026-11-26
+
+* `Files` keeps the contents of small unchanged files in memory per worker, checked against the file's status on each request, enabled by default for files up to 128 KiB and 16 MiB in total; add `Files::content_cache` to configure or disable it
+
 ## [4.7.0] - 2026-11-23
 
 * `Files` caches file metadata per worker for symlink-free regular files, enabled by default with 1024 entries for 1 second; add `Files::metadata_cache` to configure or disable it

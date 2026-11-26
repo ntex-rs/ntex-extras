@@ -15,6 +15,7 @@ use ntex::http::body::SizedStream;
 use ntex::http::header::{ContentEncoding, HeaderValue};
 use ntex::http::{self, Method, StatusCode, error::BlockingError};
 use ntex::router::ResourceDef;
+use ntex::util::Bytes;
 use ntex::web::dev::{WebServiceConfig, WebServiceFactory};
 use ntex::web::error::{WebError, WebResponseError};
 use ntex::web::{self, BodyEncoding, HttpRequest, HttpResponse, Responder, State};
@@ -66,7 +67,7 @@ pub struct NamedFile {
     /// Encoding of the file bytes, sent as `Content-Encoding` as is.
     pub(crate) precompressed: Option<ContentEncoding>,
     pub(crate) read_mode_threshold: u64,
-    /// Validators of `md` shared through the metadata cache, see [`Self::use_cached_validators`].
+    /// Validators of `md` shared through the metadata cache, see [`Self::use_validators`].
     validators: Option<Arc<Validators>>,
 }
 
@@ -105,6 +106,18 @@ impl Validators {
     /// Returns true if the validators are computed from a file with these attributes.
     fn matches(&self, modified: Option<SystemTime>, md: &Metadata) -> bool {
         self.modified == modified && self.len == md.len() && self.ino == file_ino(md)
+    }
+
+    /// Returns the validators in `cache` if they are of the file version `md`, or
+    /// computes all of them and stores them in `cache`.
+    pub(crate) fn cached(cache: &mut Option<Arc<Validators>>, md: &Metadata) -> Arc<Validators> {
+        let modified = md.modified().ok();
+        match cache {
+            Some(v) if v.matches(modified, md) => v.clone(),
+            _ => cache
+                .insert(Arc::new(Validators::new(modified, md, true, true)))
+                .clone(),
+        }
     }
 }
 
@@ -237,21 +250,9 @@ impl NamedFile {
         }
     }
 
-    /// Serves the validators in `cache` if they are of this file version, or
-    /// computes them and stores them in `cache`.
-    pub(crate) fn use_cached_validators(&mut self, cache: &mut Option<Arc<Validators>>) {
-        if !cache
-            .as_ref()
-            .is_some_and(|v| v.matches(self.modified, &self.md))
-        {
-            *cache = Some(Arc::new(Validators::new(
-                self.modified,
-                &self.md,
-                true,
-                true,
-            )));
-        }
-        self.validators.clone_from(cache);
+    /// Serves `validators`, which must be computed from this file version.
+    pub(crate) fn use_validators(&mut self, validators: Arc<Validators>) {
+        self.validators = Some(validators);
     }
 
     /// Opens `path` read-only and constructs a [`NamedFile`] with that path.
@@ -487,15 +488,6 @@ impl NamedFile {
         self
     }
 
-    fn content_type_value(&self) -> String {
-        if self.flags.contains(Flags::PREFER_UTF8) {
-            utf8_text(&self.content_type)
-                .map_or_else(|| self.content_type.to_string(), String::from)
-        } else {
-            self.content_type.to_string()
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn etag(&self) -> Option<header::EntityTag> {
         self.etag
@@ -539,204 +531,264 @@ impl NamedFile {
     /// These responses have no file body. A non-OK configured status bypasses
     /// these checks; see [`Self::set_status_code`].
     pub fn into_response(self, req: &HttpRequest) -> HttpResponse {
-        if self.status_code != StatusCode::OK {
-            let mut resp = HttpResponse::builder(self.status_code);
-            if self.flags.contains(Flags::CONTENT_DISPOSITION) {
-                resp.header(
-                    http::header::CONTENT_DISPOSITION,
-                    self.content_disposition.to_string(),
-                );
-            }
-            if let Some(current_encoding) = self.encoding {
-                resp.encoding(current_encoding);
-            }
-            if let Some(enc) = self.precompressed {
-                resp.header(http::header::CONTENT_ENCODING, enc.as_str());
-            }
-            resp.header(http::header::CONTENT_TYPE, self.content_type_value());
-            let reader = ChunkedReadFile {
-                size: self.md.len(),
-                offset: 0,
-                file: Some(self.file),
-                fut: None,
-                counter: 0,
-                sync: self.md.len() < self.read_mode_threshold,
-            };
-            return resp.streaming(reader);
+        let repr = Repr {
+            md: &self.md,
+            modified: self.modified,
+            etag: self.etag.as_ref(),
+            flags: &self.flags,
+            status_code: self.status_code,
+            content_type: &self.content_type,
+            content_disposition: &self.content_disposition,
+            encoding: self.encoding,
+            precompressed: self.precompressed,
+            read_mode_threshold: self.read_mode_threshold,
+            validators: self.validators.as_deref(),
+        };
+        respond(&repr, Contents::File(self.file), req)
+    }
+}
+
+/// Body of a file response, see [`respond`].
+pub(crate) enum Contents {
+    /// An open file, read in chunks.
+    File(File),
+    /// The contents of the whole file.
+    Bytes(Bytes),
+}
+
+/// Response attributes of a file version, see [`NamedFile`].
+pub(crate) struct Repr<'a> {
+    pub(crate) md: &'a Metadata,
+    pub(crate) modified: Option<SystemTime>,
+    /// A tag set with [`NamedFile::set_etag`].
+    pub(crate) etag: Option<&'a header::EntityTag>,
+    pub(crate) flags: &'a Flags,
+    pub(crate) status_code: StatusCode,
+    pub(crate) content_type: &'a mime::Mime,
+    pub(crate) content_disposition: &'a header::ContentDisposition,
+    pub(crate) encoding: Option<ContentEncoding>,
+    pub(crate) precompressed: Option<ContentEncoding>,
+    pub(crate) read_mode_threshold: u64,
+    pub(crate) validators: Option<&'a Validators>,
+}
+
+impl Repr<'_> {
+    fn content_type_value(&self) -> String {
+        if self.flags.contains(Flags::PREFER_UTF8) {
+            utf8_text(self.content_type).map_or_else(|| self.content_type.to_string(), String::from)
+        } else {
+            self.content_type.to_string()
         }
+    }
+}
 
-        let computed;
-        let validators = match self.validators {
-            Some(ref validators) => &**validators,
-            None => {
-                computed = Validators::new(
-                    self.modified,
-                    &self.md,
-                    self.flags.contains(Flags::ETAG) && self.etag.is_none(),
-                    self.flags.contains(Flags::LAST_MD),
-                );
-                &computed
-            }
-        };
-        // a custom tag is formatted for the response, a computed one is preformatted
-        let (etag, etag_value) = if !self.flags.contains(Flags::ETAG) {
-            (None, None)
-        } else if let Some(ref tag) = self.etag {
-            (Some(tag), None)
-        } else if let Some((ref tag, ref value)) = validators.etag {
-            (Some(tag), Some(value))
-        } else {
-            (None, None)
-        };
-        let (last_modified, last_modified_value) = match validators.last_modified {
-            Some((date, ref value)) if self.flags.contains(Flags::LAST_MD) => {
-                (Some(date), Some(value))
-            }
-            _ => (None, None),
-        };
-
-        // conditional headers are ignored for methods that neither select nor
-        // modify a representation (RFC 9110 section 13.2.1)
-        let ignore_preconditions = matches!(
-            *req.method(),
-            Method::CONNECT | Method::OPTIONS | Method::TRACE
-        );
-        let is_get_or_head = matches!(*req.method(), Method::GET | Method::HEAD);
-
-        // check preconditions, in the order of RFC 9110 section 13.2.2
-        let precondition_failed = if ignore_preconditions {
-            false
-        } else if !any_match(etag, req) {
-            true
-        } else if req.headers().contains_key(&http::header::IF_MATCH) {
-            false
-        } else if let (Some(ref m), Some(header::IfUnmodifiedSince(ref since))) =
-            (last_modified, parse_field(req))
-        {
-            let t1: SystemTime = (*m).into();
-            let t2: SystemTime = (*since).into();
-            match (t1.duration_since(UNIX_EPOCH), t2.duration_since(UNIX_EPOCH)) {
-                (Ok(t1), Ok(t2)) => t1 > t2,
-                _ => false,
-            }
-        } else {
-            false
-        };
-
-        // check last modified
-        let not_modified = if ignore_preconditions {
-            false
-        } else if !none_match(etag, req) {
-            true
-        } else if !is_get_or_head || req.headers().contains_key(&http::header::IF_NONE_MATCH) {
-            false
-        } else if let (Some(ref m), Some(header::IfModifiedSince(ref since))) =
-            (last_modified, parse_field(req))
-        {
-            let t1: SystemTime = (*m).into();
-            let t2: SystemTime = (*since).into();
-            match (t1.duration_since(UNIX_EPOCH), t2.duration_since(UNIX_EPOCH)) {
-                (Ok(t1), Ok(t2)) => t1 <= t2,
-                _ => false,
-            }
-        } else {
-            false
-        };
-
-        // check If-Range: a validator that does not match makes Range ignored
-        let range_allowed = if_range_matches(etag, last_modified, req);
-
-        let mut resp = HttpResponse::builder(self.status_code);
-        if self.flags.contains(Flags::CONTENT_DISPOSITION) {
+/// Builds the response of [`NamedFile::into_response`] for `repr` with body `contents`.
+pub(crate) fn respond(repr: &Repr<'_>, contents: Contents, req: &HttpRequest) -> HttpResponse {
+    if repr.status_code != StatusCode::OK {
+        let mut resp = HttpResponse::builder(repr.status_code);
+        if repr.flags.contains(Flags::CONTENT_DISPOSITION) {
             resp.header(
                 http::header::CONTENT_DISPOSITION,
-                self.content_disposition.to_string(),
+                repr.content_disposition.to_string(),
             );
         }
-        // default compressing
-        if let Some(current_encoding) = self.encoding {
+        if let Some(current_encoding) = repr.encoding {
             resp.encoding(current_encoding);
         }
-        // an existing `Content-Encoding` header also stops the encoding middleware
-        if let Some(enc) = self.precompressed {
+        if let Some(enc) = repr.precompressed {
             resp.header(http::header::CONTENT_ENCODING, enc.as_str());
         }
-        if let Some(value) = last_modified_value {
-            resp.header(http::header::LAST_MODIFIED, value.clone());
-        }
-        if let Some(value) = etag_value {
-            resp.header(http::header::ETAG, value.clone());
-        } else if let Some(etag) = etag {
-            resp.header(http::header::ETAG, header::ETag(etag.clone()).to_string());
-        }
-
-        resp.header(http::header::CONTENT_TYPE, self.content_type_value());
-        resp.header(http::header::ACCEPT_RANGES, "bytes");
-
-        // a 412 or 304 response takes precedence over the range request
-        if precondition_failed || (not_modified && !is_get_or_head) {
-            return resp.status(StatusCode::PRECONDITION_FAILED).build();
-        } else if not_modified {
-            return resp.status(StatusCode::NOT_MODIFIED).build();
-        }
-
-        let mut length = self.md.len();
-        let mut offset = 0;
-
-        // range requests are defined only for GET, and a range unit
-        // other than "bytes" is ignored (RFC 9110 section 14.2)
-        let ranges = req.headers().get(&http::header::RANGE).filter(|ranges| {
-            *req.method() == Method::GET
-                && ranges
-                    .to_str()
-                    .ok()
-                    .and_then(|value| value.split_once('='))
-                    .is_none_or(|(unit, _)| unit.eq_ignore_ascii_case("bytes"))
-        });
-
-        // check for range header
-        if let Some(ranges) = ranges.filter(|_| range_allowed) {
-            if let Ok(rangesheader) = ranges.to_str() {
-                if let Some(range) = HttpRange::parse(rangesheader, length)
-                    .ok()
-                    .and_then(|ranges| ranges.first().copied())
-                {
-                    // A suffix range of an empty file selects zero bytes, which
-                    // a Content-Range cannot express, so the range is ignored.
-                    if range.length > 0 {
-                        length = range.length;
-                        offset = range.start;
-                        resp.status(StatusCode::PARTIAL_CONTENT);
-                        resp.encoding(ContentEncoding::Identity);
-                        resp.header(
-                            http::header::CONTENT_RANGE,
-                            format!("bytes {}-{}/{}", offset, offset + length - 1, self.md.len()),
-                        );
-                    }
-                } else {
-                    resp.header(http::header::CONTENT_RANGE, format!("bytes */{}", length));
-                    return resp.status(StatusCode::RANGE_NOT_SATISFIABLE).build();
-                };
-            } else {
-                return resp.status(StatusCode::BAD_REQUEST).build();
-            };
-        };
-
-        let reader = ChunkedReadFile {
-            offset,
-            size: length,
-            file: Some(self.file),
-            fut: None,
-            counter: 0,
-            sync: length < self.read_mode_threshold,
-        };
-        resp.body(SizedStream::new(
-            length,
-            reader.map_err(|e| {
-                let e: Rc<dyn Error> = Rc::new(e);
-                e
+        resp.header(http::header::CONTENT_TYPE, repr.content_type_value());
+        return match contents {
+            Contents::File(file) => resp.streaming(ChunkedReadFile {
+                size: repr.md.len(),
+                offset: 0,
+                file: Some(file),
+                fut: None,
+                counter: 0,
+                sync: repr.md.len() < repr.read_mode_threshold,
             }),
-        ))
+            Contents::Bytes(bytes) => resp.body(bytes),
+        };
+    }
+
+    let computed;
+    let validators = match repr.validators {
+        Some(validators) => validators,
+        None => {
+            computed = Validators::new(
+                repr.modified,
+                repr.md,
+                repr.flags.contains(Flags::ETAG) && repr.etag.is_none(),
+                repr.flags.contains(Flags::LAST_MD),
+            );
+            &computed
+        }
+    };
+    // a custom tag is formatted for the response, a computed one is preformatted
+    let (etag, etag_value) = if !repr.flags.contains(Flags::ETAG) {
+        (None, None)
+    } else if let Some(tag) = repr.etag {
+        (Some(tag), None)
+    } else if let Some((ref tag, ref value)) = validators.etag {
+        (Some(tag), Some(value))
+    } else {
+        (None, None)
+    };
+    let (last_modified, last_modified_value) = match validators.last_modified {
+        Some((date, ref value)) if repr.flags.contains(Flags::LAST_MD) => (Some(date), Some(value)),
+        _ => (None, None),
+    };
+
+    // conditional headers are ignored for methods that neither select nor
+    // modify a representation (RFC 9110 section 13.2.1)
+    let ignore_preconditions = matches!(
+        *req.method(),
+        Method::CONNECT | Method::OPTIONS | Method::TRACE
+    );
+    let is_get_or_head = matches!(*req.method(), Method::GET | Method::HEAD);
+
+    // check preconditions, in the order of RFC 9110 section 13.2.2
+    let precondition_failed = if ignore_preconditions {
+        false
+    } else if !any_match(etag, req) {
+        true
+    } else if req.headers().contains_key(&http::header::IF_MATCH) {
+        false
+    } else if let (Some(ref m), Some(header::IfUnmodifiedSince(ref since))) =
+        (last_modified, parse_field(req))
+    {
+        let t1: SystemTime = (*m).into();
+        let t2: SystemTime = (*since).into();
+        match (t1.duration_since(UNIX_EPOCH), t2.duration_since(UNIX_EPOCH)) {
+            (Ok(t1), Ok(t2)) => t1 > t2,
+            _ => false,
+        }
+    } else {
+        false
+    };
+
+    // check last modified
+    let not_modified = if ignore_preconditions {
+        false
+    } else if !none_match(etag, req) {
+        true
+    } else if !is_get_or_head || req.headers().contains_key(&http::header::IF_NONE_MATCH) {
+        false
+    } else if let (Some(ref m), Some(header::IfModifiedSince(ref since))) =
+        (last_modified, parse_field(req))
+    {
+        let t1: SystemTime = (*m).into();
+        let t2: SystemTime = (*since).into();
+        match (t1.duration_since(UNIX_EPOCH), t2.duration_since(UNIX_EPOCH)) {
+            (Ok(t1), Ok(t2)) => t1 <= t2,
+            _ => false,
+        }
+    } else {
+        false
+    };
+
+    // check If-Range: a validator that does not match makes Range ignored
+    let range_allowed = if_range_matches(etag, last_modified, req);
+
+    let mut resp = HttpResponse::builder(repr.status_code);
+    if repr.flags.contains(Flags::CONTENT_DISPOSITION) {
+        resp.header(
+            http::header::CONTENT_DISPOSITION,
+            repr.content_disposition.to_string(),
+        );
+    }
+    // default compressing
+    if let Some(current_encoding) = repr.encoding {
+        resp.encoding(current_encoding);
+    }
+    // an existing `Content-Encoding` header also stops the encoding middleware
+    if let Some(enc) = repr.precompressed {
+        resp.header(http::header::CONTENT_ENCODING, enc.as_str());
+    }
+    if let Some(value) = last_modified_value {
+        resp.header(http::header::LAST_MODIFIED, value.clone());
+    }
+    if let Some(value) = etag_value {
+        resp.header(http::header::ETAG, value.clone());
+    } else if let Some(etag) = etag {
+        resp.header(http::header::ETAG, header::ETag(etag.clone()).to_string());
+    }
+
+    resp.header(http::header::CONTENT_TYPE, repr.content_type_value());
+    resp.header(http::header::ACCEPT_RANGES, "bytes");
+
+    // a 412 or 304 response takes precedence over the range request
+    if precondition_failed || (not_modified && !is_get_or_head) {
+        return resp.status(StatusCode::PRECONDITION_FAILED).build();
+    } else if not_modified {
+        return resp.status(StatusCode::NOT_MODIFIED).build();
+    }
+
+    let mut length = repr.md.len();
+    let mut offset = 0;
+
+    // range requests are defined only for GET, and a range unit
+    // other than "bytes" is ignored (RFC 9110 section 14.2)
+    let ranges = req.headers().get(&http::header::RANGE).filter(|ranges| {
+        *req.method() == Method::GET
+            && ranges
+                .to_str()
+                .ok()
+                .and_then(|value| value.split_once('='))
+                .is_none_or(|(unit, _)| unit.eq_ignore_ascii_case("bytes"))
+    });
+
+    // check for range header
+    if let Some(ranges) = ranges.filter(|_| range_allowed) {
+        if let Ok(rangesheader) = ranges.to_str() {
+            if let Some(range) = HttpRange::parse(rangesheader, length)
+                .ok()
+                .and_then(|ranges| ranges.first().copied())
+            {
+                // A suffix range of an empty file selects zero bytes, which
+                // a Content-Range cannot express, so the range is ignored.
+                if range.length > 0 {
+                    length = range.length;
+                    offset = range.start;
+                    resp.status(StatusCode::PARTIAL_CONTENT);
+                    resp.encoding(ContentEncoding::Identity);
+                    resp.header(
+                        http::header::CONTENT_RANGE,
+                        format!("bytes {}-{}/{}", offset, offset + length - 1, repr.md.len()),
+                    );
+                }
+            } else {
+                resp.header(http::header::CONTENT_RANGE, format!("bytes */{}", length));
+                return resp.status(StatusCode::RANGE_NOT_SATISFIABLE).build();
+            };
+        } else {
+            return resp.status(StatusCode::BAD_REQUEST).build();
+        };
+    };
+
+    match contents {
+        Contents::File(file) => {
+            let reader = ChunkedReadFile {
+                offset,
+                size: length,
+                file: Some(file),
+                fut: None,
+                counter: 0,
+                sync: length < repr.read_mode_threshold,
+            };
+            resp.body(SizedStream::new(
+                length,
+                reader.map_err(|e| {
+                    let e: Rc<dyn Error> = Rc::new(e);
+                    e
+                }),
+            ))
+        }
+        // `length` and `offset` are within `repr.md.len()`, which is the length of `bytes`
+        Contents::Bytes(bytes) => {
+            resp.body(bytes.slice(offset as usize..(offset + length) as usize))
+        }
     }
 }
 

@@ -34,14 +34,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs::{DirEntry, File, Metadata};
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{cmp, fmt, fmt::Write, io, pin::Pin, rc::Rc, sync::Arc, task::Context, task::Poll};
 
 use futures::{Future, Stream, future::FutureExt, future::LocalBoxFuture};
 use mime_guess::from_ext;
 use ntex::error::{Failure, IntoFailure};
 use ntex::http::header::{ACCEPT_ENCODING, ContentEncoding, HeaderMap, HeaderValue, VARY};
-use ntex::http::{Method, Payload, RequestHead, error::BlockingError};
+use ntex::http::{Method, Payload, RequestHead, StatusCode, error::BlockingError};
 use ntex::router::{ResourceDef, ResourcePath};
 use ntex::service::boxed::{self, BoxService, BoxServiceFactory};
 use ntex::time::Millis;
@@ -411,6 +411,7 @@ pub struct Files<St: State, In> {
     try_compressed: bool,
     path_filter: Option<Rc<PathFilter>>,
     cache: Option<Rc<MetaCache>>,
+    content_limits: ContentLimits,
 }
 
 impl<St: State, In> Clone for Files<St, In> {
@@ -435,6 +436,7 @@ impl<St: State, In> Clone for Files<St, In> {
             try_compressed: self.try_compressed,
             path_filter: self.path_filter.clone(),
             cache: self.cache.clone(),
+            content_limits: self.content_limits,
         }
     }
 }
@@ -448,7 +450,8 @@ impl<St: State, In: 'static> Files<St, In> {
     /// unless [`Self::open_on_thread_pool`] is set. Files smaller than
     /// [`Self::read_mode_threshold`] are read on the web worker, larger files on
     /// the blocking thread pool. Directory rendering runs on the web worker.
-    /// Resolved files are kept in a metadata cache, see [`Self::metadata_cache`].
+    /// Resolved files are kept in a metadata cache, see [`Self::metadata_cache`],
+    /// and the contents of small files in a content cache, see [`Self::content_cache`].
     ///
     /// Request resolution failures use [`Self::default_handler`] when configured,
     /// or return `404 Not Found` with the default web error handler.
@@ -481,7 +484,12 @@ impl<St: State, In: 'static> Files<St, In> {
             hidden_files: false,
             try_compressed: false,
             path_filter: None,
-            cache: MetaCache::new(DEFAULT_CACHE_CAPACITY, DEFAULT_CACHE_TTL),
+            cache: MetaCache::new(
+                DEFAULT_CACHE_CAPACITY,
+                DEFAULT_CACHE_TTL,
+                ContentLimits::default(),
+            ),
+            content_limits: ContentLimits::default(),
         }
     }
 
@@ -493,8 +501,9 @@ impl<St: State, In: 'static> Files<St, In> {
     /// path skips the per-component lookup: the file is opened without following
     /// a final symlink and served only if it is still the cached file, compared
     /// by device and inode; otherwise the path is resolved again. Length,
-    /// modification time, and contents always come from the opened file, so
-    /// files rewritten or replaced on disk are served with their new contents.
+    /// modification time, and contents come from the opened file, or from the
+    /// [`Self::content_cache`] while the file is unchanged, so files rewritten or
+    /// replaced on disk are served with their new contents.
     ///
     /// Until an entry expires, a precompressed sibling created after the path
     /// was cached is not served, a cached sibling is still served after the
@@ -505,8 +514,47 @@ impl<St: State, In: 'static> Files<St, In> {
     /// with [`Self::open_on_thread_pool`]. Directories and index files are not
     /// cached. Clones of this service share the cache.
     pub fn metadata_cache(mut self, capacity: usize, ttl: Millis) -> Self {
-        self.cache = MetaCache::new(capacity, ttl.into());
+        self.cache = MetaCache::new(capacity, ttl.into(), self.content_limits);
         self
+    }
+
+    /// Sets the size limits of the content cache.
+    ///
+    /// Defaults to files of up to 128 KiB and 16 MiB in total per worker; `0` for
+    /// either value disables the cache. The contents are kept in the entries of
+    /// the [`Self::metadata_cache`], so the content cache is used only where that
+    /// cache is, and contents are dropped, and read again on a later request,
+    /// when their entry expires.
+    ///
+    /// A served file is cached if it is at most `max_file_size` bytes and smaller
+    /// than [`Self::read_mode_threshold`], its status last changed at least 2
+    /// seconds ago, and it fits into the remaining `max_total_size`; files that
+    /// do not fit are served from disk until earlier contents are dropped. A
+    /// request for a cached file reads the file's metadata without following a
+    /// final symlink, and is served from memory if device, inode, length,
+    /// modification time, and status change time are unchanged; otherwise the
+    /// file is opened as described for the metadata cache. Changes that leave
+    /// these attributes intact, for example on a filesystem with timestamps
+    /// coarser than 2 seconds, are not detected until the entry expires.
+    pub fn content_cache(mut self, max_file_size: usize, max_total_size: usize) -> Self {
+        self.content_limits.max_file = max_file_size as u64;
+        self.content_limits.max_total = max_total_size as u64;
+        self.rebuild_cache()
+    }
+
+    /// Recreates an enabled metadata cache with the current content limits.
+    fn rebuild_cache(mut self) -> Self {
+        if let Some(cache) = &self.cache {
+            self.cache = MetaCache::new(cache.capacity, cache.ttl, self.content_limits);
+        }
+        self
+    }
+
+    /// Sets the minimum time since the last status change of a cached file.
+    #[cfg(all(test, unix))]
+    fn content_min_age(mut self, min_age: Duration) -> Self {
+        self.content_limits.min_age = min_age;
+        self.rebuild_cache()
     }
 
     /// Allows resolved files and directories outside the base when `value` is `true`.
@@ -891,6 +939,50 @@ where
             Ok(req.error_response(ctx.st(), &FilesError::from(e)))
         }
     }
+
+    /// Builds the response for a file served from the content cache.
+    fn cached_response(&self, hit: Hit, req: &HttpRequest) -> HttpResponse {
+        let Hit {
+            md,
+            bytes,
+            precompressed,
+            validators,
+            headers,
+        } = hit;
+        let overridden;
+        let content_disposition = match self.mime_override {
+            Some(ref mime_override) => {
+                overridden = header::ContentDisposition {
+                    disposition: mime_override(&headers.content_type.type_()),
+                    parameters: headers.content_disposition.parameters.clone(),
+                };
+                &overridden
+            }
+            None => &headers.content_disposition,
+        };
+        let repr = named::Repr {
+            md: &md,
+            modified: md.modified().ok(),
+            etag: None,
+            flags: &self.file_flags,
+            status_code: StatusCode::OK,
+            content_type: &headers.content_type,
+            content_disposition,
+            encoding: None,
+            precompressed,
+            read_mode_threshold: self.read_mode_threshold,
+            validators: Some(&validators),
+        };
+        named::respond(&repr, named::Contents::Bytes(bytes), req)
+    }
+
+    /// Adds `Vary: accept-encoding` to file responses if precompressed files are served.
+    fn add_vary(&self, resp: &mut HttpResponse) {
+        if self.try_compressed {
+            resp.headers_mut()
+                .append(VARY, HeaderValue::from_static("accept-encoding"));
+        }
+    }
 }
 
 impl<St: State, In> Service<St, WebRequest<In>> for FilesService<St, In>
@@ -941,6 +1033,7 @@ where
             canonical: self.canonical,
             follow_symlinks: self.follow_symlinks,
             hidden_files: self.hidden_files,
+            read_mode_threshold: self.read_mode_threshold,
         };
         let target = if self.file_flags.contains(named::Flags::POOL_OPEN) {
             let directory = self.directory.clone();
@@ -986,10 +1079,13 @@ where
                 named_file.read_mode_threshold = self.read_mode_threshold;
                 let (req, _, _) = req.into_parts();
                 let mut resp = (*named_file).into_response(&req);
-                if self.try_compressed {
-                    resp.headers_mut()
-                        .append(VARY, HeaderValue::from_static("accept-encoding"));
-                }
+                self.add_vary(&mut resp);
+                Ok(WebResponse::new(resp, req))
+            }
+            Ok(Target::Cached(hit)) => {
+                let (req, _, _) = req.into_parts();
+                let mut resp = self.cached_response(*hit, &req);
+                self.add_vary(&mut resp);
                 Ok(WebResponse::new(resp, req))
             }
             Ok(Target::Redirect) => {
@@ -1029,6 +1125,8 @@ where
 /// Filesystem object a request path resolves to.
 enum Target {
     File(Box<NamedFile>),
+    /// A file served from the [`Files::content_cache`].
+    Cached(Box<Hit>),
     Dir(PathBuf),
     Redirect,
 }
@@ -1041,6 +1139,9 @@ struct ResolveOpts {
     canonical: bool,
     follow_symlinks: bool,
     hidden_files: bool,
+    /// Files are read on the web worker if they are smaller than this, see
+    /// [`Files::read_mode_threshold`].
+    read_mode_threshold: u64,
 }
 
 /// Resolves a request path inside of `directory`.
@@ -1069,9 +1170,9 @@ fn resolve(
     cache: Option<&MetaCache>,
 ) -> io::Result<Target> {
     if let Some(cache) = cache
-        && let Some(file) = cache.get(path, encodings)
+        && let Some(target) = cache.get(path, encodings, opts.read_mode_threshold)
     {
-        return Ok(Target::File(Box::new(file)));
+        return Ok(target);
     }
 
     let contained = |path: PathBuf| -> io::Result<PathBuf> {
@@ -1128,9 +1229,10 @@ fn resolve(
             let (found, md) = found?;
             if let Some(cache) = cache
                 && md.is_file()
-                && let Some(file) = cache.insert(path, &found, &md, encodings)
+                && let Some(target) =
+                    cache.insert(path, &found, &md, encodings, opts.read_mode_threshold)
             {
-                return Ok(Target::File(Box::new(file)));
+                return Ok(target);
             }
             (found, None, md.is_dir())
         }
@@ -1260,48 +1362,237 @@ fn open_nofollow(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
+/// Default per-file limit of the [`Files::content_cache`].
+const DEFAULT_CONTENT_MAX_FILE: u64 = 128 * 1024;
+
+/// Default per-worker limit of the [`Files::content_cache`].
+const DEFAULT_CONTENT_MAX_TOTAL: u64 = 16 * 1024 * 1024;
+
+/// Minimum time since the last status change of a file before its contents are
+/// cached, so that a later change cannot keep the cached timestamps.
+const DEFAULT_CONTENT_MIN_AGE: Duration = Duration::from_secs(2);
+
+/// Limits of the [`Files::content_cache`].
+#[derive(Clone, Copy)]
+struct ContentLimits {
+    max_file: u64,
+    max_total: u64,
+    min_age: Duration,
+}
+
+impl Default for ContentLimits {
+    fn default() -> Self {
+        ContentLimits {
+            max_file: DEFAULT_CONTENT_MAX_FILE,
+            max_total: DEFAULT_CONTENT_MAX_TOTAL,
+            min_age: DEFAULT_CONTENT_MIN_AGE,
+        }
+    }
+}
+
+/// Attributes that change when the contents of a file change.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Version {
+    id: FileId,
+    len: u64,
+    /// Modification time in seconds and nanoseconds.
+    mtime: (i64, i64),
+    /// Status change time in seconds and nanoseconds.
+    ctime: (i64, i64),
+}
+
+impl Version {
+    #[cfg(unix)]
+    fn of(md: &Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+
+        Some(Version {
+            id: (md.dev(), md.ino()),
+            len: md.len(),
+            mtime: (md.mtime(), md.mtime_nsec()),
+            ctime: (md.ctime(), md.ctime_nsec()),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn of(_: &Metadata) -> Option<Self> {
+        None
+    }
+
+    /// Returns true if the status last changed at least `min_age` before now.
+    fn settled(&self, min_age: Duration) -> bool {
+        let (secs, nsecs) = self.ctime;
+        let ctime = match (u64::try_from(secs), u32::try_from(nsecs)) {
+            (Ok(secs), Ok(nsecs)) => UNIX_EPOCH + Duration::new(secs, nsecs),
+            _ => UNIX_EPOCH,
+        };
+        SystemTime::now()
+            .duration_since(ctime)
+            .is_ok_and(|age| age >= min_age)
+    }
+}
+
+/// Contents of a cached file version, accounted in a [`ContentBudget`].
+struct Content {
+    bytes: Bytes,
+    version: Version,
+    budget: Rc<ContentBudget>,
+}
+
+impl Drop for Content {
+    fn drop(&mut self) {
+        let used = &self.budget.used;
+        used.set(used.get() - self.bytes.len() as u64);
+    }
+}
+
+/// Limits and the total size of the contents cached by a worker.
+struct ContentBudget {
+    limits: ContentLimits,
+    used: Cell<u64>,
+}
+
+impl ContentBudget {
+    /// Reads the contents of `file`, with the metadata `md`, if they may be cached.
+    fn read(self: &Rc<Self>, file: &File, md: &Metadata) -> Option<Content> {
+        let len = md.len();
+        let used = self.used.get();
+        if len > self.limits.max_file || len > self.limits.max_total - used {
+            return None;
+        }
+        let version = Version::of(md)?;
+        if !version.settled(self.limits.min_age) {
+            return None;
+        }
+        let size = usize::try_from(len).ok()?;
+        let mut buf = BytesMut::with_capacity(size);
+        read_into(file, &mut buf, 0, size).ok()?;
+        // the file was truncated after `md` was read
+        if buf.len() != size {
+            return None;
+        }
+        self.used.set(used + len);
+        Some(Content {
+            bytes: buf.freeze(),
+            version,
+            budget: self.clone(),
+        })
+    }
+}
+
+/// A file served from the [`Files::content_cache`].
+struct Hit {
+    /// `lstat` metadata of the file.
+    md: Metadata,
+    bytes: Bytes,
+    precompressed: Option<ContentEncoding>,
+    validators: Arc<named::Validators>,
+    headers: Arc<FileHeaders>,
+}
+
+/// Default `Content-Type` and `Content-Disposition` of a [`CachedFile`].
+struct FileHeaders {
+    content_type: mime::Mime,
+    content_disposition: header::ContentDisposition,
+}
+
+/// A cached regular file, either the requested one or a precompressed sibling.
+struct Variant {
+    /// Canonical path of the file.
+    path: PathBuf,
+    id: FileId,
+    /// Validators the file was last served with.
+    validators: Option<Arc<named::Validators>>,
+    content: Option<Box<Content>>,
+}
+
+impl Variant {
+    fn new(path: PathBuf, id: FileId) -> Self {
+        Variant {
+            path,
+            id,
+            validators: None,
+            content: None,
+        }
+    }
+
+    /// Returns the body and metadata of the file.
+    ///
+    /// The body is the cached content if the file is unchanged, otherwise the
+    /// opened file, or its content if it can be cached. Returns `None` if the
+    /// opened file is not the cached one.
+    fn open(
+        &mut self,
+        budget: Option<&Rc<ContentBudget>>,
+        read_mode_threshold: u64,
+    ) -> Option<(named::Contents, Metadata)> {
+        if let Some(content) = &self.content {
+            let md = self.path.symlink_metadata().ok()?;
+            if Version::of(&md) == Some(content.version) {
+                return Some((named::Contents::Bytes(content.bytes.clone()), md));
+            }
+            self.content = None;
+        }
+
+        let file = open_nofollow(&self.path).ok()?;
+        let md = file.metadata().ok()?;
+        if file_id(&md)? != self.id {
+            return None;
+        }
+        if let Some(budget) = budget
+            && md.len() < read_mode_threshold
+            && let Some(content) = budget.read(&file, &md)
+        {
+            let bytes = content.bytes.clone();
+            self.content = Some(Box::new(content));
+            return Some((named::Contents::Bytes(bytes), md));
+        }
+        Some((named::Contents::File(file), md))
+    }
+}
+
 /// Precompressed sibling of a [`CachedFile`].
 enum Sibling {
     /// Not looked up yet.
     Unknown,
     /// Missing or not a regular file.
     Absent,
-    /// A regular file with its last served validators.
-    Present(PathBuf, FileId, Option<Arc<named::Validators>>),
+    /// A regular file.
+    Present(Variant),
     /// A symlink, which is left to [`resolve`].
     Symlink,
 }
 
 /// A regular file found below a canonical base without crossing a symlink.
 struct CachedFile {
-    /// Canonical path of the file.
-    path: PathBuf,
-    id: FileId,
-    content_type: mime::Mime,
-    content_disposition: header::ContentDisposition,
-    /// Validators the file was last served with.
-    validators: Option<Arc<named::Validators>>,
+    file: Variant,
+    headers: Arc<FileHeaders>,
     /// Precompressed siblings by [`sibling_index`], looked up on first use.
     siblings: [Sibling; 3],
     expires: Instant,
 }
 
 impl CachedFile {
-    /// Opens the first precompressed sibling for `encodings`, or the file itself.
+    /// Serves the first precompressed sibling for `encodings`, or the file itself.
     ///
     /// Returns `None` if the opened file is not the cached one, or if the sibling
     /// to serve is a symlink.
-    fn open(&mut self, encodings: &[ContentEncoding]) -> Option<NamedFile> {
+    fn open(
+        &mut self,
+        encodings: &[ContentEncoding],
+        budget: Option<&Rc<ContentBudget>>,
+        read_mode_threshold: u64,
+    ) -> Option<Target> {
         let mut precompressed = None;
         for &enc in encodings {
             let sibling = &mut self.siblings[sibling_index(enc)];
             if let Sibling::Unknown = sibling {
-                let mut path = self.path.as_os_str().to_owned();
+                let mut path = self.file.path.as_os_str().to_owned();
                 path.push(compressed_suffix(enc));
                 let path = PathBuf::from(path);
                 *sibling = match path.symlink_metadata() {
                     Ok(md) if md.file_type().is_symlink() => Sibling::Symlink,
-                    Ok(md) if md.is_file() => Sibling::Present(path, file_id(&md)?, None),
+                    Ok(md) if md.is_file() => Sibling::Present(Variant::new(path, file_id(&md)?)),
                     _ => Sibling::Absent,
                 };
             }
@@ -1315,26 +1606,33 @@ impl CachedFile {
             }
         }
 
-        let (path, id, validators) =
-            match precompressed.map(|enc| &mut self.siblings[sibling_index(enc)]) {
-                Some(Sibling::Present(path, id, validators)) => (&*path, *id, validators),
-                _ => (&self.path, self.id, &mut self.validators),
-            };
-        let file = open_nofollow(path).ok()?;
-        let md = file.metadata().ok()?;
-        if file_id(&md)? != id {
-            return None;
+        let variant = match precompressed.map(|enc| &mut self.siblings[sibling_index(enc)]) {
+            Some(Sibling::Present(variant)) => variant,
+            _ => &mut self.file,
+        };
+        let (contents, md) = variant.open(budget, read_mode_threshold)?;
+        let validators = named::Validators::cached(&mut variant.validators, &md);
+        match contents {
+            named::Contents::Bytes(bytes) => Some(Target::Cached(Box::new(Hit {
+                md,
+                bytes,
+                precompressed,
+                validators,
+                headers: self.headers.clone(),
+            }))),
+            named::Contents::File(file) => {
+                let mut file = NamedFile::from_parts(
+                    self.file.path.clone(),
+                    file,
+                    md,
+                    self.headers.content_type.clone(),
+                    self.headers.content_disposition.clone(),
+                );
+                file.precompressed = precompressed;
+                file.use_validators(validators);
+                Some(Target::File(Box::new(file)))
+            }
         }
-        let mut file = NamedFile::from_parts(
-            self.path.clone(),
-            file,
-            md,
-            self.content_type.clone(),
-            self.content_disposition.clone(),
-        );
-        file.precompressed = precompressed;
-        file.use_cached_validators(validators);
-        Some(file)
     }
 }
 
@@ -1342,6 +1640,8 @@ impl CachedFile {
 struct MetaCache {
     capacity: usize,
     ttl: Duration,
+    /// `None` if the [`Files::content_cache`] is disabled.
+    content: Option<Rc<ContentBudget>>,
     entries: RefCell<HashMap<PathBuf, CachedFile>>,
     /// Earliest time to drop expired entries from a full cache.
     next_sweep: Cell<Instant>,
@@ -1349,35 +1649,47 @@ struct MetaCache {
 
 impl MetaCache {
     /// Returns `None` if the cache is disabled or unsupported.
-    fn new(capacity: usize, ttl: Duration) -> Option<Rc<Self>> {
+    fn new(capacity: usize, ttl: Duration, limits: ContentLimits) -> Option<Rc<Self>> {
         (cfg!(unix) && capacity > 0 && !ttl.is_zero()).then(|| {
+            let content = (limits.max_file > 0 && limits.max_total > 0).then(|| {
+                Rc::new(ContentBudget {
+                    limits,
+                    used: Cell::new(0),
+                })
+            });
             Rc::new(Self {
                 capacity,
                 ttl,
+                content,
                 entries: RefCell::default(),
                 next_sweep: Cell::new(Instant::now()),
             })
         })
     }
 
-    /// Opens the file cached for the request path `rel`.
+    /// Serves the file cached for the request path `rel`.
     ///
     /// Drops the entry if it is expired or the file cannot be served from it.
-    fn get(&self, rel: &Path, encodings: &[ContentEncoding]) -> Option<NamedFile> {
+    fn get(
+        &self,
+        rel: &Path,
+        encodings: &[ContentEncoding],
+        read_mode_threshold: u64,
+    ) -> Option<Target> {
         let mut entries = self.entries.borrow_mut();
         let entry = entries.get_mut(rel)?;
         if entry.expires > ntex::time::now()
-            && let Some(file) = entry.open(encodings)
+            && let Some(target) = entry.open(encodings, self.content.as_ref(), read_mode_threshold)
         {
-            return Some(file);
+            return Some(target);
         }
         entries.remove(rel);
         None
     }
 
-    /// Opens the regular file at the canonical `path` and caches it for the request path `rel`.
+    /// Serves the regular file at the canonical `path` and caches it for the request path `rel`.
     ///
-    /// `md` is the `lstat` metadata of `path`. The file is opened even if the
+    /// `md` is the `lstat` metadata of `path`. The file is served even if the
     /// cache is full; `None` means it cannot be served from a cache entry.
     fn insert(
         &self,
@@ -1385,19 +1697,20 @@ impl MetaCache {
         path: &Path,
         md: &Metadata,
         encodings: &[ContentEncoding],
-    ) -> Option<NamedFile> {
+        read_mode_threshold: u64,
+    ) -> Option<Target> {
         let now = ntex::time::now();
         let (content_type, content_disposition) = named::content_type_and_disposition(path).ok()?;
         let mut entry = CachedFile {
-            path: path.to_path_buf(),
-            id: file_id(md)?,
-            content_type,
-            content_disposition,
-            validators: None,
+            file: Variant::new(path.to_path_buf(), file_id(md)?),
+            headers: Arc::new(FileHeaders {
+                content_type,
+                content_disposition,
+            }),
             siblings: [Sibling::Unknown, Sibling::Unknown, Sibling::Unknown],
             expires: now + self.ttl,
         };
-        let file = entry.open(encodings)?;
+        let target = entry.open(encodings, self.content.as_ref(), read_mode_threshold)?;
 
         let mut entries = self.entries.borrow_mut();
         if entries.len() >= self.capacity && now >= self.next_sweep.get() {
@@ -1407,7 +1720,7 @@ impl MetaCache {
         if entries.len() < self.capacity {
             entries.insert(rel.to_path_buf(), entry);
         }
-        Some(file)
+        Some(target)
     }
 }
 
@@ -3886,6 +4199,7 @@ mod tests {
     }
 
     /// Returns the number of entries in the metadata cache of `files`.
+    #[cfg(unix)]
     fn cached<St: State, In>(files: &Files<St, In>) -> usize {
         files
             .cache
@@ -4132,6 +4446,232 @@ mod tests {
 
         assert_eq!(validators(Some("br")).await, fresh(&br));
         assert_eq!(validators(None).await, fresh(&path));
+    }
+
+    /// Returns true if the body of `resp` is held in memory instead of read from a file.
+    #[cfg(unix)]
+    fn in_memory(resp: &http::Response) -> bool {
+        use ntex::http::body::{Body, ResponseBody};
+
+        matches!(resp.body(), ResponseBody::Body(Body::Bytes(_)))
+    }
+
+    /// Returns the size of the contents in the content cache of `files`.
+    #[cfg(unix)]
+    fn content_used<St: State, In>(files: &Files<St, In>) -> u64 {
+        files
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.content.as_ref())
+            .map_or(0, |budget| budget.used.get())
+    }
+
+    /// STATEMENT: An unchanged small file is served from memory from its first request
+    /// on, with the same headers, ranges, and conditional responses as when it is read
+    /// from disk, and a precompressed sibling is cached separately.
+    ///
+    /// HOW:
+    /// - Serve `a.txt` with a `.br` sibling without a minimum age, twice, and check each
+    ///   body is in memory, only the file's size is accounted, and `ETag`,
+    ///   `Last-Modified`, `Content-Type`, `Content-Disposition`, and `Vary` equal those
+    ///   of a service without the content cache.
+    /// - Check `Range: bytes=1-3` returns `206 Partial Content` from memory with
+    ///   `Content-Range` and the selected bytes, and that `If-None-Match` with the tag
+    ///   returns `304 Not Modified`.
+    /// - Request the `br` sibling and check `Content-Encoding`, its bytes in memory, and
+    ///   that both sizes are accounted.
+    /// - With `mime_override`, check a body from memory gets the overridden disposition.
+    #[cfg(unix)]
+    #[ntex::test]
+    async fn content_cache_serves_unchanged_files_from_memory() {
+        use http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, ETAG, LAST_MODIFIED};
+
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a.txt"), "0123456789").unwrap();
+        fs::write(root.path().join("a.txt.br"), "br-bytes").unwrap();
+        let files = Files::new("/", root.path())
+            .try_compressed()
+            .content_min_age(Duration::ZERO);
+        let srv = test::init_service(App::new().service(files.clone())).await;
+        let disk = Files::new("/", root.path())
+            .try_compressed()
+            .content_cache(0, 0);
+        let disk = test::init_service(App::new().service(disk)).await;
+        let req = || TestRequest::with_uri("/a.txt");
+        let header = |resp: &http::Response, name| {
+            resp.headers()
+                .get(name)
+                .map(|v| v.to_str().unwrap().to_owned())
+        };
+
+        let mut etag = None;
+        for _ in 0..2 {
+            let resp = test::call_service(&srv, req().to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(in_memory(&resp));
+            assert_eq!(content_used(&files), 10);
+            let from_disk = test::call_service(&disk, req().to_request()).await;
+            assert!(!in_memory(&from_disk));
+            for name in [ETAG, LAST_MODIFIED, CONTENT_TYPE, CONTENT_DISPOSITION, VARY] {
+                assert_eq!(
+                    header(&resp, name.clone()),
+                    header(&from_disk, name.clone())
+                );
+            }
+            etag = header(&resp, ETAG);
+            assert_eq!(test::read_body(resp).await, "0123456789".as_bytes());
+        }
+
+        let resp = req().header(http::header::RANGE, "bytes=1-3").to_request();
+        let resp = test::call_service(&srv, resp).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            header(&resp, http::header::CONTENT_RANGE).as_deref(),
+            Some("bytes 1-3/10")
+        );
+        assert!(in_memory(&resp));
+        assert_eq!(test::read_body(resp).await, "123".as_bytes());
+
+        let resp = req().header(IF_NONE_MATCH, etag.unwrap()).to_request();
+        let resp = test::call_service(&srv, resp).await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+
+        let resp = req()
+            .header(http::header::ACCEPT_ENCODING, "br")
+            .to_request();
+        let resp = test::call_service(&srv, resp).await;
+        assert_eq!(
+            header(&resp, http::header::CONTENT_ENCODING).as_deref(),
+            Some("br")
+        );
+        assert!(in_memory(&resp));
+        assert_eq!(content_used(&files), 18);
+        assert_eq!(test::read_body(resp).await, "br-bytes".as_bytes());
+
+        let files = Files::new("/", root.path())
+            .content_min_age(Duration::ZERO)
+            .mime_override(|_| header::DispositionType::Attachment);
+        let srv = test::init_service(App::new().service(files)).await;
+        let resp = test::call_service(&srv, req().to_request()).await;
+        assert!(in_memory(&resp));
+        assert_eq!(
+            header(&resp, CONTENT_DISPOSITION).as_deref(),
+            Some("attachment; filename=\"a.txt\"")
+        );
+    }
+
+    /// STATEMENT: A file served from memory is served with its new bytes as soon as it is
+    /// rewritten in place, replaced by a rename, restored from a backup with its old
+    /// modification time, or removed, even when length and modification time stay equal.
+    ///
+    /// HOW:
+    /// - With a 50 ms minimum age, write `a.txt` with a fixed modification time, wait
+    ///   60 ms, and check it is served from memory.
+    /// - Rewrite it in place with bytes of the same length and modification time and
+    ///   check the next response has the new bytes; wait and check they are served
+    ///   from memory.
+    /// - Write a backup with the same bytes and modification time, rename a same-length
+    ///   file with that modification time over `a.txt`, and check the next response has
+    ///   its bytes; wait, check they are served from memory, rename the backup back,
+    ///   and check the next response has the backup's bytes.
+    /// - Remove the file and check `404 Not Found` with no content accounted.
+    #[cfg(unix)]
+    #[ntex::test]
+    async fn content_cache_follows_disk_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("a.txt");
+        let write = |path: &Path, content: &str| {
+            fs::write(path, content).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+                .unwrap();
+        };
+        let files = Files::new("/", root.path()).content_min_age(Duration::from_millis(50));
+        let srv = test::init_service(App::new().service(files.clone())).await;
+        // returns true if the body is in memory
+        let check = async |body: &str| {
+            let resp = test::call_service(&srv, TestRequest::with_uri("/a.txt").to_request()).await;
+            let in_memory = in_memory(&resp);
+            assert_eq!(test::read_body(resp).await, body.as_bytes());
+            in_memory
+        };
+        let settle = || ntex::time::sleep(Millis(60));
+
+        write(&path, "aaaa");
+        settle().await;
+        assert!(check("aaaa").await);
+
+        write(&path, "bbbb");
+        check("bbbb").await;
+        settle().await;
+        assert!(check("bbbb").await);
+
+        let backup = root.path().join("a.bak");
+        write(&backup, "bbbb");
+        let tmp = root.path().join("a.tmp");
+        write(&tmp, "cccc");
+        fs::rename(&tmp, &path).unwrap();
+        check("cccc").await;
+        settle().await;
+        assert!(check("cccc").await);
+        fs::rename(&backup, &path).unwrap();
+        check("bbbb").await;
+
+        fs::remove_file(&path).unwrap();
+        let resp = test::call_service(&srv, TestRequest::with_uri("/a.txt").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(content_used(&files), 0);
+    }
+
+    /// STATEMENT: The content cache holds only files within its per-file limit, below the
+    /// read mode threshold, within its total limit, and whose status changed at least
+    /// the minimum age ago, and a zero limit disables it.
+    ///
+    /// HOW:
+    /// - Without a minimum age and with limits of 4 bytes per file and 6 in total,
+    ///   request a 5-byte, a 3-byte, and a 4-byte file twice each, and check only the
+    ///   3-byte file is served from memory and accounted.
+    /// - With `read_mode_threshold(3)` and with `content_cache(0, 0)`, check the 3-byte
+    ///   file is read from disk.
+    /// - With the default 2 s minimum age, check the just written 3-byte file is read
+    ///   from disk.
+    #[cfg(unix)]
+    #[ntex::test]
+    async fn content_cache_limits() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a.txt"), "abc").unwrap();
+        fs::write(root.path().join("b.txt"), "defg").unwrap();
+        fs::write(root.path().join("c.txt"), "hijkl").unwrap();
+        let check = async |files: &Files<_, _>, uri: &str, memory: bool, used: u64| {
+            let srv = test::init_service(App::new().service(files.clone())).await;
+            for _ in 0..2 {
+                let resp = test::call_service(&srv, TestRequest::with_uri(uri).to_request()).await;
+                assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+                assert_eq!(in_memory(&resp), memory, "{uri}");
+            }
+            assert_eq!(content_used(files), used, "{uri}");
+        };
+
+        let files = Files::new("/", root.path())
+            .content_min_age(Duration::ZERO)
+            .content_cache(4, 6);
+        check(&files, "/c.txt", false, 0).await;
+        check(&files, "/a.txt", true, 3).await;
+        check(&files, "/b.txt", false, 3).await;
+
+        let files = Files::new("/", root.path())
+            .content_min_age(Duration::ZERO)
+            .read_mode_threshold(3);
+        check(&files, "/a.txt", false, 0).await;
+        let files = Files::new("/", root.path())
+            .content_min_age(Duration::ZERO)
+            .content_cache(0, 0);
+        check(&files, "/a.txt", false, 0).await;
+        let files = Files::new("/", root.path());
+        check(&files, "/a.txt", false, 0).await;
     }
 
     /// STATEMENT: Listings hide dot entries, escape ampersands, and mark visible directories with a slash.
